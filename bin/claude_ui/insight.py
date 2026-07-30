@@ -32,7 +32,7 @@ USAGE_CACHE = Path.home() / ".cache" / "claude-ui-usage.json"
 
 # Bump whenever the shape or meaning of the cached per-file data changes, so
 # stale entries are re-scanned instead of being mixed with the current format.
-CACHE_V = 3
+CACHE_V = 4
 
 def projects_dir():
     """Transcripts live under the resolved config dir, not always ~/.claude."""
@@ -74,6 +74,22 @@ def _tz_fingerprint():
 ROW_ZERO = [0, 0, 0, 0, 0, 0]
 R_IN, R_OUT, R_CW5M, R_CW1H, R_CR, R_MSGS = range(6)
 
+def _msg_key(entry, msg):
+    """Identity of the API response an entry belongs to, for de-duplication.
+
+    One assistant message spans several transcript lines — one per content block
+    — and every one of those lines repeats the whole message's `usage`. Summing
+    lines therefore multiplies a message's tokens by its block count (~2.4x in
+    practice). The same message can also appear in more than one file when a
+    session is forked. Keyed on message id + request id, matching ccusage, so
+    the two agree; entries too old to carry an id fall back to the line's own
+    uuid, which counts them once each rather than dropping them.
+    """
+    mid = msg.get("id")
+    if mid:
+        return str(mid) + "\t" + str(entry.get("requestId") or "")
+    return "uuid\t" + str(entry.get("uuid") or id(entry))
+
 MAX_TRANSCRIPT = 64 * 1024 * 1024
 
 # commands whose first sub-word is part of the identity (git status vs git push)
@@ -98,9 +114,9 @@ def _bash_prefix(cmd):
     return head
 
 def _scan_transcript(path):
-    """One transcript -> {counts, days, bash, cwd}."""
+    """One transcript -> {counts, msgs, bash, cwd}."""
     counts = {}   # "kind\tname" -> [count, last_iso_ts]
-    days = {}     # local "YYYY-MM-DD" -> {model: ROW}
+    msgs = {}     # dedup key -> [local day, model, in, out, cacheW5m, cacheW1h, cacheR]
     bash = {}     # prefix -> count
     cwd = ""
 
@@ -137,7 +153,6 @@ def _scan_transcript(path):
                 msg = d.get("message") or {}
                 usage = msg.get("usage")
                 if isinstance(usage, dict) and msg.get("model"):
-                    day = _local_day(ts) or "unknown"
                     # cache_creation splits the write total by TTL, which matters
                     # because a 1-hour write costs 2x base and a 5-minute one
                     # 1.25x. Transcripts predating the split had only 5m writes.
@@ -146,13 +161,15 @@ def _scan_transcript(path):
                     w1h = int((cc.get("ephemeral_1h_input_tokens") or 0)
                               if isinstance(cc, dict) else 0)
                     w1h = max(0, min(w1h, cw))
-                    row = [int(usage.get("input_tokens") or 0),
-                           int(usage.get("output_tokens") or 0),
-                           cw - w1h, w1h,
-                           int(usage.get("cache_read_input_tokens") or 0), 1]
-                    slot = days.setdefault(day, {}).setdefault(msg["model"], ROW_ZERO[:])
-                    for i, v in enumerate(row):
-                        slot[i] += v
+                    # setdefault, not assignment: repeated lines for one message
+                    # carry identical usage but drift by milliseconds, so keeping
+                    # the first fixes the day bucket regardless of read order.
+                    msgs.setdefault(_msg_key(d, msg), [
+                        _local_day(ts) or "unknown", msg["model"],
+                        int(usage.get("input_tokens") or 0),
+                        int(usage.get("output_tokens") or 0),
+                        cw - w1h, w1h,
+                        int(usage.get("cache_read_input_tokens") or 0)])
                 content = msg.get("content")
                 for text in texts(content):
                     for m in CMD_RE.finditer(text):
@@ -170,8 +187,8 @@ def _scan_transcript(path):
                         if p:
                             bash[p] = bash.get(p, 0) + 1
     except OSError:
-        return {"counts": {}, "days": {}, "bash": {}, "cwd": ""}
-    return {"counts": counts, "days": days, "bash": bash, "cwd": cwd}
+        return {"counts": {}, "msgs": {}, "bash": {}, "cwd": ""}
+    return {"counts": counts, "msgs": msgs, "bash": bash, "cwd": cwd}
 
 def transcript_stats(rescan=False):
     """Aggregate usage/cost/bash data across all transcripts, incrementally
@@ -217,26 +234,29 @@ def transcript_stats(rescan=False):
     days = {}
     bash = {}
     projects = {}
-    for f in files.values():
-        data = f.get("data") or {}
+    seen_msgs = set()
+    for key in sorted(files):   # sorted so a cross-file duplicate resolves the same way every run
+        data = files[key].get("data") or {}
         for k, (n, ts) in (data.get("counts") or {}).items():
             kind, _, name = k.partition("\t")
             slot = by.setdefault(kind, {}).setdefault(name, {"count": 0, "last": ""})
             slot["count"] += n
             slot["last"] = max(slot["last"], ts)
-        # A transcript belongs to one project, so its day rows feed both the
-        # global daily series and that project's own — no second aggregate to
-        # keep in sync, and per-project cost can be priced per day too.
+        # A transcript belongs to one project, so each message feeds both the
+        # global daily series and that project's own — one pass, no second
+        # aggregate to keep in sync, and per-project cost priced per day too.
         cwd = data.get("cwd") or "(unknown)"
         pdays = projects.setdefault(cwd, {})
-        for day, mrows in (data.get("days") or {}).items():
-            dslot = days.setdefault(day, {})
-            pslot = pdays.setdefault(day, {})
-            for model, row in mrows.items():
-                for agg in (dslot, pslot):
-                    s = agg.setdefault(model, ROW_ZERO[:])
-                    for i, v in enumerate(row):
-                        s[i] += v
+        for mkey, e in (data.get("msgs") or {}).items():
+            if mkey in seen_msgs:   # same message already counted from another file
+                continue
+            seen_msgs.add(mkey)
+            day, model = e[0], e[1]
+            for agg in (days.setdefault(day, {}), pdays.setdefault(day, {})):
+                s = agg.setdefault(model, ROW_ZERO[:])
+                for i, v in enumerate(e[2:]):
+                    s[i] += v
+                s[R_MSGS] += 1
         for prefix, n in (data.get("bash") or {}).items():
             bash[prefix] = bash.get(prefix, 0) + n
     return {"sessions": len(files), "scanned_now": scanned, "by": by,
