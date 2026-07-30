@@ -1862,8 +1862,10 @@ async function renderCosts(rescan) {
   head.innerHTML =
     "estimated API-price cost of your Claude Code usage, computed locally from " +
     "the transcripts in <b>" + esc(c.dir) + "</b> (input/output/cache tokens × " +
-    "list prices; cache writes at 1.25×, cache reads at 0.1×). On a Pro/Max " +
-    "subscription this shows what the same usage <i>would</i> cost via the API.";
+    "list prices for the day they were used; cache writes at 2× base for the " +
+    "1-hour TTL and 1.25× for the 5-minute one, cache reads at 0.1×). Days are " +
+    "your local days. On a Pro/Max subscription this shows what the same usage " +
+    "<i>would</i> cost via the API.";
   el.appendChild(head);
   if (!c.available || !c.sessions) {
     el.innerHTML += '<div class="empty">no transcripts found — cost data appears once Claude Code has recorded sessions on this machine</div>';
