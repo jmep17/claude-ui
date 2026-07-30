@@ -145,15 +145,86 @@ function modal({ title, text, fields = [], ok = "OK", danger = false }) {
 const mconfirm = (title, text, ok) =>
   modal({ title, text, ok: ok || "confirm", danger: true }).then((r) => r !== null);
 
-// ------------------------------------------------------------ filterable select
-// Long option lists (hook events, docs-augmented enums, templates) are painful
-// to scan in a native dropdown, so any select past FSEL_MIN options is upgraded:
-// a trigger button plus a popup with a filter box over the options, matched with
-// the same fuzzy() the command palette uses. The <select> stays in the DOM as the
-// value holder — callers keep reading .value, listening for change, and assigning
-// .value programmatically — so only the node they lay out changes. Populate the
-// select fully, then hand it to filterSelect() and append what comes back.
+// ----------------------------------------------------------- filterable pickers
+// Long value lists — hook events, docs-augmented enums, the 300-odd env var
+// names — are painful in a native dropdown or datalist, so anything past
+// FSEL_MIN values gets a filter: a popup list narrowed as you type with the same
+// fuzzy() the command palette uses. Two flavours share it. filterSelect() takes
+// a populated <select> and returns the node to lay out; the select stays in the
+// DOM as the value holder, so callers keep reading .value, listening for change,
+// and assigning .value programmatically. filterInput() does the same for a
+// free-text input with suggestions, standing in for its <datalist> — typed text
+// still wins, the list is only a shortcut. Shorter lists keep the native control.
 const FSEL_MIN = 6;
+
+// The popup itself: items are {value, text}, value() reports what is currently
+// set (marked in the list), own adds a filter box for owners that have nowhere
+// else to type. Returns a controller the owner drives from its key handling.
+function filterPopup(wrap, { items, value, own, onPick }) {
+  const pop = document.createElement("div");
+  pop.className = "fselpop";
+  const list = document.createElement("div");
+  list.className = "fsellist";
+  let hits = items;
+  // a select always keeps a row highlighted; an input starts with none, so a
+  // plain Enter commits what was typed instead of the first suggestion
+  let cur = own ? Math.max(0, items.findIndex((o) => o.value === value())) : -1;
+
+  const draw = () => {
+    list.innerHTML = "";
+    if (!hits.length) {
+      list.innerHTML = '<div class="fselempty">no matches</div>';
+      return;
+    }
+    hits.forEach((o, i) => {
+      const row = document.createElement("div");
+      row.className = "fselrow" + (i === cur ? " sel" : "")
+        + (o.value === value() ? " on" : "");
+      row.textContent = o.text;
+      row.onmousedown = (e) => { e.preventDefault(); onPick(o); };
+      list.appendChild(row);
+      if (i === cur) setTimeout(() => row.scrollIntoView({ block: "nearest" }));
+    });
+  };
+
+  const ctl = {
+    filter(s) {
+      s = s.trim().toLowerCase();
+      hits = s ? items.filter((o) => fuzzy(s, o.text + " " + o.value) >= 0) : items;
+      cur = own ? 0 : -1;
+      draw();
+    },
+    move(d) {
+      cur = Math.max(own ? 0 : -1, Math.min(cur + d, hits.length - 1));
+      draw();
+    },
+    take() {
+      const o = hits[cur];
+      if (o) onPick(o);
+      return !!o;
+    },
+    close: () => pop.remove(),
+  };
+
+  if (own) {
+    const q = document.createElement("input");
+    q.type = "text";
+    q.className = "fselq";
+    q.placeholder = "filter…";
+    q.oninput = () => ctl.filter(q.value);
+    pop.appendChild(q);
+    setTimeout(() => q.focus());
+  }
+  draw();
+  pop.appendChild(list);
+  wrap.appendChild(pop);
+  // hang the popup off the right edge instead when it would run off-screen
+  if (pop.getBoundingClientRect().right > innerWidth - 8) {
+    pop.style.left = "auto";
+    pop.style.right = "0";
+  }
+  return ctl;
+}
 
 function filterSelect(sel) {
   if (sel.options.length <= FSEL_MIN) return sel;
@@ -181,11 +252,11 @@ function filterSelect(sel) {
   };
   sync();
 
-  let pop = null, opts = [], hits = [], cur = 0, draw = () => {};
+  let pop = null;
 
   const close = () => {
     if (!pop) return;
-    pop.remove();
+    pop.close();
     pop = null;
     removeEventListener("keydown", onkey, true);
     removeEventListener("mousedown", onout, true);
@@ -193,7 +264,6 @@ function filterSelect(sel) {
   };
 
   const pick = (o) => {
-    if (!o) return;
     sel.value = o.value;
     close();
     trig.focus();
@@ -204,13 +274,12 @@ function filterSelect(sel) {
   // capture on window so the popup's keys win over the modal's and the app's
   // own document-level capture handlers while it is open
   const onkey = (e) => {
-    const keys = ["ArrowDown", "ArrowUp", "Enter", "Escape", "Tab"];
-    if (!keys.includes(e.key)) return;
+    if (!["ArrowDown", "ArrowUp", "Enter", "Escape", "Tab"].includes(e.key)) return;
     e.preventDefault();
     e.stopPropagation();
-    if (e.key === "ArrowDown") { cur = Math.min(cur + 1, hits.length - 1); draw(); }
-    else if (e.key === "ArrowUp") { cur = Math.max(cur - 1, 0); draw(); }
-    else if (e.key === "Enter") pick(hits[cur]);
+    if (e.key === "ArrowDown") pop.move(1);
+    else if (e.key === "ArrowUp") pop.move(-1);
+    else if (e.key === "Enter") pop.take();
     else { close(); trig.focus(); }
   };
   const onout = (e) => { if (!wrap.contains(e.target)) close(); };
@@ -218,54 +287,92 @@ function filterSelect(sel) {
   const open = () => {
     // options can change between renders (live docs suggestions), so read them
     // fresh; disabled entries are labels ("insert template…"), not choices
-    opts = [...sel.options].filter((o) => !o.disabled)
+    const items = [...sel.options].filter((o) => !o.disabled)
       .map((o) => ({ value: o.value, text: o.textContent }));
-    hits = opts;
-    cur = Math.max(0, opts.findIndex((o) => o.value === sel.value));
-    pop = document.createElement("div");
-    pop.className = "fselpop";
-    const q = document.createElement("input");
-    q.type = "text";
-    q.className = "fselq";
-    q.placeholder = "filter…";
-    const list = document.createElement("div");
-    list.className = "fsellist";
-    draw = () => {
-      list.innerHTML = "";
-      if (!hits.length) {
-        list.innerHTML = '<div class="fselempty">no matches</div>';
-        return;
-      }
-      hits.forEach((o, i) => {
-        const row = document.createElement("div");
-        row.className = "fselrow" + (i === cur ? " sel" : "")
-          + (o.value === sel.value ? " on" : "");
-        row.textContent = o.text;
-        row.onmousedown = (e) => { e.preventDefault(); pick(o); };
-        list.appendChild(row);
-        if (i === cur) setTimeout(() => row.scrollIntoView({ block: "nearest" }));
-      });
-    };
-    q.oninput = () => {
-      const s = q.value.trim().toLowerCase();
-      hits = s ? opts.filter((o) => fuzzy(s, o.text + " " + o.value) >= 0) : opts;
-      cur = 0;
-      draw();
-    };
-    draw();
-    pop.append(q, list);
-    wrap.appendChild(pop);
-    // hang the popup off the right edge instead when it would run off-screen
-    if (pop.getBoundingClientRect().right > innerWidth - 8) {
-      pop.style.left = "auto";
-      pop.style.right = "0";
-    }
+    pop = filterPopup(wrap, { items, value: () => sel.value, own: true, onPick: pick });
     addEventListener("keydown", onkey, true);
     addEventListener("mousedown", onout, true);
-    q.focus();
   };
 
   trig.onclick = () => { if (pop) { close(); trig.focus(); } else open(); };
+  return wrap;
+}
+
+// Free-text input with suggestions. Returns the node to lay out; the input is
+// still the value holder and anything typed is still accepted, so this only
+// replaces the datalist, which offers no way to see or narrow 300 names.
+function filterInput(inp, values) {
+  if (values.length <= FSEL_MIN) return null;  // caller keeps the datalist
+  const wrap = document.createElement("span");
+  wrap.className = ("fsel fcombo " + inp.className).trim();
+  inp.className = "";  // sizing rules move to the wrapper
+  const trig = document.createElement("button");
+  trig.type = "button";
+  trig.className = "fcaret";
+  trig.tabIndex = -1;  // Tab belongs to the input; the caret is mouse-only
+  trig.title = "browse suggestions";
+  trig.textContent = "▾";
+  wrap.append(inp, trig);
+  const items = values.map((v) => ({ value: String(v), text: String(v) }));
+
+  let pop = null, quiet = false;
+
+  const close = () => {
+    if (!pop) return;
+    pop.close();
+    pop = null;
+    removeEventListener("keydown", onkey, true);
+    removeEventListener("mousedown", onout, true);
+  };
+
+  const pick = (o) => {
+    inp.value = o.value;
+    close();
+    inp.focus();
+    // notify like a typed edit would, without the input event reopening the list
+    quiet = true;
+    inp.dispatchEvent(new Event("input", { bubbles: true }));
+    inp.dispatchEvent(new Event("change", { bubbles: true }));
+    quiet = false;
+  };
+
+  const onkey = (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      pop.move(e.key === "ArrowDown" ? 1 : -1);
+    } else if (e.key === "Enter") {
+      // only a row the user arrowed onto wins; otherwise the typed text stands
+      // and the key carries on to whatever else handles it (modals submit)
+      if (pop.take()) { e.preventDefault(); e.stopPropagation(); }
+      else close();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+      inp.focus();
+    } else if (e.key === "Tab") {
+      close();
+    }
+  };
+  const onout = (e) => { if (!wrap.contains(e.target)) close(); };
+
+  // q is what to narrow by: the typed text while typing, nothing when the caret
+  // is used to browse the whole list
+  const open = (q) => {
+    if (!pop) {
+      pop = filterPopup(wrap, { items, value: () => inp.value, own: false, onPick: pick });
+      addEventListener("keydown", onkey, true);
+      addEventListener("mousedown", onout, true);
+    }
+    pop.filter(q);
+  };
+
+  inp.oninput = () => { if (!quiet) open(inp.value); };
+  inp.onkeydown = (e) => {
+    if (!pop && e.key === "ArrowDown") { e.preventDefault(); open(inp.value); }
+  };
+  trig.onclick = () => { if (pop) close(); else { inp.focus(); open(""); } };
   return wrap;
 }
 
@@ -462,8 +569,12 @@ function scalarControl(f, value, ph) {
   if (value === "") inp.value = '""';
   else if (value !== undefined && value !== null) inp.value = String(value);
   if (ph) inp.placeholder = ph;
-  let aux = null;
-  if (sugg.length) { aux = datalist(sugg); inp.setAttribute("list", aux.id); }
+  // a long suggestion list gets the filterable picker instead of a datalist
+  let aux = null, node = filterInput(inp, sugg);
+  if (!node) {
+    node = inp;
+    if (sugg.length) { aux = datalist(sugg); inp.setAttribute("list", aux.id); }
+  }
   const collect = () => {
     const r = inp.value.trim();
     if (!r) return undefined;
@@ -474,7 +585,7 @@ function scalarControl(f, value, ph) {
     }
     return r === '""' ? "" : r;
   };
-  return { node: inp, aux, collect };
+  return { node, aux, collect };
 }
 
 // list → one input per entry, with add/remove; optional per-row suggestions.
@@ -483,7 +594,8 @@ function listForm(ctrl, s, cur) {
   box.className = "formrows";
   ctrl.appendChild(box);
   const sugg = suggestFor(s.key, s.item_values);
-  const dl = sugg.length ? datalist(sugg) : null;
+  // long lists filter in a popup instead (see filterInput), so no datalist
+  const dl = sugg.length && sugg.length <= FSEL_MIN ? datalist(sugg) : null;
   if (dl) ctrl.appendChild(dl);
   const addRow = (val) => {
     const r = document.createElement("div");
@@ -491,7 +603,7 @@ function listForm(ctrl, s, cur) {
     const inp = document.createElement("input");
     inp.type = "text"; inp.value = val || "";
     if (dl) inp.setAttribute("list", dl.id);
-    r.append(inp, mkbtn("small danger", "×", () => r.remove()));
+    r.append(filterInput(inp, sugg) || inp, mkbtn("small danger", "×", () => r.remove()));
     box.appendChild(r);
   };
   (Array.isArray(cur) ? cur : []).forEach((v) => addRow(String(v)));
@@ -510,7 +622,8 @@ function mapForm(ctrl, s, cur) {
   box.className = "formrows";
   ctrl.appendChild(box);
   const ksugg = suggestFor(s.key + ":key", s.key_values);
-  const kdl = ksugg.length ? datalist(ksugg) : null;
+  // env alone suggests 300-odd names — those filter in a popup, not a datalist
+  const kdl = ksugg.length && ksugg.length <= FSEL_MIN ? datalist(ksugg) : null;
   if (kdl) ctrl.appendChild(kdl);
   const addRow = (k, v) => {
     const r = document.createElement("div");
@@ -523,7 +636,7 @@ function mapForm(ctrl, s, cur) {
       s.values ? { type: "enum", values: s.values }
         : s.value_type === "number" ? { type: "number" } : { type: "string" },
       v, "value");
-    r.append(kin, val.node);
+    r.append(filterInput(kin, ksugg) || kin, val.node);
     if (val.aux) r.appendChild(val.aux);
     r.append(mkbtn("small danger", "×", () => r.remove()));
     box.appendChild(r);
