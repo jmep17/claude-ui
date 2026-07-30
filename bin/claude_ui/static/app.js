@@ -1649,6 +1649,52 @@ function tokfmt(n) {
   return s + "k";
 }
 
+const tile = (num, lbl) =>
+  `<div class="tile"><div class="tnum">${num}</div><div class="tlbl">${lbl}</div></div>`;
+
+// Section heading plus a table of pre-rendered <td> rows. An empty title skips
+// the heading, for a table that sits under a heading of its own already.
+function itable(el, title, headers, rows) {
+  if (title) {
+    const h = document.createElement("h2");
+    h.textContent = title;
+    el.appendChild(h);
+  }
+  const t = document.createElement("table");
+  t.className = "itable";
+  t.innerHTML = "<tr>" + headers.map((x) => `<th>${x}</th>`).join("") + "</tr>";
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = r;
+    t.appendChild(tr);
+  }
+  el.appendChild(t);
+}
+
+// One proportional bar plus a legend — the context budget, cost by token type,
+// cost by source. segs is [[label, value], …]; zero-valued segments drop out.
+function stackedBar(el, segs, colors, fmt, titleFmt) {
+  const bar = document.createElement("div");
+  bar.className = "budgetbar";
+  const key = document.createElement("div");
+  key.className = "budgetkey";
+  for (const [name, v] of segs) {
+    if (!v) continue;
+    const color = colors[name] || "var(--fg2)";
+    const d = document.createElement("div");
+    d.style.flex = String(v);
+    d.style.background = color;
+    d.title = name + ": " + (titleFmt || fmt)(v);
+    bar.appendChild(d);
+    const k = document.createElement("span");
+    k.innerHTML = `<span class="sw" style="background:${color}"></span>` +
+      `${esc(name)} ${esc(fmt(v))}`;
+    key.appendChild(k);
+  }
+  el.appendChild(bar);
+  el.appendChild(key);
+}
+
 function relTime(iso) {
   if (!iso) return "never";
   const d = Date.now() - Date.parse(iso);
@@ -1696,8 +1742,6 @@ async function renderInsight(rescan) {
 
   const tiles = document.createElement("div");
   tiles.className = "tiles";
-  const tile = (num, lbl) =>
-    `<div class="tile"><div class="tnum">${num}</div><div class="tlbl">${lbl}</div></div>`;
   tiles.innerHTML =
     tile(tokfmt(b.total), "tokens every session") +
     tile(tokfmt(b.claude_md), "CLAUDE.md") +
@@ -1706,41 +1750,11 @@ async function renderInsight(rescan) {
     (u.available && u.sessions ? tile(unused.length, "unused 90d+") : "");
   el.appendChild(tiles);
 
-  const segs = [["CLAUDE.md", b.claude_md],
-    ...Object.entries(b.types).map(([t, v]) => [t, v.tokens])];
-  const bar = document.createElement("div");
-  bar.className = "budgetbar";
-  const key = document.createElement("div");
-  key.className = "budgetkey";
-  for (const [name, tok] of segs) {
-    if (!tok) continue;
-    const d = document.createElement("div");
-    d.style.flex = String(tok);
-    d.style.background = BUDGET_COLORS[name] || "var(--fg2)";
-    d.title = name + ": ~" + tokfmt(tok) + " tokens";
-    bar.appendChild(d);
-    const k = document.createElement("span");
-    k.innerHTML = `<span class="sw" style="background:${BUDGET_COLORS[name] || "var(--fg2)"}"></span>` +
-      `${esc(name)} ~${tokfmt(tok)}`;
-    key.appendChild(k);
-  }
-  el.appendChild(bar);
-  el.appendChild(key);
+  stackedBar(el, [["CLAUDE.md", b.claude_md],
+    ...Object.entries(b.types).map(([t, v]) => [t, v.tokens])],
+    BUDGET_COLORS, (v) => "~" + tokfmt(v), (v) => "~" + tokfmt(v) + " tokens");
 
-  const table = (title, headers, rows) => {
-    const h = document.createElement("h2");
-    h.textContent = title;
-    el.appendChild(h);
-    const t = document.createElement("table");
-    t.className = "itable";
-    t.innerHTML = "<tr>" + headers.map((x) => `<th>${x}</th>`).join("") + "</tr>";
-    for (const r of rows) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = r;
-      t.appendChild(tr);
-    }
-    el.appendChild(t);
-  };
+  const table = (title, headers, rows) => itable(el, title, headers, rows);
 
   const consumers = Object.entries(b.types)
     .flatMap(([t, v]) => v.items.map((it) => ({ type: t, ...it })))
@@ -1844,6 +1858,25 @@ function usd(n) {
   return "$" + n.toFixed(3);
 }
 
+function pct(v, total) {
+  return total ? (v / total * 100).toFixed(v / total < 0.1 ? 1 : 0) + "%" : "—";
+}
+
+// Token types, dearest per token first — the order the backend sends them in.
+const TYPE_COLORS = { output: "var(--purple)", "cache write 1h": "var(--orange)",
+  "cache write 5m": "var(--yellow)", "fresh input": "var(--red)",
+  "cache read": "var(--blue)" };
+
+// Sources are open-ended (one per tool), so they take colours by rank.
+const SRC_PALETTE = ["var(--aqua)", "var(--blue)", "var(--purple)", "var(--orange)",
+  "var(--yellow)", "var(--green)", "var(--red)"];
+
+const srcLabel = (s) => s.startsWith("tool:") ? s.slice(5) + " results" : s;
+
+function homeTilde(p) {
+  return (p || "").replace(/^\/(home|Users)\/[^\/]+/, "~");
+}
+
 async function renderCosts(rescan) {
   const el = document.getElementById("costsview");
   if (!COSTS || rescan) {
@@ -1871,15 +1904,24 @@ async function renderCosts(rescan) {
     el.innerHTML += '<div class="empty">no transcripts found — cost data appears once Claude Code has recorded sessions on this machine</div>';
     return;
   }
+  const total = c.totals.all;
+  const table = (title, headers, rows) => itable(el, title, headers, rows);
+  const note = (html) => {
+    const n = document.createElement("div");
+    n.className = "sethead";
+    n.innerHTML = html;
+    el.appendChild(n);
+  };
+
+  const tokens = c.by_type.reduce((a, t) => a + t.tokens, 0);
   const tiles = document.createElement("div");
   tiles.className = "tiles";
-  const tile = (num, lbl) =>
-    `<div class="tile"><div class="tnum">${num}</div><div class="tlbl">${lbl}</div></div>`;
   tiles.innerHTML =
     tile(usd(c.totals.today), "today") +
     tile(usd(c.totals.last7), "last 7 days") +
     tile(usd(c.totals.month), "month to date") +
-    tile(usd(c.totals.all), "all time") +
+    tile(usd(total), "all time") +
+    tile(tokfmt(tokens), "tokens all time") +
     tile(usd(c.cache_savings), "saved by caching");
   el.appendChild(tiles);
 
@@ -1892,43 +1934,116 @@ async function renderCosts(rescan) {
       bar.className = "cbar";
       bar.style.height = Math.max(2, (d.cost / max) * 100) + "%";
       bar.title = d.day + ": " + usd(d.cost) + "\n" +
-        Object.entries(d.by).map(([m, v]) => m + ": " + usd(v)).join("\n");
+        Object.entries(d.by).map(([m, v]) => m + ": " + usd(v)).join("\n") + "\n" +
+        c.by_type.map((t) => t.type + ": " + usd(d.ct[t.type] || 0)).join("\n");
+      // Each day's bar is itself split by token type, so a day that went badly
+      // shows *how* without needing the tooltip.
+      for (const t of c.by_type) {
+        const v = d.ct[t.type] || 0;
+        if (!v) continue;
+        const seg = document.createElement("div");
+        seg.className = "seg";
+        seg.style.flex = String(v);
+        seg.style.background = TYPE_COLORS[t.type] || "var(--fg2)";
+        bar.appendChild(seg);
+      }
       chart.appendChild(bar);
     }
     el.appendChild(chart);
     const key = document.createElement("div");
     key.className = "chartkey";
     key.innerHTML = `<span>${esc(c.days[0].day)}</span>` +
-      `<span>daily cost, last ${c.days.length} active days</span>` +
+      `<span>daily cost by token type, last ${c.days.length} active days</span>` +
       `<span>${esc(c.days[c.days.length - 1].day)}</span>`;
     el.appendChild(key);
   }
 
-  const table = (title, headers, rows) => {
-    const h = document.createElement("h2");
-    h.textContent = title;
-    el.appendChild(h);
-    const t = document.createElement("table");
-    t.className = "itable";
-    t.innerHTML = "<tr>" + headers.map((x) => `<th>${x}</th>`).join("") + "</tr>";
-    for (const r of rows) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = r;
-      t.appendChild(tr);
-    }
-    el.appendChild(t);
-  };
+  // ---- where the money goes: the exact split across billed token types
+  const h2 = document.createElement("h2");
+  h2.textContent = "where the money goes";
+  el.appendChild(h2);
+  note("every token you were billed for, by type. Cache reads are usually most " +
+    "of the tokens and least of the bill; output is the reverse.");
+  stackedBar(el, c.by_type.map((t) => [t.type, t.cost]), TYPE_COLORS,
+    (v) => usd(v), (v) => usd(v) + " (" + pct(v, total) + ")");
+  table("", ["token type", "tokens", "$/Mtok", "cost", "share of bill"],
+    c.by_type.map((t) =>
+      `<td>${esc(t.type)}</td><td class="dim">${tokfmt(t.tokens)}</td>` +
+      `<td class="dim">${t.tokens ? "$" + (t.cost / t.tokens * 1e6).toFixed(2) : "—"}</td>` +
+      `<td class="num">${usd(t.cost)}</td><td class="dim">${pct(t.cost, total)}</td>`));
 
-  table("by model", ["model", "cost", "input", "output", "cache read", "msgs"],
+  // ---- what put the tokens in context
+  if (c.by_source.length) {
+    const colors = {};
+    c.by_source.forEach((s, i) => {
+      colors[srcLabel(s.source)] = SRC_PALETTE[i % SRC_PALETTE.length];
+    });
+    const h = document.createElement("h2");
+    h.textContent = "what put the tokens in context";
+    el.appendChild(h);
+    note("the same bill, blamed on what caused it. Each request's newly-added " +
+      "tokens are split across the tool results, prompts and model output that " +
+      "arrived since the previous one, in proportion to their size; cache reads " +
+      "are split across whatever the context already held. <b>fresh</b> is what " +
+      "a source added, <b>re-read</b> is what it cost on every later turn — the " +
+      "reason one big tool result keeps charging you. Within a turn these splits " +
+      "are estimates, but the total matches the bill exactly.");
+    stackedBar(el, c.by_source.map((s) => [srcLabel(s.source), s.cost]), colors,
+      (v) => usd(v), (v) => usd(v) + " (" + pct(v, total) + ")");
+    table("", ["source", "fresh tokens", "re-read", "output", "cost", "share"],
+      c.by_source.map((s) =>
+        `<td>${esc(srcLabel(s.source))}</td><td class="dim">${tokfmt(s.fresh)}</td>` +
+        `<td class="dim">${tokfmt(s.reread)}</td>` +
+        `<td class="dim">${s.out ? tokfmt(s.out) : "—"}</td>` +
+        `<td class="num">${usd(s.cost)}</td><td class="dim">${pct(s.cost, total)}</td>`));
+  }
+
+  if (c.big_items.length) {
+    table("biggest tool results", ["tool result", "returns", "~tokens each", "~tokens total"],
+      c.big_items.map((b) =>
+        `<td>${esc(b.label)}</td><td class="dim">${b.count}</td>` +
+        `<td class="dim">${tokfmt(Math.round(b.tokens / Math.max(b.count, 1)))}</td>` +
+        `<td class="num">${tokfmt(b.tokens)}</td>`));
+  }
+
+  table("by model", ["model", "cost", "input", "output", "cache write", "cache read", "msgs"],
     c.by_model.map((m) =>
       `<td>${esc(m.model)}</td><td class="num">${usd(m.cost)}</td>` +
       `<td class="dim">${tokfmt(m.in)}</td><td class="dim">${tokfmt(m.out)}</td>` +
+      `<td class="dim">${tokfmt(m.cacheW)}</td>` +
       `<td class="dim">${tokfmt(m.cacheR)}</td><td class="dim">${m.msgs}</td>`));
+
+  if (c.by_session.length)
+    table("most expensive sessions", ["session", "project", "days", "cost", "of which subagents", "msgs"],
+      c.by_session.map((s) =>
+        `<td>${esc(s.slug || s.sid.slice(0, 8))}</td>` +
+        `<td class="dim">${esc(homeTilde(s.cwd))}</td>` +
+        `<td class="dim">${esc(s.first === s.last ? s.first : s.first + " → " + s.last)}</td>` +
+        `<td class="num">${usd(s.cost)}</td>` +
+        `<td class="dim">${s.sub_cost ? usd(s.sub_cost) : "—"}</td>` +
+        `<td class="dim">${s.msgs}</td>`));
+
+  if (c.agents.sub.cost) {
+    const h = document.createElement("h2");
+    h.textContent = "main thread vs subagents";
+    el.appendChild(h);
+    note("subagents run their own conversations with their own context, so they " +
+      "are billed separately from the thread that spawned them.");
+    stackedBar(el, [["main thread", c.agents.main.cost],
+      ["subagents", c.agents.sub.cost]],
+      { "main thread": "var(--aqua)", subagents: "var(--purple)" },
+      (v) => usd(v), (v) => usd(v) + " (" + pct(v, total) + ")");
+    table("", ["", "cost", "tokens", "msgs", "share"],
+      [["main thread", c.agents.main], ["subagents", c.agents.sub]].map(([n, a]) =>
+        `<td>${n}</td><td class="num">${usd(a.cost)}</td>` +
+        `<td class="dim">${tokfmt(a.tokens)}</td><td class="dim">${a.msgs}</td>` +
+        `<td class="dim">${pct(a.cost, total)}</td>`));
+  }
 
   if (c.by_project.length > 1)
     table("by project", ["project", "cost", "assistant msgs"],
       c.by_project.map((p) =>
-        `<td>${esc(p.cwd.replace(/^\/(home|Users)\/[^\/]+/, "~"))}</td>` +
+        `<td>${esc(homeTilde(p.cwd))}</td>` +
         `<td class="num">${usd(p.cost)}</td><td class="dim">${p.msgs}</td>`));
 
   if (c.unknown_models.length) {
@@ -2017,6 +2132,8 @@ function palItems() {
     run: () => { TAB = "setup"; location.hash = TAB; render(); renderSetup(true); } });
   out.push({ kind: "action", label: "rescan usage analytics",
     run: () => { TAB = "insight"; location.hash = TAB; render(); renderInsight(true); } });
+  out.push({ kind: "action", label: "rescan cost data",
+    run: () => { TAB = "costs"; location.hash = TAB; render(); renderCosts(true); } });
   return out;
 }
 

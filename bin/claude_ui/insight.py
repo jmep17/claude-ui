@@ -32,7 +32,7 @@ USAGE_CACHE = Path.home() / ".cache" / "claude-ui-usage.json"
 
 # Bump whenever the shape or meaning of the cached per-file data changes, so
 # stale entries are re-scanned instead of being mixed with the current format.
-CACHE_V = 4
+CACHE_V = 5
 
 def projects_dir():
     """Transcripts live under the resolved config dir, not always ~/.claude."""
@@ -92,6 +92,49 @@ def _msg_key(entry, msg):
 
 MAX_TRANSCRIPT = 64 * 1024 * 1024
 
+# Sources a billed token can be blamed on. Tool results get one source each,
+# named "tool:<Name>"; these three cover everything else.
+SRC_SYS = "system prompt + tools"
+SRC_PROMPT = "your prompts"
+SRC_OUT = "model output"
+
+# How many individual tool results each transcript contributes to the
+# biggest-offenders table. Small, because this rides in the per-file cache.
+BIG_PER_FILE = 8
+
+# Fields worth putting in a tool's label, most identifying first.
+LABEL_KEYS = ("file_path", "notebook_path", "command", "pattern", "url",
+              "skill", "subagent_type", "query", "description")
+
+def _blob(x):
+    """Text of a tool_result payload: a string, or a list of content blocks."""
+    if isinstance(x, str):
+        return x
+    if x is None:
+        return ""
+    try:
+        return json.dumps(x, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(x)
+
+def _tool_label(name, inp):
+    """'Read' + {"file_path": "/a/b.py"} -> 'Read /a/b.py'.
+
+    Bash collapses to its prefix, so every `git status` groups under one label
+    instead of splitting on the flags it happened to carry.
+    """
+    if isinstance(inp, dict):
+        for k in LABEL_KEYS:
+            v = inp.get(k)
+            if isinstance(v, str) and v.strip():
+                if k == "command":
+                    # `cd somewhere && real-command` is about the real command,
+                    # so don't let every one of them label itself "cd".
+                    v = re.sub(r"^(?:\s*cd\s+[^&;|]*&&\s*)+", "", v)
+                    v = _bash_prefix(v) or v
+                return (str(name) + " " + str(v).strip())[:90]
+    return str(name)
+
 # commands whose first sub-word is part of the identity (git status vs git push)
 BASH_MULTI = {"git", "npm", "npx", "yarn", "pnpm", "cargo", "docker", "kubectl",
               "python", "python3", "pip", "pip3", "uv", "make", "go", "bundle",
@@ -113,12 +156,105 @@ def _bash_prefix(cmd):
         return head + " " + toks[1]
     return head
 
+def _blocks(content):
+    """Content blocks of a message, whose `content` may be a bare string."""
+    if isinstance(content, list):
+        return [b for b in content if isinstance(b, dict)]
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return []
+
+def _pend_user(content, pending, tools, big):
+    """Queue a user turn's content as input the next request will pay for."""
+    for b in _blocks(content):
+        if b.get("type") == "tool_result":
+            label = tools.get(b.get("tool_use_id")) or "(unmatched tool result)"
+            n = _tok(_blob(b.get("content")))
+            pending.append(("tool:" + label.split(" ", 1)[0], n))
+            e = big.setdefault(label, [0, 0])
+            e[0] += n
+            e[1] += 1
+        elif b.get("type") == "text":
+            pending.append((SRC_PROMPT, _tok(b.get("text") or "")))
+
+def _pend_assistant(content, pending, tools):
+    """Queue an assistant block, and remember tool_use ids so the tool_result
+    coming back can be attributed to the tool that asked for it."""
+    for b in _blocks(content):
+        t = b.get("type")
+        if t == "tool_use":
+            if b.get("id"):
+                tools[b["id"]] = _tool_label(b.get("name"), b.get("input"))
+            pending.append((SRC_OUT, _tok(_blob(b.get("input")))))
+        elif t in ("text", "thinking"):
+            pending.append((SRC_OUT, _tok(b.get(t) or "")))
+
+def _blame_request(blame, day, model, usage, cw5m, cw1h, pending, run, state):
+    """Split one request's billed tokens across the sources that caused them.
+
+    Fresh input (uncached input + both cache writes) is exactly the content
+    appended since the last request, so `pending`'s char shares divide it. Cache
+    reads re-read the prefix already in context, so they divide by what that
+    prefix is made of (`run`). Output is its own source. Every token lands
+    somewhere, so the per-source costs sum to the same total as the per-day ones.
+    """
+    fresh = [(R_IN, int(usage.get("input_tokens") or 0)),
+             (R_CW5M, cw5m), (R_CW1H, cw1h)]
+    new = sum(n for _, n in fresh)
+    est = sum(c for _, c in pending)
+
+    cr = int(usage.get("cache_read_input_tokens") or 0)
+    if cr:
+        total = sum(run.values())
+        if total:
+            for src, v in run.items():
+                blame(day, model, src, R_CR, cr * v / total)
+        else:
+            blame(day, model, SRC_SYS, R_CR, cr)
+
+    # The system prompt and tool definitions are never written to the transcript,
+    # so on a session's first request they are the whole unexplained residual —
+    # which makes that residual a measurement of them rather than a guess.
+    shares = []
+    rest = 1.0
+    if state["first"] and new > est and new:
+        rest = est / new
+        shares.append((SRC_SYS, 1.0 - rest))
+    state["first"] = False
+    if est:
+        for src, c in pending:
+            shares.append((src, rest * c / est))
+    elif rest:
+        shares.append((SRC_SYS, rest))
+
+    for src, w in shares:
+        for slot, n in fresh:
+            blame(day, model, src, slot, n * w)
+        run[src] = run.get(src, 0) + new * w
+    blame(day, model, SRC_OUT, R_OUT, int(usage.get("output_tokens") or 0))
+
 def _scan_transcript(path):
-    """One transcript -> {counts, msgs, bash, cwd}."""
+    """One transcript -> {counts, msgs, bash, cwd, attr, big, meta}."""
     counts = {}   # "kind\tname" -> [count, last_iso_ts]
     msgs = {}     # dedup key -> [local day, model, in, out, cacheW5m, cacheW1h, cacheR]
     bash = {}     # prefix -> count
     cwd = ""
+    attr = {}     # "day\tmodel\tsource" -> row, every billed token blamed on one source
+    big = {}      # tool label -> [tokens, results]
+    meta = {"sid": "", "slug": "", "sidechain": False}
+
+    # Attribution state. `pending` is the content appended since the last priced
+    # request — that content is exactly what the next request pays fresh input
+    # for, so its char shares divide those tokens. `run` is what the cached
+    # prefix is made of, which is what a cache read re-reads.
+    pending = []  # (source, chars)
+    run = {}      # source -> tokens already in the cached prefix
+    tools = {}    # tool_use_id -> label
+    state = {"first": True}
+
+    def blame(day, model, src, slot, n):
+        row = attr.setdefault(day + "\t" + model + "\t" + src, [0.0] * 6)
+        row[slot] += n
 
     def bump(kind, name, ts):
         k = kind + "\t" + name
@@ -141,7 +277,8 @@ def _scan_transcript(path):
             for line in f:
                 if ('"usage"' not in line and "command-name" not in line
                         and '"Skill"' not in line and '"Task"' not in line
-                        and '"Bash"' not in line and '"cwd"' not in line):
+                        and '"Bash"' not in line and '"cwd"' not in line
+                        and '"tool_result"' not in line):
                     continue
                 try:
                     d = json.loads(line)
@@ -150,8 +287,16 @@ def _scan_transcript(path):
                 ts = d.get("timestamp") or ""
                 if not cwd and isinstance(d.get("cwd"), str):
                     cwd = d["cwd"]
+                if not meta["sid"] and isinstance(d.get("sessionId"), str):
+                    meta["sid"] = d["sessionId"]
+                if not meta["slug"] and isinstance(d.get("slug"), str):
+                    meta["slug"] = d["slug"]
+                if d.get("isSidechain"):
+                    meta["sidechain"] = True
                 msg = d.get("message") or {}
                 usage = msg.get("usage")
+                if msg.get("role") == "user":
+                    _pend_user(msg.get("content"), pending, tools, big)
                 if isinstance(usage, dict) and msg.get("model"):
                     # cache_creation splits the write total by TTL, which matters
                     # because a 1-hour write costs 2x base and a 5-minute one
@@ -164,13 +309,25 @@ def _scan_transcript(path):
                     # setdefault, not assignment: repeated lines for one message
                     # carry identical usage but drift by milliseconds, so keeping
                     # the first fixes the day bucket regardless of read order.
-                    msgs.setdefault(_msg_key(d, msg), [
+                    mk = _msg_key(d, msg)
+                    priced = mk not in msgs
+                    msgs.setdefault(mk, [
                         _local_day(ts) or "unknown", msg["model"],
                         int(usage.get("input_tokens") or 0),
                         int(usage.get("output_tokens") or 0),
                         cw - w1h, w1h,
                         int(usage.get("cache_read_input_tokens") or 0)])
+                    # Only the message's first line pays: the rest are the same
+                    # response written out one content block at a time.
+                    if priced:
+                        _blame_request(blame, msgs[mk][0], msg["model"], usage,
+                                       cw - w1h, w1h, pending, run, state)
+                        pending = []
                 content = msg.get("content")
+                if msg.get("role") == "assistant":
+                    # Whatever the model just produced is re-sent as input on the
+                    # next request, so it joins `pending` — one block per line.
+                    _pend_assistant(content, pending, tools)
                 for text in texts(content):
                     for m in CMD_RE.finditer(text):
                         bump("command", m.group(1).replace(":", "/"), ts)
@@ -187,8 +344,12 @@ def _scan_transcript(path):
                         if p:
                             bash[p] = bash.get(p, 0) + 1
     except OSError:
-        return {"counts": {}, "msgs": {}, "bash": {}, "cwd": ""}
-    return {"counts": counts, "msgs": msgs, "bash": bash, "cwd": cwd}
+        return {"counts": {}, "msgs": {}, "bash": {}, "cwd": "",
+                "attr": {}, "big": {}, "meta": meta}
+    top = sorted(big.items(), key=lambda kv: -kv[1][0])[:BIG_PER_FILE]
+    return {"counts": counts, "msgs": msgs, "bash": bash, "cwd": cwd,
+            "attr": {k: [round(v, 2) for v in row] for k, row in attr.items()},
+            "big": dict(top), "meta": meta}
 
 def transcript_stats(rescan=False):
     """Aggregate usage/cost/bash data across all transcripts, incrementally
@@ -234,7 +395,19 @@ def transcript_stats(rescan=False):
     days = {}
     bash = {}
     projects = {}
+    attr = {}
+    big = {}
+    sessions = {}
+    agents = {"main": {}, "sub": {}}
     seen_msgs = set()
+
+    def acc(store, k, e):
+        """Add one message's five token counts (and itself) to a row."""
+        r = store.setdefault(k, ROW_ZERO[:])
+        for i, v in enumerate(e[2:]):
+            r[i] += v
+        r[R_MSGS] += 1
+
     for key in sorted(files):   # sorted so a cross-file duplicate resolves the same way every run
         data = files[key].get("data") or {}
         for k, (n, ts) in (data.get("counts") or {}).items():
@@ -247,20 +420,52 @@ def transcript_stats(rescan=False):
         # aggregate to keep in sync, and per-project cost priced per day too.
         cwd = data.get("cwd") or "(unknown)"
         pdays = projects.setdefault(cwd, {})
-        for mkey, e in (data.get("msgs") or {}).items():
+        meta = data.get("meta") or {}
+        sub = bool(meta.get("sidechain"))
+        # Subagent transcripts carry their parent's sessionId, so a session rolls
+        # up its sidechains — which is what you want to see, with the sidechain
+        # share broken out separately.
+        sess = sessions.setdefault(meta.get("sid") or key, {
+            "slug": meta.get("slug") or "", "cwd": "", "msgs": 0,
+            "first": "", "last": "", "rows": {}, "sub_rows": {}})
+        if data.get("cwd") and (not sess["cwd"] or not sub):
+            sess["cwd"] = data["cwd"]
+        mkeys = data.get("msgs") or {}
+        # Counted before the loop below adds to seen_msgs: the share of this
+        # file's messages it is the first to contribute.
+        scale = (sum(k not in seen_msgs for k in mkeys) / len(mkeys)) if mkeys else 0.0
+        for mkey, e in mkeys.items():
             if mkey in seen_msgs:   # same message already counted from another file
                 continue
             seen_msgs.add(mkey)
             day, model = e[0], e[1]
-            for agg in (days.setdefault(day, {}), pdays.setdefault(day, {})):
-                s = agg.setdefault(model, ROW_ZERO[:])
-                for i, v in enumerate(e[2:]):
-                    s[i] += v
-                s[R_MSGS] += 1
+            dm = day + "\t" + model
+            acc(days.setdefault(day, {}), model, e)
+            acc(pdays.setdefault(day, {}), model, e)
+            acc(sess["sub_rows"] if sub else sess["rows"], dm, e)
+            acc(agents["sub" if sub else "main"], dm, e)
+            sess["msgs"] += 1
+            sess["first"] = min(sess["first"] or day, day)
+            sess["last"] = max(sess["last"], day)
+        # Attribution is computed per file and cannot see the cross-file dedup
+        # above, so a forked session would count its shared prefix twice. Scaling
+        # each file's contribution by `scale` keeps the attribution total equal
+        # to the priced total.
+        if scale:
+            for k, row in (data.get("attr") or {}).items():
+                r = attr.setdefault(k, [0.0] * 6)
+                for i, v in enumerate(row):
+                    r[i] += v * scale
+            for label, (n, c) in (data.get("big") or {}).items():
+                e = big.setdefault(label, [0.0, 0])
+                e[0] += n * scale
+                e[1] += c
         for prefix, n in (data.get("bash") or {}).items():
             bash[prefix] = bash.get(prefix, 0) + n
-    return {"sessions": len(files), "scanned_now": scanned, "by": by,
-            "days": days, "bash": bash, "projects": projects,
+    return {"sessions": len(sessions), "files": len(files),
+            "scanned_now": scanned, "by": by, "days": days, "bash": bash,
+            "projects": projects, "attr": attr, "big": big,
+            "session_rows": sessions, "agents": agents,
             "dir": tilde(pdir), "available": pdir.is_dir()}
 
 def usage_stats(rescan=False):
@@ -318,6 +523,29 @@ def _excluded(model):
         return not any(str(sub).lower() in m for sub in overrides)
     return True
 
+# The five billed token types, as (label, row slot, multiplier on the model's
+# input rate — None meaning the output rate instead). Ordered most to least
+# expensive per token, which is also the order the UI shows them in.
+TOKEN_TYPES = (("output", R_OUT, None), ("cache write 1h", R_CW1H, 2.0),
+               ("cache write 5m", R_CW5M, 1.25), ("fresh input", R_IN, 1.0),
+               ("cache read", R_CR, 0.1))
+
+def _slot_cost(row, slot, mult, pin, pout):
+    return row[slot] * (pout if mult is None else pin * mult) / 1e6
+
+def _price_rows(rows):
+    """Flat {"day\tmodel": row} -> (cost, tokens, msgs), skipping what we can't price."""
+    cost = 0.0
+    tokens = msgs = 0
+    for k, row in rows.items():
+        day, _, model = k.partition("\t")
+        if _excluded(model):
+            continue
+        cost += _row_cost(row, *model_price(model, day)[:2])
+        tokens += int(sum(row[:R_MSGS]))
+        msgs += int(row[R_MSGS])
+    return cost, tokens, msgs
+
 def cost_stats(rescan=False):
     st = transcript_stats(rescan)
     # Local days, matching how the rows were bucketed and what the statusline
@@ -334,8 +562,10 @@ def cost_stats(rescan=False):
     totals = {"today": 0, "last7": 0, "last30": 0, "month": 0, "all": 0}
     cache_savings = 0.0
     unknown = set()
+    tcost = {t: 0.0 for t, _, _ in TOKEN_TYPES}
+    ttok = {t: 0 for t, _, _ in TOKEN_TYPES}
     for day in sorted(st["days"]):
-        drow = {"day": day, "cost": 0, "by": {}}
+        drow = {"day": day, "cost": 0, "by": {}, "ct": {}}
         for model, row in st["days"][day].items():
             if _excluded(model):
                 continue
@@ -345,6 +575,12 @@ def cost_stats(rescan=False):
             c = _row_cost(row, pin, pout)
             drow["cost"] += c
             drow["by"][model] = round(c, 4)
+            # The same cost split by token type, globally and for this day's bar.
+            for t, slot, mult in TOKEN_TYPES:
+                tc = _slot_cost(row, slot, mult, pin, pout)
+                tcost[t] += tc
+                ttok[t] += int(row[slot])
+                drow["ct"][t] = round(drow["ct"].get(t, 0) + tc, 4)
             m = by_model.setdefault(model, {"cost": 0, "in": 0, "out": 0,
                                             "cacheR": 0, "cacheW": 0, "msgs": 0})
             m["cost"] += c
@@ -378,7 +614,50 @@ def cost_stats(rescan=False):
         if msgs:
             by_project.append({"cwd": cwd, "cost": round(c, 4), "msgs": msgs})
     by_project.sort(key=lambda p: -p["cost"])
+
+    # What put the tokens there. Same rows, same pricing, sliced by cause instead
+    # of by model, so this sums to totals["all"] as well.
+    src = {}
+    for k, row in st["attr"].items():
+        day, rest = k.split("\t", 1)
+        model, _, source = rest.partition("\t")
+        if _excluded(model):
+            continue
+        pin, pout = model_price(model, day)[:2]
+        s = src.setdefault(source, {"cost": 0.0, "fresh": 0, "reread": 0, "out": 0})
+        s["cost"] += _row_cost(row, pin, pout)
+        s["fresh"] += int(row[R_IN] + row[R_CW5M] + row[R_CW1H])
+        s["reread"] += int(row[R_CR])
+        s["out"] += int(row[R_OUT])
+    by_source = sorted(({"source": k, **v} for k, v in src.items()),
+                       key=lambda s: -s["cost"])
+
+    by_session = []
+    for sid, s in st["session_rows"].items():
+        cost, tokens, msgs = _price_rows(s["rows"])
+        sub_cost, sub_tokens, sub_msgs = _price_rows(s["sub_rows"])
+        if not (msgs or sub_msgs):
+            continue
+        by_session.append({"sid": sid, "slug": s["slug"], "cwd": s["cwd"],
+                           "first": s["first"], "last": s["last"],
+                           "cost": round(cost + sub_cost, 4),
+                           "sub_cost": round(sub_cost, 4),
+                           "tokens": tokens + sub_tokens, "msgs": msgs + sub_msgs})
+    by_session.sort(key=lambda s: -s["cost"])
+
+    agents = {}
+    for which in ("main", "sub"):
+        cost, tokens, msgs = _price_rows(st["agents"][which])
+        agents[which] = {"cost": round(cost, 4), "tokens": tokens, "msgs": msgs}
+
+    big_items = sorted(({"label": k, "tokens": int(n), "count": c}
+                        for k, (n, c) in st["big"].items()),
+                       key=lambda b: -b["tokens"])
     return {"days": per_day[-30:], "totals": {k: round(v, 2) for k, v in totals.items()},
+            "by_type": [{"type": t, "tokens": ttok[t], "cost": round(tcost[t], 4)}
+                        for t, _, _ in TOKEN_TYPES],
+            "by_source": by_source, "by_session": by_session[:12],
+            "agents": agents, "big_items": big_items[:15],
             "by_model": [{"model": m, **{k: (round(v, 2) if k == "cost" else v)
                                          for k, v in d.items()}}
                          for m, d in sorted(by_model.items(),

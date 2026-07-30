@@ -344,8 +344,11 @@
     border: 1px solid var(--bg2); border-radius: 8px; padding: .6rem .6rem .3rem;
     margin-bottom: .3rem; }
   .chart .cbar { flex: 1; min-width: 3px; background: var(--aqua);
-    border-radius: 2px 2px 0 0; position: relative; }
+    border-radius: 2px 2px 0 0; position: relative;
+    display: flex; flex-direction: column; overflow: hidden; }
+  .chart .cbar .seg { width: 100%; }
   .chart .cbar:hover { background: var(--yellow); }
+  .chart .cbar:hover .seg { opacity: .55; }
   .chartkey { display: flex; justify-content: space-between; color: var(--fg2);
     font-size: .68rem; margin-bottom: 1.2rem; }
   #palette { position: fixed; inset: 0; background: var(--shadow); z-index: 25;

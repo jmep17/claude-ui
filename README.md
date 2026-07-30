@@ -21,6 +21,14 @@ owns, links, tracks, or syncs anything:
   statusline script into the config dir and points the `statusLine` key at it.
   Setup pieces are idempotent, derive their installed state by inspection, and
   are removable.
+- **Insight** into what your config costs at the start of every session, which
+  skills and commands actually get used, and which Bash commands you keep
+  approving by hand.
+- **Costs** — API-price cost of your usage, priced locally from the session
+  transcripts, broken down by billed token type, by what put those tokens in
+  context (tool results per tool, your prompts, model output, the system
+  preamble), by the biggest individual tool results, and by model, session,
+  subagent and project.
 - **Doctor** for machine health: broken symlinks, leftover backups, hooks or
   statusline entries pointing at missing executables, and more.
 
