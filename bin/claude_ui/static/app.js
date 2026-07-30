@@ -102,7 +102,7 @@ function modal({ title, text, fields = [], ok = "OK", danger = false }) {
         if (f.placeholder) inp.placeholder = f.placeholder;
       }
       inputs[f.id] = inp;
-      row.appendChild(inp);
+      row.appendChild(inp.tagName === "SELECT" ? filterSelect(inp) : inp);
       box.appendChild(row);
     }
     const done = (val) => {
@@ -115,7 +115,9 @@ function modal({ title, text, fields = [], ok = "OK", danger = false }) {
       Object.entries(inputs).map(([k, i]) => [k, i.value.trim()])));
     const onkey = (e) => {
       if (e.key === "Escape") { e.stopPropagation(); done(null); }
-      else if (e.key === "Enter" && e.target.tagName !== "SELECT") {
+      // Enter opens a dropdown (native or filterable) rather than submitting
+      else if (e.key === "Enter" && e.target.tagName !== "SELECT"
+               && !e.target.closest(".fsel")) {
         e.preventDefault();
         submit();
       }
@@ -135,13 +137,137 @@ function modal({ title, text, fields = [], ok = "OK", danger = false }) {
     box.appendChild(btns);
     m.appendChild(box);
     const first = Object.values(inputs)[0];
-    (first || okb).focus();
+    ((first && (first.fselTrigger || first)) || okb).focus();
     if (first && first.select) first.select();
   });
 }
 
 const mconfirm = (title, text, ok) =>
   modal({ title, text, ok: ok || "confirm", danger: true }).then((r) => r !== null);
+
+// ------------------------------------------------------------ filterable select
+// Long option lists (hook events, docs-augmented enums, templates) are painful
+// to scan in a native dropdown, so any select past FSEL_MIN options is upgraded:
+// a trigger button plus a popup with a filter box over the options, matched with
+// the same fuzzy() the command palette uses. The <select> stays in the DOM as the
+// value holder — callers keep reading .value, listening for change, and assigning
+// .value programmatically — so only the node they lay out changes. Populate the
+// select fully, then hand it to filterSelect() and append what comes back.
+const FSEL_MIN = 6;
+
+function filterSelect(sel) {
+  if (sel.options.length <= FSEL_MIN) return sel;
+  const wrap = document.createElement("span");
+  wrap.className = "fsel";
+  sel.hidden = true;
+  sel.tabIndex = -1;
+  const trig = document.createElement("button");
+  trig.type = "button";
+  trig.className = "fseltrig";
+  const label = document.createElement("span");
+  label.className = "fsellbl";
+  const caret = document.createElement("span");
+  caret.className = "fselcar";
+  caret.textContent = "▾";
+  trig.append(label, caret);
+  wrap.append(trig, sel);
+  sel.fselTrigger = trig;  // modal() focuses this instead of the hidden select
+
+  // the current option's text, refreshed after every change (handlers may reset
+  // the value themselves, as the template picker does)
+  const sync = () => {
+    const o = sel.selectedOptions[0];
+    label.textContent = o ? o.textContent : "";
+  };
+  sync();
+
+  let pop = null, opts = [], hits = [], cur = 0, draw = () => {};
+
+  const close = () => {
+    if (!pop) return;
+    pop.remove();
+    pop = null;
+    removeEventListener("keydown", onkey, true);
+    removeEventListener("mousedown", onout, true);
+    sync();
+  };
+
+  const pick = (o) => {
+    if (!o) return;
+    sel.value = o.value;
+    close();
+    trig.focus();
+    sel.dispatchEvent(new Event("change", { bubbles: true }));
+    sync();
+  };
+
+  // capture on window so the popup's keys win over the modal's and the app's
+  // own document-level capture handlers while it is open
+  const onkey = (e) => {
+    const keys = ["ArrowDown", "ArrowUp", "Enter", "Escape", "Tab"];
+    if (!keys.includes(e.key)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "ArrowDown") { cur = Math.min(cur + 1, hits.length - 1); draw(); }
+    else if (e.key === "ArrowUp") { cur = Math.max(cur - 1, 0); draw(); }
+    else if (e.key === "Enter") pick(hits[cur]);
+    else { close(); trig.focus(); }
+  };
+  const onout = (e) => { if (!wrap.contains(e.target)) close(); };
+
+  const open = () => {
+    // options can change between renders (live docs suggestions), so read them
+    // fresh; disabled entries are labels ("insert template…"), not choices
+    opts = [...sel.options].filter((o) => !o.disabled)
+      .map((o) => ({ value: o.value, text: o.textContent }));
+    hits = opts;
+    cur = Math.max(0, opts.findIndex((o) => o.value === sel.value));
+    pop = document.createElement("div");
+    pop.className = "fselpop";
+    const q = document.createElement("input");
+    q.type = "text";
+    q.className = "fselq";
+    q.placeholder = "filter…";
+    const list = document.createElement("div");
+    list.className = "fsellist";
+    draw = () => {
+      list.innerHTML = "";
+      if (!hits.length) {
+        list.innerHTML = '<div class="fselempty">no matches</div>';
+        return;
+      }
+      hits.forEach((o, i) => {
+        const row = document.createElement("div");
+        row.className = "fselrow" + (i === cur ? " sel" : "")
+          + (o.value === sel.value ? " on" : "");
+        row.textContent = o.text;
+        row.onmousedown = (e) => { e.preventDefault(); pick(o); };
+        list.appendChild(row);
+        if (i === cur) setTimeout(() => row.scrollIntoView({ block: "nearest" }));
+      });
+    };
+    q.oninput = () => {
+      const s = q.value.trim().toLowerCase();
+      hits = s ? opts.filter((o) => fuzzy(s, o.text + " " + o.value) >= 0) : opts;
+      cur = 0;
+      draw();
+    };
+    draw();
+    pop.append(q, list);
+    wrap.appendChild(pop);
+    // hang the popup off the right edge instead when it would run off-screen
+    if (pop.getBoundingClientRect().right > innerWidth - 8) {
+      pop.style.left = "auto";
+      pop.style.right = "0";
+    }
+    addEventListener("keydown", onkey, true);
+    addEventListener("mousedown", onout, true);
+    q.focus();
+  };
+
+  trig.onclick = () => { if (pop) { close(); trig.focus(); } else open(); };
+  return wrap;
+}
 
 // Small popup menu anchored to a button (row overflow actions).
 function openMenu(anchor, entries) {
@@ -325,7 +451,7 @@ function scalarControl(f, value, ph) {
     if (value !== undefined && value !== null && !vals.includes(String(value)))
       sel.appendChild(opt(String(value), String(value) + " (current)"));
     if (value !== undefined && value !== null) sel.value = String(value);
-    return { node: sel, collect: () => sel.value === "" ? undefined : sel.value };
+    return { node: filterSelect(sel), collect: () => sel.value === "" ? undefined : sel.value };
   }
   const inp = document.createElement("input");
   const sugg = suggestFor(f.key, f.values);
@@ -485,7 +611,7 @@ function jsonForm(ctrl, s, cur, isSet) {
       ta.value = JSON.stringify(t.value, null, 2);
       fit();
     };
-    ctrl.appendChild(sel);
+    ctrl.appendChild(filterSelect(sel));
   }
   ctrl.appendChild(ta);
   return () => {

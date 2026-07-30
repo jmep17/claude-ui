@@ -42,6 +42,30 @@
     background: var(--bg1); color: var(--fg); border: 1px solid var(--bg2);
     border-radius: 6px; padding: .2rem .4rem; font: inherit; font-size: .72rem;
   }
+  /* filterable select: trigger button + popup filter box over the options */
+  .fsel { position: relative; display: inline-block; max-width: 100%; }
+  .fseltrig {
+    display: flex; align-items: center; gap: .4rem; width: 100%;
+    padding: .22rem .4rem; font-size: .72rem; text-align: left; }
+  .fseltrig:focus { outline: none; border-color: var(--blue); }
+  .fseltrig .fsellbl { overflow: hidden; text-overflow: ellipsis; }
+  .fseltrig .fselcar { margin-left: auto; color: var(--fg2); }
+  .fselpop {
+    position: absolute; z-index: 26; top: calc(100% + 3px); left: 0;
+    min-width: 100%; width: max-content; max-width: min(24rem, 90vw);
+    background: var(--bg); border: 1px solid var(--bg2); border-radius: 8px;
+    box-shadow: 0 8px 30px var(--shadow); overflow: hidden; }
+  .fselpop .fselq {
+    width: 100%; border: 0; border-bottom: 1px solid var(--bg2);
+    border-radius: 0; background: var(--bg); color: var(--fg);
+    padding: .4rem .6rem; font: inherit; font-size: .75rem; }
+  .fselpop .fselq:focus { outline: none; }
+  .fsellist { max-height: 15rem; overflow-y: auto; }
+  .fselrow { padding: .3rem .6rem; font-size: .75rem; cursor: pointer;
+    overflow-wrap: anywhere; }
+  .fselrow.on { color: var(--yellow); }
+  .fselrow.sel, .fselrow:hover { background: var(--bg1); }
+  .fselempty { padding: .4rem .6rem; color: var(--fg2); font-size: .75rem; }
   #links, #git { border: 1px solid var(--bg2); border-radius: 8px; padding: .75rem .9rem; margin-bottom: 1rem; }
   #links summary, #git summary { cursor: pointer; color: var(--fg2); font-size: .8rem;
     text-transform: uppercase; letter-spacing: .1em; }
@@ -135,10 +159,11 @@
     width: 100%; display: flex; flex-direction: column; gap: .35rem; margin-bottom: .1rem; }
   .srow .sctrl .formrow { display: flex; gap: .4rem; align-items: center; width: 100%; }
   .srow .sctrl .formrow input.kk { flex: 0 1 11rem; min-width: 6rem; }
-  .srow .sctrl .formrow select { flex: 1; min-width: 8rem; }
+  .srow .sctrl .formrow select, .srow .sctrl .formrow .fsel { flex: 1; min-width: 8rem; }
   .srow .sctrl .formfield { display: flex; flex-direction: column; gap: .2rem; width: 100%; }
   .srow .sctrl .formfield .flabel { font-size: .7rem; color: var(--fg2); }
-  .srow .sctrl .formfield select { align-self: flex-start; min-width: 8rem; }
+  .srow .sctrl .formfield select, .srow .sctrl .formfield .fsel {
+    align-self: flex-start; min-width: 8rem; }
   .sethead { color: var(--fg2); font-size: .8rem; margin-bottom: .75rem; }
   .fedit { width: 100%; background: var(--bg1); border: 1px solid var(--bg2);
     color: var(--fg); border-radius: 6px; font: inherit; font-size: .78rem;
@@ -254,6 +279,9 @@
   .mbox .mrow label { color: var(--fg2); }
   .mbox .mrow input, .mbox .mrow select { width: 100%; padding: .4rem .6rem;
     font-size: .82rem; }
+  .mbox .mrow .fsel { width: 100%; }
+  .mbox .mrow .fseltrig { padding: .4rem .6rem; font-size: .82rem; }
+  .mbox .mrow .fselpop .fselq { font-size: .82rem; }
   .mbox .mbtns { display: flex; gap: .6rem; justify-content: flex-end;
     margin-top: .9rem; flex-wrap: wrap; }
   .ftabs { display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .6rem; }
