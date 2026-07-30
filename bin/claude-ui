@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""Local dashboard + editor for the user's live Claude Code config.
+
+Usage:  bin/claude-ui [--port 7333]
+
+Shows everything actually on this machine and edits it in place — it never
+owns, links, tracks, or syncs anything:
+
+  <config>/skills/            dirs with SKILL.md
+  <config>/commands/          slash commands: .md files (subdirs namespace)
+  <config>/agents/            custom subagents: .md files
+  <config>/output-styles/     output styles: .md files
+  <config>/CLAUDE.md, settings.json, keybindings.json
+  ~/.claude.json              user-scope MCP servers
+
+Enable/disable is the only stateful action: disabled things move to
+<config>/disabled/ (a plain visible dir outside everything Claude Code
+scans) and back. The filesystem is the entire state — no manifest.
+
+The config dir defaults to ~/.claude, honors $CLAUDE_CONFIG_DIR, and can
+be overridden in the UI (persisted to the gitignored .claude-ui.json,
+which holds nothing else). Stdlib only.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from claude_ui.server import main  # noqa: E402
+
+if __name__ == "__main__":
+    main()

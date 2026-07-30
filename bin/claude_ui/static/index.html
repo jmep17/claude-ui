@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude config</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+<main>
+  <div class="head">
+    <h1><span class="cfg" id="cfgprefix">~/.claude/</span>config</h1>
+    <span class="spring"></span>
+    <button class="small" id="themebtn" title="toggle light/dark theme">◐ theme</button>
+  </div>
+  <p class="sub">A dashboard for your live Claude config — skills, commands, agents, output styles, MCP servers, statusline, and settings. Everything shown is real, on this machine; enable/disable moves items in and out of <b>disabled/</b> but nothing is deleted or committed behind your back. <b>Ctrl/⌘-K</b> opens the command palette.</p>
+  <div class="cfgdir" id="cfgrow"></div>
+  <div class="cfgdir hint" id="cfghint"></div>
+  <div class="tabs" id="tabs"></div>
+  <div id="editorview" hidden></div>
+  <div id="itemsview" hidden></div>
+  <div id="mcpview" hidden></div>
+  <div id="stlview" hidden></div>
+  <div id="setupview" hidden></div>
+  <div id="settingsview" hidden></div>
+  <div id="insightview" hidden></div>
+  <div id="costsview" hidden></div>
+  <div id="doctorview" hidden></div>
+</main>
+<div id="toasts"></div>
+<div id="modal" hidden></div>
+<div id="palette" hidden></div>
+<script>
+const SCHEMA = __SCHEMA__;
+const TOKEN = "__TOKEN__";
+</script>
+<script src="/app.js"></script>

@@ -1,0 +1,4 @@
+# Machine-local UI config written beside the checkout
+.claude-ui.json
+
+__pycache__/
