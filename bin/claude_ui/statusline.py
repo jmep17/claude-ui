@@ -149,16 +149,36 @@ CACHE = os.path.expanduser("~/.cache/claude-statusline-costs.json")
 def local_tz():
     # ccusage groups days in its own default timezone; ours is date.today()'s.
     # Passing the local IANA zone keeps both on the same day boundaries.
+    # date.today() honours $TZ in every form libc accepts, so take it whenever it
+    # names a zone — requiring a "/" sent TZ=UTC, GMT, EST5EDT and friends down the
+    # /etc/localtime path instead, which is a *different* zone and shifts every
+    # window by a day.
     tz = os.environ.get("TZ", "").lstrip(":")
-    if "/" in tz:
-        return tz
-    path = os.path.realpath("/etc/localtime")
-    _, _, zone = path.partition("zoneinfo/")
-    return zone
+    if tz:
+        # A POSIX rule string ("EST5EDT,M3.2.0,M11.1.0") has no IANA name. Report
+        # nothing rather than /etc/localtime, which libc is *not* using here — no
+        # --timezone leaves ccusage on its own default, which is a documented
+        # fallback; a confidently wrong zone is a silent off-by-one-day.
+        return "" if ("," in tz or " " in tz) else tz
+    _, _, tz = os.path.realpath("/etc/localtime").partition("zoneinfo/")
+    # Distros that ship parallel zoneinfo trees resolve to posix/<zone> or
+    # right/<zone>; neither prefix is a valid IANA name.
+    for p in ("posix/", "right/"):
+        if tz.startswith(p):
+            tz = tz[len(p):]
+    return tz
 
 def ccusage_daily(argv):
-    out = subprocess.run(argv, capture_output=True, text=True, timeout=300)
-    return json.loads(out.stdout).get("daily") or []
+    out = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    # Without these checks a runner that fails while still printing parseable JSON
+    # yields an empty day list, which is not None — the retry loop stops, zeros are
+    # cached, and the status line shows "$0.00 today" as though it were true.
+    if out.returncode != 0:
+        raise RuntimeError("ccusage exited " + str(out.returncode))
+    data = json.loads(out.stdout)
+    if not isinstance(data, dict) or "daily" not in data:
+        raise ValueError("no daily data in ccusage output")
+    return data["daily"] or []
 
 def claude_day_cost(row):
     # ccusage's totalCost sums every model it saw; a local model served through
@@ -183,18 +203,21 @@ def refresh_costs():
         cmds.append(["npx", "-y", "ccusage@latest"])
     if shutil.which("bunx"):
         cmds.append(["bunx", "ccusage@latest"])
-    data = {"ts": time.time()}
+    data = {}
     if cmds:
         since = min(month_start, week_start).strftime("%Y%m%d")
         tz = local_tz()
+        base = [cmd + ["daily", "--json", "--since", since] for cmd in cmds]
+        # Any runner can be broken independently (stale install, npm auth, missing
+        # --timezone support), so exhaust every runner *with* the timezone before
+        # falling back to ccusage's own default zone. Dropping it silently moves
+        # the day boundary, so it's a last resort rather than a per-runner retry.
+        rounds = ([[a + ["--timezone", tz] for a in base]] if tz else []) + [base]
         rows = err = None
-        # Any runner can be broken independently (stale install, npm auth,
-        # missing --timezone support) — keep trying before giving up.
-        for cmd in cmds:
-            args = cmd + ["daily", "--json", "--since", since]
-            for a in ([args + ["--timezone", tz]] if tz else []) + [args]:
+        for round_args in rounds:
+            for args in round_args:
                 try:
-                    rows = ccusage_daily(a)
+                    rows = ccusage_daily(args)
                     break
                 except Exception as e:
                     err = e
@@ -217,6 +240,10 @@ def refresh_costs():
             if day == today:
                 t += c
         data.update(today=t, week=w, month=m)
+    # Stamped after the work, not before it: ccusage can take a while, and a run
+    # longer than the 300s cache TTL would otherwise write an entry that is already
+    # stale, so every later render would spawn another refresh.
+    data["ts"] = time.time()
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
     with open(CACHE + ".tmp", "w") as f:
         json.dump(data, f)
@@ -227,6 +254,13 @@ if "--refresh-costs" in sys.argv:
         refresh_costs()
     except Exception:
         pass
+    finally:
+        # Release the slot: the lock's mtime only has to bound a refresh that died,
+        # so a finished one shouldn't hold it for the rest of the window.
+        try:
+            os.unlink(CACHE + ".lock")
+        except OSError:
+            pass
     sys.exit(0)
 
 _CC = None
@@ -242,8 +276,11 @@ def _costs():
         _CC = {}
     if time.time() - _CC.get("ts", 0) > 300:
         lock = CACHE + ".lock"
+        # A live refresh deletes this on exit, so the mtime only bounds one that was
+        # killed. It has to exceed the worst-case run (every runner x timeout), or a
+        # slow refresh would let a second and third npx spawn alongside the first.
         try:
-            stale = time.time() - os.path.getmtime(lock) > 120
+            stale = time.time() - os.path.getmtime(lock) > 900
         except OSError:
             stale = True
         if stale:
