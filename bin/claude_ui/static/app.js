@@ -1863,7 +1863,9 @@ async function renderCosts(rescan) {
     "estimated API-price cost of your Claude Code usage, computed locally from " +
     "the transcripts in <b>" + esc(c.dir) + "</b> (input/output/cache tokens × " +
     "list prices for the day they were used; cache writes at 2× base for the " +
-    "1-hour TTL and 1.25× for the 5-minute one, cache reads at 0.1×). Days are " +
+    "1-hour TTL and 1.25× for the 5-minute one, cache reads at 0.1×; fast-mode " +
+    "requests at 2× and US-pinned inference at 1.1× on top of those, plus $10 " +
+    "per 1,000 web searches). Days are " +
     "your local days. On a Pro/Max subscription this shows what the same usage " +
     "<i>would</i> cost via the API.";
   el.appendChild(head);
@@ -1878,9 +1880,10 @@ async function renderCosts(rescan) {
   tiles.innerHTML =
     tile(usd(c.totals.today), "today") +
     tile(usd(c.totals.last7), "last 7 days") +
+    tile(usd(c.totals.last30), "last 30 days") +
     tile(usd(c.totals.month), "month to date") +
     tile(usd(c.totals.all), "all time") +
-    tile(usd(c.cache_savings), "saved by caching");
+    tile(usd(c.cache_savings), "saved by caching, all time");
   el.appendChild(tiles);
 
   if (c.days.length) {

@@ -32,7 +32,7 @@ USAGE_CACHE = Path.home() / ".cache" / "claude-ui-usage.json"
 
 # Bump whenever the shape or meaning of the cached per-file data changes, so
 # stale entries are re-scanned instead of being mixed with the current format.
-CACHE_V = 4
+CACHE_V = 5
 
 def projects_dir():
     """Transcripts live under the resolved config dir, not always ~/.claude."""
@@ -57,24 +57,47 @@ def _local_day(ts):
     if not m:
         return ""
     y, mo, d, h, mi, s = (int(g) for g in m.groups()[:6])
-    epoch = calendar.timegm((y, mo, d, h, mi, s, 0, 1, 0))
+    try:
+        # The regex only checks shape, so "2026-13-99" reaches this point and
+        # timegm raises. One malformed line must not take down the whole scan.
+        epoch = calendar.timegm((y, mo, d, h, mi, s, 0, 1, 0))
+    except ValueError:
+        return ""
     off = m.group(7)
     if off and off not in ("Z", "z"):
         digits = off[1:].replace(":", "")
         delta = int(digits[:2]) * 3600 + int(digits[2:]) * 60
         epoch += delta if off[0] == "-" else -delta
-    return time.strftime("%Y-%m-%d", time.localtime(epoch))
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(epoch))
+    except (ValueError, OSError, OverflowError):
+        return ""
+
+DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+def _is_day(key):
+    """True for a real local-date bucket, false for the "unknown" catch-all.
+
+    Day buckets are compared as strings, and "unknown" sorts after every ISO date
+    ('u' > '2'), so an untimestamped message would land in *every* dated window
+    while still failing the == test for today. Windows filter on this instead.
+    """
+    return bool(DAY_RE.fullmatch(key or ""))
 
 def _tz_fingerprint():
     """Cached day buckets are local dates, so a machine timezone change makes
     them wrong — fold the zone into the cache validity check."""
     return "|".join(time.tzname) + "|" + str(time.timezone)
 
-# Token counts are accumulated per (day, model) into one row of this shape.
-ROW_ZERO = [0, 0, 0, 0, 0, 0]
-R_IN, R_OUT, R_CW5M, R_CW1H, R_CR, R_MSGS = range(6)
+# Token counts are accumulated per (day, model, rate) into one row of this shape.
+ROW_ZERO = [0, 0, 0, 0, 0, 0, 0]
+R_IN, R_OUT, R_CW5M, R_CW1H, R_CR, R_WEB, R_MSGS = range(7)
 
-def _msg_key(entry, msg):
+# Index of the first counter in a cached per-message entry, which is laid out as
+# [day, model, rate, in, out, cacheW5m, cacheW1h, cacheR, webSearches].
+R_FIRST_COUNT = 3
+
+def _msg_key(entry, msg, path, lineno):
     """Identity of the API response an entry belongs to, for de-duplication.
 
     One assistant message spans several transcript lines — one per content block
@@ -82,13 +105,48 @@ def _msg_key(entry, msg):
     lines therefore multiplies a message's tokens by its block count (~2.4x in
     practice). The same message can also appear in more than one file when a
     session is forked. Keyed on message id + request id, matching ccusage, so
-    the two agree; entries too old to carry an id fall back to the line's own
-    uuid, which counts them once each rather than dropping them.
+    the two agree; entries too old to carry an id fall back to their uuid, and
+    then to their position in the file, which counts them once each rather than
+    dropping them. Both fallbacks have to be stable across runs: these keys are
+    written to the on-disk cache and de-duplicated against globally.
     """
     mid = msg.get("id")
     if mid:
         return str(mid) + "\t" + str(entry.get("requestId") or "")
-    return "uuid\t" + str(entry.get("uuid") or id(entry))
+    uid = entry.get("uuid")
+    if uid:
+        return "uuid\t" + str(uid)
+    return "line\t" + str(path) + "\t" + str(lineno)
+
+# Premiums that scale every token category of a single message. Fast mode bills at
+# 2x base ($10/$50 against Opus 5's $5/$25), but only on the models that actually
+# run it — Opus 4.6 accepts speed=fast, runs at standard speed and bills standard,
+# and Opus 4.7 rejects it outright. Pinning inference to the US costs 1.1x. They
+# stack with each other and sit on top of the cache multipliers below.
+FAST_MODELS = ("opus-5", "opus-4-8")
+
+def _rate_multiplier(model, usage):
+    """Per-message multiplier on token pricing (1.0 for an ordinary request)."""
+    m = (model or "").lower()
+    mult = 1.0
+    if usage.get("speed") == "fast" and any(s in m for s in FAST_MODELS):
+        mult *= 2
+    if usage.get("inference_geo") == "us":
+        mult *= 1.1
+    return mult
+
+# A day can mix rates — fast mode is toggled mid-session — so rows are bucketed by
+# model *and* multiplier and split apart again when priced. The composite key never
+# leaves this module.
+def _rate_key(model, mult):
+    return model + "\x1f" + format(mult, ".4f")
+
+def _split_rate_key(key):
+    model, _, mult = key.partition("\x1f")
+    try:
+        return model, float(mult)
+    except ValueError:
+        return model, 1.0
 
 MAX_TRANSCRIPT = 64 * 1024 * 1024
 
@@ -138,7 +196,7 @@ def _scan_transcript(path):
 
     try:
         with open(path, errors="replace") as f:
-            for line in f:
+            for lineno, line in enumerate(f, 1):
                 if ('"usage"' not in line and "command-name" not in line
                         and '"Skill"' not in line and '"Task"' not in line
                         and '"Bash"' not in line and '"cwd"' not in line):
@@ -161,15 +219,33 @@ def _scan_transcript(path):
                     w1h = int((cc.get("ephemeral_1h_input_tokens") or 0)
                               if isinstance(cc, dict) else 0)
                     w1h = max(0, min(w1h, cw))
-                    # setdefault, not assignment: repeated lines for one message
-                    # carry identical usage but drift by milliseconds, so keeping
-                    # the first fixes the day bucket regardless of read order.
-                    msgs.setdefault(_msg_key(d, msg), [
+                    # Web search is billed per search on top of the token rates;
+                    # web fetch, the other server_tool_use counter, is free.
+                    stu = usage.get("server_tool_use")
+                    web = int((stu.get("web_search_requests") or 0)
+                              if isinstance(stu, dict) else 0)
+                    entry = [
                         _local_day(ts) or "unknown", msg["model"],
+                        _rate_multiplier(msg["model"], usage),
                         int(usage.get("input_tokens") or 0),
                         int(usage.get("output_tokens") or 0),
                         cw - w1h, w1h,
-                        int(usage.get("cache_read_input_tokens") or 0)])
+                        int(usage.get("cache_read_input_tokens") or 0), web]
+                    key = _msg_key(d, msg, path, lineno)
+                    prev = msgs.get(key)
+                    if prev is None:
+                        msgs[key] = entry
+                    else:
+                        # The lines of one message are written as it streams, so an
+                        # early content block can carry a partial usage and a later
+                        # one the authoritative total (seen on ~9% of messages, and
+                        # the whole of a 3% output-token shortfall against ccusage).
+                        # Take the largest of each counter — order-independent,
+                        # unlike last-wins — while keeping the first line's day and
+                        # rate, whose timestamps drift by milliseconds.
+                        for i in range(R_FIRST_COUNT, len(entry)):
+                            if entry[i] > prev[i]:
+                                prev[i] = entry[i]
                 content = msg.get("content")
                 for text in texts(content):
                     for m in CMD_RE.finditer(text):
@@ -251,10 +327,10 @@ def transcript_stats(rescan=False):
             if mkey in seen_msgs:   # same message already counted from another file
                 continue
             seen_msgs.add(mkey)
-            day, model = e[0], e[1]
+            day, rkey = e[0], _rate_key(e[1], e[2])
             for agg in (days.setdefault(day, {}), pdays.setdefault(day, {})):
-                s = agg.setdefault(model, ROW_ZERO[:])
-                for i, v in enumerate(e[2:]):
+                s = agg.setdefault(rkey, ROW_ZERO[:])
+                for i, v in enumerate(e[3:]):
                     s[i] += v
                 s[R_MSGS] += 1
         for prefix, n in (data.get("bash") or {}).items():
@@ -264,7 +340,10 @@ def transcript_stats(rescan=False):
             "dir": tilde(pdir), "available": pdir.is_dir()}
 
 def usage_stats(rescan=False):
-    return transcript_stats(rescan)
+    # The insight tab wants the item/bash counters, not the cost aggregates — and
+    # `days`/`projects` are keyed by the internal rate key, so don't ship them.
+    st = transcript_stats(rescan)
+    return {k: v for k, v in st.items() if k not in ("days", "projects")}
 
 # USD per million tokens, (model-id substring, input, output[, last day the rate
 # applied]). First match wins, so put narrower substrings first. A dated entry
@@ -281,14 +360,33 @@ PRICING = [
     ("sonnet", 3, 15),
 ]
 
-def model_price(model, day):
-    """(input, output, known) $/Mtok for a model on a given local day."""
+def _override_price(overrides, model):
+    """(input, output) from a matching `pricing` override, else None.
+
+    One place decides what counts as a usable override, so `_excluded` can't opt a
+    model into the totals that `model_price` then declines to price — a malformed
+    entry like {"llama": 3} used to do exactly that, admitting a local model and
+    then billing it at the opus-tier guess.
+    """
+    if not isinstance(overrides, dict):
+        return None
     m = (model or "").lower()
-    overrides = read_cfg().get("pricing")
-    if isinstance(overrides, dict):
-        for sub, v in overrides.items():
-            if (isinstance(v, list) and len(v) == 2 and sub.lower() in m):
-                return float(v[0]), float(v[1]), True
+    for sub, v in overrides.items():
+        if str(sub).lower() in m and isinstance(v, (list, tuple)) and len(v) == 2:
+            try:
+                return float(v[0]), float(v[1])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+def model_price(model, day, overrides=None):
+    """(input, output, known) $/Mtok for a model on a given local day."""
+    if overrides is None:
+        overrides = read_cfg().get("pricing")
+    ov = _override_price(overrides, model)
+    if ov:
+        return ov[0], ov[1], True
+    m = (model or "").lower()
     for entry in PRICING:
         sub, pin, pout = entry[0], entry[1], entry[2]
         until = entry[3] if len(entry) > 3 else None
@@ -299,24 +397,28 @@ def model_price(model, day):
     return 5, 25, False  # unknown model: opus-tier guess, flagged in the UI
 
 # Cache writes are billed above the base input rate (2x for the 1-hour TTL, 1.25x
-# for the 5-minute one) and cache reads at 0.1x.
-def _row_cost(row, pin, pout):
-    return (row[R_IN] * pin + row[R_OUT] * pout
-            + row[R_CW5M] * pin * 1.25 + row[R_CW1H] * pin * 2
-            + row[R_CR] * pin * 0.1) / 1e6
+# for the 5-minute one) and cache reads at 0.1x. `mult` carries the per-message
+# premiums (fast mode, US-pinned inference), which scale every token category and
+# stack on top of the cache multipliers. Web search is a flat per-search charge
+# outside the token rates.
+WEB_SEARCH_USD = 0.01   # $10 per 1,000 searches
+
+def _row_cost(row, pin, pout, mult=1.0):
+    return ((row[R_IN] * pin + row[R_OUT] * pout
+             + row[R_CW5M] * pin * 1.25 + row[R_CW1H] * pin * 2
+             + row[R_CR] * pin * 0.1) * mult / 1e6
+            + row[R_WEB] * WEB_SEARCH_USD)
 
 # The dashboard prices Claude models only. Anything else served through the same
 # CLI — local models via ollama/proxies, the "<synthetic>" placeholder — is
 # dropped entirely (no row, no tokens, no total). A `pricing` override opts a
 # non-Claude id back in, since setting a price signals intent to count it.
-def _excluded(model):
-    m = (model or "").lower()
-    if "claude" in m:
+def _excluded(model, overrides=None):
+    if "claude" in (model or "").lower():
         return False
-    overrides = read_cfg().get("pricing")
-    if isinstance(overrides, dict):
-        return not any(str(sub).lower() in m for sub in overrides)
-    return True
+    if overrides is None:
+        overrides = read_cfg().get("pricing")
+    return _override_price(overrides, model) is None
 
 def cost_stats(rescan=False):
     st = transcript_stats(rescan)
@@ -328,23 +430,30 @@ def cost_stats(rescan=False):
     today = d.isoformat()
     d7 = (d - datetime.timedelta(days=6)).isoformat()
     d30 = (d - datetime.timedelta(days=29)).isoformat()
-    month = today[:8] + "01"
+    month = d.replace(day=1).isoformat()
     per_day = []
     by_model = {}
     totals = {"today": 0, "last7": 0, "last30": 0, "month": 0, "all": 0}
     cache_savings = 0.0
     unknown = set()
+    # Read once: the overrides are consulted for every (day, model, rate) row, and
+    # re-reading mid-computation could price two days off different config.
+    overrides = read_cfg().get("pricing")
     for day in sorted(st["days"]):
+        dated = _is_day(day)
         drow = {"day": day, "cost": 0, "by": {}}
-        for model, row in st["days"][day].items():
-            if _excluded(model):
+        for rkey, row in st["days"][day].items():
+            model, mult = _split_rate_key(rkey)
+            if _excluded(model, overrides):
                 continue
-            pin, pout, known = model_price(model, day)
+            pin, pout, known = model_price(model, day, overrides)
             if not known:
                 unknown.add(model)
-            c = _row_cost(row, pin, pout)
+            c = _row_cost(row, pin, pout, mult)
             drow["cost"] += c
-            drow["by"][model] = round(c, 4)
+            # One model can appear at more than one rate on the same day, so
+            # accumulate rather than assign.
+            drow["by"][model] = round(drow["by"].get(model, 0) + c, 4)
             m = by_model.setdefault(model, {"cost": 0, "in": 0, "out": 0,
                                             "cacheR": 0, "cacheW": 0, "msgs": 0})
             m["cost"] += c
@@ -353,8 +462,14 @@ def cost_stats(rescan=False):
             m["cacheW"] += row[R_CW5M] + row[R_CW1H]
             m["cacheR"] += row[R_CR]
             m["msgs"] += row[R_MSGS]
-            cache_savings += row[R_CR] * pin * 0.9 / 1e6
+            cache_savings += row[R_CR] * pin * 0.9 * mult / 1e6
             totals["all"] += c
+            # Dated windows take real days only, and are bounded at both ends: the
+            # "unknown" bucket sorts past every ISO date, and a clock-skewed future
+            # day would otherwise land in all three. Both still count toward the
+            # all-time total — the tokens were genuinely spent.
+            if not dated or day > today:
+                continue
             if day == today:
                 totals["today"] += c
             if day >= d7:
@@ -364,16 +479,19 @@ def cost_stats(rescan=False):
             if day >= month:
                 totals["month"] += c
         drow["cost"] = round(drow["cost"], 4)
-        per_day.append(drow)
+        if dated:
+            per_day.append(drow)
     by_project = []
     for cwd, drows in st["projects"].items():
         c = 0.0
         msgs = 0
         for day, mrows in drows.items():
-            for model, row in mrows.items():
-                if _excluded(model):
+            for rkey, row in mrows.items():
+                model, mult = _split_rate_key(rkey)
+                if _excluded(model, overrides):
                     continue
-                c += _row_cost(row, *model_price(model, day)[:2])
+                c += _row_cost(row, *model_price(model, day, overrides)[:2],
+                               mult=mult)
                 msgs += row[R_MSGS]
         if msgs:
             by_project.append({"cwd": cwd, "cost": round(c, 4), "msgs": msgs})
