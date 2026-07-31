@@ -1,0 +1,542 @@
+/* ===========================================================================
+   theme.css — design tokens, themes, reset, typography.
+
+   The token contract is shadcn/ui's: semantic pairs (--background/--foreground,
+   --card/--card-foreground, …) plus --border/--input/--ring and a --radius
+   scale. components.css styles everything in terms of these names only, so a
+   theme is nothing but a block of custom properties — no component CSS has to
+   know a colour.
+
+   Themes come in families (clay, slate, gruvbox, nord) × modes (light, dark),
+   selected with data-family / data-mode on <html>. "system" mode resolves to
+   light or dark in ui.js before paint, so there is no flash.
+
+   Two extra token groups sit alongside the shadcn ones because this app has
+   domain colours shadcn has no name for:
+     - the ANSI terminal palette (--yellow … --purple, --term) used by the
+       statusline preview, which really is rendering terminal output;
+     - --chart-1…5 for the cost chart and context-budget bar.
+   =========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* ---- shape ---- */
+  --radius: 0.625rem;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  /* ---- type ---- */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter,
+               Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrainsMono Nerd Font", "JetBrains Mono", ui-monospace,
+               SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  /* ---- motion ---- */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast: 90ms;
+  --dur: 150ms;
+  --dur-slow: 240ms;
+
+  /* ---- focus ring ---- */
+  --ring-width: 3px;
+
+  /* ---- elevation ---- */
+  --shadow-xs: 0 1px 2px 0 var(--shadow-color);
+  --shadow-sm: 0 1px 3px 0 var(--shadow-color), 0 1px 2px -1px var(--shadow-color);
+  --shadow-md: 0 4px 6px -1px var(--shadow-color), 0 2px 4px -2px var(--shadow-color);
+  --shadow-lg: 0 10px 15px -3px var(--shadow-color), 0 4px 6px -4px var(--shadow-color);
+  --shadow-xl: 0 20px 25px -5px var(--shadow-color), 0 8px 10px -6px var(--shadow-color);
+
+  /* ---- layout ---- */
+  --page: 1080px;
+  --header-h: 3.25rem;
+}
+
+/* ===========================================================================
+   clay — the default. Warm ivory / graphite neutrals with a terracotta accent.
+   =========================================================================== */
+:root,
+:root[data-family="clay"] {
+  --background: oklch(0.9915 0.0040 85);
+  --foreground: oklch(0.2450 0.0120 55);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2450 0.0120 55);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2450 0.0120 55);
+  --primary: oklch(0.6210 0.1385 40.5);
+  --primary-foreground: oklch(0.9950 0.0040 85);
+  --secondary: oklch(0.9585 0.0090 80);
+  --secondary-foreground: oklch(0.3200 0.0140 55);
+  --muted: oklch(0.9620 0.0075 80);
+  --muted-foreground: oklch(0.5250 0.0140 60);
+  --accent: oklch(0.9470 0.0210 65);
+  --accent-foreground: oklch(0.3000 0.0300 45);
+  --destructive: oklch(0.5770 0.2450 27.3);
+  --destructive-foreground: oklch(0.9850 0 0);
+  --success: oklch(0.5450 0.1250 148);
+  --success-foreground: oklch(0.9850 0 0);
+  --warning: oklch(0.6350 0.1450 62);
+  --warning-foreground: oklch(0.9850 0 0);
+  --info: oklch(0.5350 0.1150 246);
+  --info-foreground: oklch(0.9850 0 0);
+  --border: oklch(0.9020 0.0090 78);
+  --input: oklch(0.8880 0.0100 78);
+  --ring: oklch(0.6210 0.1385 40.5);
+  --shadow-color: oklch(0.2450 0.0120 55 / 0.09);
+  --overlay: oklch(0.2450 0.0120 55 / 0.42);
+
+  --chart-1: oklch(0.6210 0.1385 40.5);
+  --chart-2: oklch(0.5600 0.0900 195);
+  --chart-3: oklch(0.5250 0.1050 258);
+  --chart-4: oklch(0.6400 0.1300 92);
+  --chart-5: oklch(0.5450 0.1300 330);
+
+  --term: oklch(0.9640 0.0170 88);
+  --term-foreground: oklch(0.2900 0.0140 55);
+  --yellow: oklch(0.5950 0.1250 75);
+  --green: oklch(0.5350 0.1200 145);
+  --red: oklch(0.5300 0.2000 27);
+  --blue: oklch(0.5100 0.1000 240);
+  --aqua: oklch(0.5450 0.0800 190);
+  --orange: oklch(0.5800 0.1550 47);
+  --purple: oklch(0.4950 0.1350 330);
+}
+
+:root[data-mode="dark"],
+:root[data-family="clay"][data-mode="dark"] {
+  color-scheme: dark;
+  --background: oklch(0.1850 0.0080 60);
+  --foreground: oklch(0.9350 0.0080 85);
+  --card: oklch(0.2210 0.0090 60);
+  --card-foreground: oklch(0.9350 0.0080 85);
+  --popover: oklch(0.2380 0.0090 60);
+  --popover-foreground: oklch(0.9350 0.0080 85);
+  --primary: oklch(0.7180 0.1330 45);
+  --primary-foreground: oklch(0.2000 0.0180 45);
+  --secondary: oklch(0.2760 0.0100 60);
+  --secondary-foreground: oklch(0.9200 0.0080 85);
+  --muted: oklch(0.2700 0.0090 60);
+  --muted-foreground: oklch(0.6980 0.0110 70);
+  --accent: oklch(0.3220 0.0180 55);
+  --accent-foreground: oklch(0.9400 0.0100 80);
+  --destructive: oklch(0.6800 0.1900 24);
+  --destructive-foreground: oklch(0.1800 0.0150 25);
+  --success: oklch(0.7450 0.1450 148);
+  --success-foreground: oklch(0.1800 0.0200 148);
+  --warning: oklch(0.7900 0.1450 78);
+  --warning-foreground: oklch(0.2000 0.0250 78);
+  --info: oklch(0.7150 0.1050 246);
+  --info-foreground: oklch(0.1800 0.0200 246);
+  --border: oklch(0.3080 0.0090 60);
+  --input: oklch(0.3400 0.0100 60);
+  --ring: oklch(0.7180 0.1330 45);
+  --shadow-color: oklch(0 0 0 / 0.45);
+  --overlay: oklch(0.1200 0.0060 60 / 0.68);
+
+  --chart-1: oklch(0.7180 0.1330 45);
+  --chart-2: oklch(0.7500 0.0950 195);
+  --chart-3: oklch(0.6900 0.0950 258);
+  --chart-4: oklch(0.8100 0.1350 92);
+  --chart-5: oklch(0.7200 0.1150 330);
+
+  --term: oklch(0.1520 0.0070 60);
+  --term-foreground: oklch(0.9100 0.0090 85);
+  --yellow: oklch(0.8450 0.1400 88);
+  --green: oklch(0.8000 0.1500 132);
+  --red: oklch(0.6900 0.2000 25);
+  --blue: oklch(0.7500 0.0700 220);
+  --aqua: oklch(0.8050 0.0950 155);
+  --orange: oklch(0.7350 0.1650 55);
+  --purple: oklch(0.7550 0.1050 350);
+}
+
+/* ===========================================================================
+   slate — restrained cool neutrals, shadcn's own default palette.
+   =========================================================================== */
+:root[data-family="slate"] {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.1450 0.0100 265);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.1450 0.0100 265);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.1450 0.0100 265);
+  --primary: oklch(0.2100 0.0180 265);
+  --primary-foreground: oklch(0.9850 0.0020 250);
+  --secondary: oklch(0.9680 0.0040 265);
+  --secondary-foreground: oklch(0.2100 0.0180 265);
+  --muted: oklch(0.9680 0.0040 265);
+  --muted-foreground: oklch(0.5540 0.0180 265);
+  --accent: oklch(0.9680 0.0040 265);
+  --accent-foreground: oklch(0.2100 0.0180 265);
+  --destructive: oklch(0.5770 0.2450 27.3);
+  --destructive-foreground: oklch(0.9850 0 0);
+  --success: oklch(0.5300 0.1300 152);
+  --success-foreground: oklch(0.9850 0 0);
+  --warning: oklch(0.6600 0.1450 62);
+  --warning-foreground: oklch(0.9850 0 0);
+  --info: oklch(0.5400 0.1900 258);
+  --info-foreground: oklch(0.9850 0 0);
+  --border: oklch(0.9290 0.0060 265);
+  --input: oklch(0.9290 0.0060 265);
+  --ring: oklch(0.7050 0.0150 265);
+  --shadow-color: oklch(0.1450 0.0100 265 / 0.10);
+  --overlay: oklch(0.1450 0.0100 265 / 0.45);
+
+  --chart-1: oklch(0.6460 0.2220 41.1);
+  --chart-2: oklch(0.6000 0.1180 184.7);
+  --chart-3: oklch(0.3980 0.0700 227.4);
+  --chart-4: oklch(0.8280 0.1890 84.4);
+  --chart-5: oklch(0.7690 0.1880 70.1);
+
+  --term: oklch(0.9700 0.0040 265);
+  --term-foreground: oklch(0.2100 0.0180 265);
+  --yellow: oklch(0.6100 0.1300 78);
+  --green: oklch(0.5300 0.1300 152);
+  --red: oklch(0.5500 0.2100 27);
+  --blue: oklch(0.5300 0.1750 258);
+  --aqua: oklch(0.5600 0.1000 195);
+  --orange: oklch(0.6000 0.1650 45);
+  --purple: oklch(0.5200 0.1900 302);
+}
+
+:root[data-family="slate"][data-mode="dark"] {
+  color-scheme: dark;
+  --background: oklch(0.1450 0.0100 265);
+  --foreground: oklch(0.9850 0.0020 250);
+  --card: oklch(0.2100 0.0180 265);
+  --card-foreground: oklch(0.9850 0.0020 250);
+  --popover: oklch(0.2400 0.0200 265);
+  --popover-foreground: oklch(0.9850 0.0020 250);
+  --primary: oklch(0.9220 0.0040 265);
+  --primary-foreground: oklch(0.2100 0.0180 265);
+  --secondary: oklch(0.2790 0.0180 265);
+  --secondary-foreground: oklch(0.9850 0.0020 250);
+  --muted: oklch(0.2790 0.0180 265);
+  --muted-foreground: oklch(0.7080 0.0150 265);
+  --accent: oklch(0.3300 0.0200 265);
+  --accent-foreground: oklch(0.9850 0.0020 250);
+  --destructive: oklch(0.7040 0.1910 22.2);
+  --destructive-foreground: oklch(0.1700 0.0200 25);
+  --success: oklch(0.7300 0.1500 152);
+  --success-foreground: oklch(0.1700 0.0200 152);
+  --warning: oklch(0.8000 0.1450 78);
+  --warning-foreground: oklch(0.2000 0.0250 78);
+  --info: oklch(0.7100 0.1300 258);
+  --info-foreground: oklch(0.1700 0.0200 258);
+  --border: oklch(0.3200 0.0180 265);
+  --input: oklch(0.3700 0.0180 265);
+  --ring: oklch(0.5540 0.0180 265);
+  --shadow-color: oklch(0 0 0 / 0.5);
+  --overlay: oklch(0.0900 0.0080 265 / 0.7);
+
+  --chart-1: oklch(0.4880 0.2430 264.4);
+  --chart-2: oklch(0.6960 0.1700 162.5);
+  --chart-3: oklch(0.7690 0.1880 70.1);
+  --chart-4: oklch(0.6270 0.2650 303.9);
+  --chart-5: oklch(0.6450 0.2460 16.4);
+
+  --term: oklch(0.1200 0.0100 265);
+  --term-foreground: oklch(0.9200 0.0040 265);
+  --yellow: oklch(0.8500 0.1450 88);
+  --green: oklch(0.7900 0.1600 152);
+  --red: oklch(0.7040 0.1910 22.2);
+  --blue: oklch(0.7200 0.1300 258);
+  --aqua: oklch(0.7900 0.1050 190);
+  --orange: oklch(0.7600 0.1650 55);
+  --purple: oklch(0.7300 0.1450 302);
+}
+
+/* ===========================================================================
+   gruvbox — the palette this app shipped with, remapped onto the token
+   contract so long-time users keep the look they know.
+   =========================================================================== */
+:root[data-family="gruvbox"] {
+  --background: #fbf1c7;
+  --foreground: #3c3836;
+  --card: #fbf7e4;
+  --card-foreground: #3c3836;
+  --popover: #f6edcd;
+  --popover-foreground: #3c3836;
+  --primary: #b57614;
+  --primary-foreground: #fbf1c7;
+  --secondary: #ebdbb2;
+  --secondary-foreground: #3c3836;
+  --muted: #ecdfb8;
+  --muted-foreground: #7c6f64;
+  --accent: #e6d5a8;
+  --accent-foreground: #3c3836;
+  --destructive: #9d0006;
+  --destructive-foreground: #fbf1c7;
+  --success: #79740e;
+  --success-foreground: #fbf1c7;
+  --warning: #af3a03;
+  --warning-foreground: #fbf1c7;
+  --info: #076678;
+  --info-foreground: #fbf1c7;
+  --border: #d5c4a1;
+  --input: #bdae93;
+  --ring: #076678;
+  --shadow-color: rgba(60, 56, 54, 0.18);
+  --overlay: rgba(60, 56, 54, 0.42);
+
+  --chart-1: #af3a03;
+  --chart-2: #427b58;
+  --chart-3: #076678;
+  --chart-4: #b57614;
+  --chart-5: #8f3f71;
+
+  --term: #f2e5bc;
+  --term-foreground: #3c3836;
+  --yellow: #b57614;
+  --green: #79740e;
+  --red: #9d0006;
+  --blue: #076678;
+  --aqua: #427b58;
+  --orange: #af3a03;
+  --purple: #8f3f71;
+}
+
+:root[data-family="gruvbox"][data-mode="dark"] {
+  color-scheme: dark;
+  --background: #282828;
+  --foreground: #ebdbb2;
+  --card: #32302f;
+  --card-foreground: #ebdbb2;
+  --popover: #3c3836;
+  --popover-foreground: #ebdbb2;
+  --primary: #fabd2f;
+  --primary-foreground: #282828;
+  --secondary: #3c3836;
+  --secondary-foreground: #ebdbb2;
+  --muted: #3c3836;
+  --muted-foreground: #a89984;
+  --accent: #504945;
+  --accent-foreground: #fbf1c7;
+  --destructive: #fb4934;
+  --destructive-foreground: #282828;
+  --success: #b8bb26;
+  --success-foreground: #282828;
+  --warning: #fe8019;
+  --warning-foreground: #282828;
+  --info: #83a598;
+  --info-foreground: #282828;
+  --border: #504945;
+  --input: #665c54;
+  --ring: #83a598;
+  --shadow-color: rgba(0, 0, 0, 0.45);
+  --overlay: rgba(0, 0, 0, 0.62);
+
+  --chart-1: #fe8019;
+  --chart-2: #8ec07c;
+  --chart-3: #83a598;
+  --chart-4: #fabd2f;
+  --chart-5: #d3869b;
+
+  --term: #1d2021;
+  --term-foreground: #ebdbb2;
+  --yellow: #fabd2f;
+  --green: #b8bb26;
+  --red: #fb4934;
+  --blue: #83a598;
+  --aqua: #8ec07c;
+  --orange: #fe8019;
+  --purple: #d3869b;
+}
+
+/* ===========================================================================
+   nord — cool arctic blues.
+   =========================================================================== */
+:root[data-family="nord"] {
+  --background: #f4f6f9;
+  --foreground: #2e3440;
+  --card: #ffffff;
+  --card-foreground: #2e3440;
+  --popover: #ffffff;
+  --popover-foreground: #2e3440;
+  --primary: #5e81ac;
+  --primary-foreground: #eceff4;
+  --secondary: #e5e9f0;
+  --secondary-foreground: #2e3440;
+  --muted: #e8ecf2;
+  --muted-foreground: #5b6779;
+  --accent: #dfe6ef;
+  --accent-foreground: #2e3440;
+  --destructive: #b0454f;
+  --destructive-foreground: #eceff4;
+  --success: #4a7a52;
+  --success-foreground: #eceff4;
+  --warning: #b07d3c;
+  --warning-foreground: #eceff4;
+  --info: #5e81ac;
+  --info-foreground: #eceff4;
+  --border: #d8dee9;
+  --input: #c9d2e0;
+  --ring: #5e81ac;
+  --shadow-color: rgba(46, 52, 64, 0.12);
+  --overlay: rgba(46, 52, 64, 0.42);
+
+  --chart-1: #5e81ac;
+  --chart-2: #4a7a52;
+  --chart-3: #b07d3c;
+  --chart-4: #7a5b96;
+  --chart-5: #4c8b93;
+
+  --term: #e9edf3;
+  --term-foreground: #2e3440;
+  --yellow: #9a7024;
+  --green: #4a7a52;
+  --red: #a5404a;
+  --blue: #4a6f99;
+  --aqua: #46818a;
+  --orange: #a35f3d;
+  --purple: #74558f;
+}
+
+:root[data-family="nord"][data-mode="dark"] {
+  color-scheme: dark;
+  --background: #2e3440;
+  --foreground: #eceff4;
+  --card: #363d4b;
+  --card-foreground: #eceff4;
+  --popover: #3b4252;
+  --popover-foreground: #eceff4;
+  --primary: #88c0d0;
+  --primary-foreground: #2e3440;
+  --secondary: #3b4252;
+  --secondary-foreground: #eceff4;
+  --muted: #3b4252;
+  --muted-foreground: #9aa5b8;
+  --accent: #434c5e;
+  --accent-foreground: #eceff4;
+  --destructive: #bf616a;
+  --destructive-foreground: #2e3440;
+  --success: #a3be8c;
+  --success-foreground: #2e3440;
+  --warning: #ebcb8b;
+  --warning-foreground: #2e3440;
+  --info: #81a1c1;
+  --info-foreground: #2e3440;
+  --border: #434c5e;
+  --input: #4c566a;
+  --ring: #88c0d0;
+  --shadow-color: rgba(0, 0, 0, 0.4);
+  --overlay: rgba(23, 26, 33, 0.66);
+
+  --chart-1: #88c0d0;
+  --chart-2: #a3be8c;
+  --chart-3: #ebcb8b;
+  --chart-4: #b48ead;
+  --chart-5: #81a1c1;
+
+  --term: #262b35;
+  --term-foreground: #eceff4;
+  --yellow: #ebcb8b;
+  --green: #a3be8c;
+  --red: #bf616a;
+  --blue: #81a1c1;
+  --aqua: #8fbcbb;
+  --orange: #d08770;
+  --purple: #b48ead;
+}
+
+/* ---------------------------------------------------------------------------
+   Legacy aliases. The app grew up on gruvbox variable names and still uses a
+   few inline (statusline chip colours, chart segments). Keeping them mapped
+   means no call site is left pointing at an undefined custom property.
+   --------------------------------------------------------------------------- */
+:root {
+  --bg: var(--background);
+  --bg1: var(--muted);
+  --bg2: var(--border);
+  --fg: var(--foreground);
+  --fg2: var(--muted-foreground);
+  --shadow: var(--shadow-color);
+}
+
+/* ===========================================================================
+   reset + base
+   =========================================================================== */
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+* { margin: 0; }
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scrollbar-color: var(--border) transparent;
+}
+
+html,
+body {
+  max-width: 100%;
+  overflow-x: clip;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-variant-numeric: tabular-nums;
+}
+
+/* the whole surface cross-fades when the theme changes; ui.js adds .theming
+   for one frame so nothing else on the page animates its colours by accident */
+:root.theming,
+:root.theming *,
+:root.theming *::before,
+:root.theming *::after {
+  transition: background-color var(--dur-slow) var(--ease),
+              border-color var(--dur-slow) var(--ease),
+              color var(--dur-slow) var(--ease) !important;
+}
+
+h1, h2, h3, h4, h5, h6 { font-weight: 600; line-height: 1.3; }
+
+a { color: var(--primary); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { text-decoration: underline; }
+
+code, pre, kbd, samp { font-family: var(--font-mono); }
+
+::selection { background: color-mix(in oklab, var(--primary) 26%, transparent); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--muted-foreground) 32%, transparent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
+  background-clip: padding-box;
+}
+
+/* one focus recipe for the entire app: a ring in the theme's ring colour,
+   never on mouse clicks. Every component inherits it unless it overrides. */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+[hidden] { display: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

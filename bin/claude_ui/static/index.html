@@ -1,20 +1,64 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#282828">
 <title>claude config</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/style.css">
-<main>
-  <div class="head">
-    <h1><span class="cfg" id="cfgprefix">~/.claude/</span>config</h1>
+<link rel="stylesheet" href="/theme.css">
+<link rel="stylesheet" href="/components.css">
+<link rel="stylesheet" href="/app.css">
+<script>
+// Apply the stored theme before first paint so there is no light flash on a
+// dark setup (and no dark flash on a light one). ui.js owns it from here on.
+(function () {
+  try {
+    var f = localStorage.getItem("claude-ui-family");
+    var m = localStorage.getItem("claude-ui-mode");
+    if (!/^(clay|slate|gruvbox|nord)$/.test(f || "")) f = "clay";
+    if (m !== "light" && m !== "dark")
+      m = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    document.documentElement.dataset.family = f;
+    document.documentElement.dataset.mode = m;
+  } catch (e) {}
+})();
+</script>
+
+<header class="appbar">
+  <div class="appbar-inner">
+    <a class="brand" href="#skills" title="claude-ui — local Claude Code config dashboard">
+      <span class="brand-mark">C</span>
+      <span class="brand-text">claude<span class="brand-dim">-ui</span></span>
+    </a>
+    <button class="btn cfgchip" id="cfgchip" aria-haspopup="menu" aria-expanded="false"></button>
     <span class="spring"></span>
-    <button class="small" id="themebtn" title="toggle light/dark theme">◐ theme</button>
+    <button class="btn btn-sm btn-ghost searchbtn" id="palettebtn"
+            title="Command palette (Ctrl/⌘ K)">
+      <span class="sb-icon"></span>
+      <span class="sb-text">Search…</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <button class="btn btn-sm btn-icon btn-ghost" id="themebtn"
+            aria-haspopup="menu" aria-expanded="false" title="Theme"></button>
   </div>
-  <p class="sub">A dashboard for your live Claude config — skills, commands, agents, output styles, MCP servers, statusline, and settings. Everything shown is real, on this machine; enable/disable moves items in and out of <b>disabled/</b> but nothing is deleted or committed behind your back. <b>Ctrl/⌘-K</b> opens the command palette.</p>
-  <div class="cfgdir" id="cfgrow"></div>
-  <div class="cfgdir hint" id="cfghint"></div>
-  <div class="tabs" id="tabs"></div>
+</header>
+
+<main>
+  <p class="page-intro">
+    Your live Claude Code configuration — skills, commands, agents, output
+    styles, MCP servers, statusline and settings. Everything shown is real and
+    on this machine; enabling or disabling moves items in and out of
+    <b>disabled/</b>, and nothing is deleted or committed behind your back.
+    Press <kbd>⌘K</kbd> for the command palette.
+  </p>
+
+  <div id="cfgnotice"></div>
+
+  <div class="tabsbar">
+    <nav class="tabs-list" id="tabs" role="tablist" aria-label="Sections"></nav>
+  </div>
+
   <div id="editorview" hidden></div>
   <div id="itemsview" hidden></div>
   <div id="mcpview" hidden></div>
@@ -25,11 +69,14 @@
   <div id="costsview" hidden></div>
   <div id="doctorview" hidden></div>
 </main>
-<div id="toasts"></div>
+
+<div class="toaster" id="toaster" role="region" aria-live="polite" aria-label="Notifications"></div>
 <div id="modal" hidden></div>
 <div id="palette" hidden></div>
+
 <script>
 const SCHEMA = __SCHEMA__;
 const TOKEN = "__TOKEN__";
 </script>
+<script src="/ui.js"></script>
 <script src="/app.js"></script>

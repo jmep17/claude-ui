@@ -1,0 +1,1043 @@
+/* ===========================================================================
+   components.css — a shadcn/ui component layer, hand-written.
+
+   shadcn/ui is React + Tailwind + Radix. This app is deliberately dependency-
+   free and build-step-free, so what is ported here is the part that actually
+   defines the look: the component anatomy (sizes, paddings, radii, weights,
+   shadows), the variant matrix, and the state rules — expressed as plain CSS
+   classes over the tokens in theme.css.
+
+   Naming follows shadcn's component vocabulary (.btn, .card, .badge, .input,
+   .tabs-list/.tabs-trigger, .dialog-*, .dropdown-menu, .command-*, .alert,
+   .switch, .skeleton, …). Bare `button`/`input`/`select`/`textarea` elements
+   get the same styling by default, so existing markup that predates this layer
+   comes along for free.
+   =========================================================================== */
+
+/* ---------------------------------------------------------------- button ---
+   base h-9 / px-4 / text-sm / font-medium / rounded-md, ring on focus-visible,
+   50% opacity when disabled. Variants below only change colour and border. */
+.btn,
+button {
+  --btn-h: 2.25rem;
+  --btn-px: 1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  height: var(--btn-h);
+  padding-inline: var(--btn-px);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--card);
+  color: var(--foreground);
+  border-color: var(--border);
+  box-shadow: var(--shadow-xs);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color var(--dur) var(--ease),
+              border-color var(--dur) var(--ease),
+              color var(--dur) var(--ease),
+              box-shadow var(--dur) var(--ease),
+              opacity var(--dur) var(--ease);
+}
+
+.btn:hover,
+button:hover { background: var(--accent); color: var(--accent-foreground); }
+
+.btn:active,
+button:active { transform: translateY(0.5px); }
+
+.btn:focus-visible,
+button:focus-visible {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 var(--ring-width) color-mix(in oklab, var(--ring) 45%, transparent);
+}
+
+.btn:disabled,
+button:disabled {
+  opacity: 0.5;
+  pointer-events: none;
+  box-shadow: none;
+}
+
+/* --- sizes --- */
+.btn-sm,
+button.small {
+  --btn-h: 1.75rem;
+  --btn-px: 0.625rem;
+  gap: 0.375rem;
+  font-size: 0.75rem;
+  border-radius: var(--radius-sm);
+}
+.btn-lg { --btn-h: 2.5rem; --btn-px: 1.5rem; font-size: 0.875rem; }
+.btn-icon { --btn-px: 0; width: var(--btn-h); }
+.btn-icon.btn-sm { width: 1.75rem; }
+
+/* --- variants --- */
+.btn-primary,
+button.primary {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: transparent;
+}
+.btn-primary:hover,
+button.primary:hover {
+  background: color-mix(in oklab, var(--primary) 88%, var(--foreground));
+  color: var(--primary-foreground);
+}
+
+.btn-secondary {
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  border-color: transparent;
+}
+.btn-secondary:hover {
+  background: color-mix(in oklab, var(--secondary) 82%, var(--foreground));
+  color: var(--secondary-foreground);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+.btn-ghost:hover { background: var(--accent); color: var(--accent-foreground); }
+
+.btn-link {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--primary);
+  height: auto;
+  padding: 0;
+}
+.btn-link:hover { background: transparent; text-decoration: underline; }
+
+/* solid destructive — for the confirming button of a destructive dialog */
+.btn-destructive {
+  background: var(--destructive);
+  color: var(--destructive-foreground);
+  border-color: transparent;
+}
+.btn-destructive:hover {
+  background: color-mix(in oklab, var(--destructive) 88%, black);
+  color: var(--destructive-foreground);
+}
+.btn-destructive:focus-visible {
+  border-color: var(--destructive);
+  box-shadow: 0 0 0 var(--ring-width) color-mix(in oklab, var(--destructive) 35%, transparent);
+}
+
+/* quiet destructive — the app's long-standing `.danger`: reads as an ordinary
+   button until you reach for it, so rows of them don't shout */
+.btn-danger,
+button.danger { color: var(--muted-foreground); }
+.btn-danger:hover,
+button.danger:hover {
+  background: color-mix(in oklab, var(--destructive) 12%, transparent);
+  border-color: color-mix(in oklab, var(--destructive) 45%, transparent);
+  color: var(--destructive);
+}
+.btn-danger:focus-visible,
+button.danger:focus-visible {
+  border-color: var(--destructive);
+  box-shadow: 0 0 0 var(--ring-width) color-mix(in oklab, var(--destructive) 30%, transparent);
+}
+
+/* selected / toggled-on state, shared by toggle buttons and segmented controls */
+.btn.on,
+button.on {
+  background: color-mix(in oklab, var(--primary) 14%, var(--card));
+  border-color: color-mix(in oklab, var(--primary) 55%, transparent);
+  color: var(--primary);
+}
+.btn.on:hover,
+button.on:hover {
+  background: color-mix(in oklab, var(--primary) 20%, var(--card));
+  color: var(--primary);
+}
+
+/* -------------------------------------------------------------- form input */
+.input,
+input[type="text"],
+input[type="search"],
+input[type="number"],
+input[type="password"],
+input[type="url"],
+input[type="email"],
+textarea,
+select {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  height: 2.25rem;
+  padding: 0.375rem 0.75rem;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  color: var(--foreground);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  box-shadow: var(--shadow-xs);
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+
+textarea {
+  height: auto;
+  min-height: 4.5rem;
+  padding: 0.5rem 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.78125rem;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.input::placeholder,
+input::placeholder,
+textarea::placeholder { color: var(--muted-foreground); opacity: 0.85; }
+
+.input:focus,
+.input:focus-visible,
+input:focus,
+input:focus-visible,
+textarea:focus,
+textarea:focus-visible,
+select:focus,
+select:focus-visible {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 var(--ring-width) color-mix(in oklab, var(--ring) 40%, transparent);
+}
+
+.input:disabled,
+input:disabled,
+textarea:disabled,
+select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--muted);
+}
+
+.input[aria-invalid="true"],
+input[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border-color: var(--destructive);
+}
+.input[aria-invalid="true"]:focus,
+input[aria-invalid="true"]:focus {
+  box-shadow: 0 0 0 var(--ring-width) color-mix(in oklab, var(--destructive) 30%, transparent);
+}
+
+/* mono content: anything holding a path, command, glob or JSON */
+.input-mono,
+textarea.mono,
+input.mono { font-family: var(--font-mono); }
+
+input[type="search"] { -webkit-appearance: none; appearance: none; }
+input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 0.875rem;
+  height: 0.875rem;
+  cursor: pointer;
+  background: currentColor;
+  opacity: 0.4;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M18 6 6 18M6 6l12 12'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+input[type="search"]::-webkit-search-cancel-button:hover { opacity: 0.9; }
+
+/* native select, styled to match the shadcn SelectTrigger */
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  width: auto;
+  max-width: 100%;
+  padding-right: 1.875rem;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.5rem center;
+  background-size: 0.875rem;
+}
+select option { background: var(--popover); color: var(--popover-foreground); }
+
+input[type="color"] {
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0.1875rem;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  cursor: pointer;
+}
+input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+input[type="color"]::-webkit-color-swatch { border: 0; border-radius: calc(var(--radius-md) - 3px); }
+
+.label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--foreground);
+  line-height: 1.4;
+}
+.label-muted { color: var(--muted-foreground); font-weight: 400; }
+
+.field { display: flex; flex-direction: column; gap: 0.375rem; }
+.field-hint { font-size: 0.7rem; color: var(--muted-foreground); }
+
+/* ---------------------------------------------------------------- switch --- */
+.switch {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  width: 2rem;
+  height: 1.125rem;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 99px;
+  background: color-mix(in oklab, var(--muted-foreground) 38%, transparent);
+  box-shadow: none;
+  cursor: pointer;
+  transition: background-color var(--dur) var(--ease);
+}
+.switch:hover { background: color-mix(in oklab, var(--muted-foreground) 50%, transparent); }
+.switch::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 50%;
+  background: var(--card);
+  box-shadow: var(--shadow-xs);
+  transition: translate var(--dur) var(--ease);
+}
+.switch[aria-checked="true"] { background: var(--primary); }
+.switch[aria-checked="true"]:hover { background: color-mix(in oklab, var(--primary) 88%, var(--foreground)); }
+.switch[aria-checked="true"]::after { translate: 0.875rem 0; }
+.switch:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 var(--ring-width) color-mix(in oklab, var(--ring) 45%, transparent);
+}
+
+.switch-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78125rem;
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------------ card --- */
+.card {
+  background: var(--card);
+  color: var(--card-foreground);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-xs);
+}
+.card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.875rem 1.125rem;
+  border-bottom: 1px solid var(--border);
+}
+.card-header.plain { border-bottom: 0; padding-bottom: 0; }
+.card-title { font-size: 0.875rem; font-weight: 600; letter-spacing: -0.01em; }
+.card-description { font-size: 0.75rem; color: var(--muted-foreground); line-height: 1.5; }
+.card-content { padding: 1.125rem; }
+.card-content.tight { padding: 0.5rem 0.625rem; }
+.card-content.flush { padding: 0; }
+.card-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1.125rem;
+  border-top: 1px solid var(--border);
+}
+.card-action { margin-left: auto; display: flex; gap: 0.375rem; align-items: center; }
+
+/* ----------------------------------------------------------------- stats --- */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.625rem;
+}
+.stat {
+  padding: 0.75rem 0.9375rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  box-shadow: var(--shadow-xs);
+}
+.stat-label {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.stat-value {
+  margin-top: 0.125rem;
+  font-family: var(--font-mono);
+  font-size: 1.375rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+.stat-hint { margin-top: 0.125rem; font-size: 0.6875rem; color: var(--muted-foreground); }
+.stat-accent .stat-value { color: var(--primary); }
+
+/* ------------------------------------------------------------------ tabs --- */
+/* wraps rather than scrolls: with eleven sections, a hidden overflow row is
+   worse than a second line — everything stays visible and tabbable */
+.tabs-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.1875rem;
+  padding: 0.1875rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--muted);
+}
+.tabs-trigger {
+  flex: none;
+  height: 1.875rem;
+  padding-inline: 0.75rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted-foreground);
+  font-size: 0.78125rem;
+  font-weight: 500;
+}
+.tabs-trigger:hover {
+  background: color-mix(in oklab, var(--card) 55%, transparent);
+  color: var(--foreground);
+}
+.tabs-trigger[aria-selected="true"],
+.tabs-trigger.on {
+  background: var(--card);
+  border-color: var(--border);
+  box-shadow: var(--shadow-xs);
+  color: var(--foreground);
+}
+.tabs-trigger[aria-selected="true"]:hover,
+.tabs-trigger.on:hover { background: var(--card); color: var(--foreground); }
+.tabs-trigger .tab-count {
+  margin-left: 0.375rem;
+  padding: 0 0.3125rem;
+  border-radius: 99px;
+  background: color-mix(in oklab, var(--muted-foreground) 18%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  font-weight: 500;
+}
+.tabs-trigger[aria-selected="true"] .tab-count {
+  background: color-mix(in oklab, var(--primary) 18%, transparent);
+  color: var(--primary);
+}
+.tabs-trigger .tab-dot {
+  width: 0.4375rem;
+  height: 0.4375rem;
+  margin-left: 0.375rem;
+  border-radius: 50%;
+  background: var(--warning);
+}
+.tabs-trigger .tab-dot.ok { background: var(--success); }
+
+/* ----------------------------------------------------------------- badge --- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.0625rem 0.4375rem;
+  border: 1px solid transparent;
+  border-radius: 99px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+.badge-default,
+.badge.group {
+  background: color-mix(in oklab, var(--primary) 14%, transparent);
+  border-color: color-mix(in oklab, var(--primary) 32%, transparent);
+  color: color-mix(in oklab, var(--primary) 82%, var(--foreground));
+}
+.badge-secondary {
+  background: var(--secondary);
+  border-color: var(--border);
+  color: var(--secondary-foreground);
+}
+.badge-outline,
+.badge.link {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted-foreground);
+}
+.badge-destructive,
+.badge.warn {
+  background: color-mix(in oklab, var(--destructive) 14%, transparent);
+  border-color: color-mix(in oklab, var(--destructive) 38%, transparent);
+  color: color-mix(in oklab, var(--destructive) 88%, var(--foreground));
+}
+.badge-success,
+.badge.ok {
+  background: color-mix(in oklab, var(--success) 15%, transparent);
+  border-color: color-mix(in oklab, var(--success) 38%, transparent);
+  color: color-mix(in oklab, var(--success) 88%, var(--foreground));
+}
+.badge-warning,
+.badge.local {
+  background: color-mix(in oklab, var(--warning) 16%, transparent);
+  border-color: color-mix(in oklab, var(--warning) 40%, transparent);
+  color: color-mix(in oklab, var(--warning) 85%, var(--foreground));
+}
+.badge-info {
+  background: color-mix(in oklab, var(--info) 14%, transparent);
+  border-color: color-mix(in oklab, var(--info) 36%, transparent);
+  color: color-mix(in oklab, var(--info) 85%, var(--foreground));
+}
+.badge-mono { font-family: var(--font-mono); font-size: 0.65rem; }
+
+/* ------------------------------------------------------------------- kbd --- */
+kbd,
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  padding: 0 0.3125rem;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-family: var(--font-sans);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1;
+}
+
+/* ------------------------------------------------------------- separator --- */
+.separator {
+  flex: none;
+  border: 0;
+  background: var(--border);
+}
+.separator-h { width: 100%; height: 1px; margin-block: 0.5rem; }
+.separator-v { width: 1px; align-self: stretch; margin-inline: 0.25rem; }
+
+/* ----------------------------------------------------------------- alert --- */
+.alert {
+  display: flex;
+  gap: 0.625rem;
+  padding: 0.75rem 0.9375rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+.alert-icon { flex: none; margin-top: 0.0625rem; font-size: 0.875rem; line-height: 1.2; }
+.alert-body { min-width: 0; overflow-wrap: anywhere; }
+.alert-title { font-weight: 600; margin-bottom: 0.125rem; }
+.alert-warning,
+.banner.warn {
+  border-color: color-mix(in oklab, var(--warning) 42%, transparent);
+  background: color-mix(in oklab, var(--warning) 10%, var(--card));
+  color: color-mix(in oklab, var(--warning) 78%, var(--foreground));
+}
+.alert-destructive {
+  border-color: color-mix(in oklab, var(--destructive) 42%, transparent);
+  background: color-mix(in oklab, var(--destructive) 9%, var(--card));
+  color: color-mix(in oklab, var(--destructive) 82%, var(--foreground));
+}
+.alert-success {
+  border-color: color-mix(in oklab, var(--success) 40%, transparent);
+  background: color-mix(in oklab, var(--success) 10%, var(--card));
+  color: color-mix(in oklab, var(--success) 80%, var(--foreground));
+}
+.alert-info {
+  border-color: color-mix(in oklab, var(--info) 38%, transparent);
+  background: color-mix(in oklab, var(--info) 9%, var(--card));
+  color: color-mix(in oklab, var(--info) 80%, var(--foreground));
+}
+
+/* ----------------------------------------------------------------- table --- */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78125rem;
+}
+.table th {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.table td {
+  padding: 0.4375rem 0.75rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+  overflow-wrap: anywhere;
+}
+.table tbody tr:last-child td { border-bottom: 0; }
+.table tbody tr:hover td { background: color-mix(in oklab, var(--accent) 45%, transparent); }
+.table td.num {
+  font-family: var(--font-mono);
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.table td.dim { color: var(--muted-foreground); }
+.table td.mono { font-family: var(--font-mono); }
+.table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  overflow-x: auto;
+}
+
+/* ---------------------------------------------------------------- dialog --- */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: var(--overlay);
+  backdrop-filter: blur(2px);
+  animation: fade-in var(--dur-slow) var(--ease);
+}
+.dialog-content {
+  width: 100%;
+  max-width: 30rem;
+  max-height: min(88vh, 52rem);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: var(--shadow-xl);
+  animation: dialog-in var(--dur-slow) var(--ease);
+  overflow: hidden;
+}
+.dialog-header { padding: 1.125rem 1.25rem 0.75rem; }
+.dialog-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+.dialog-description {
+  margin-top: 0.25rem;
+  font-size: 0.78125rem;
+  color: var(--muted-foreground);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.dialog-body { padding: 0 1.25rem; overflow-y: auto; flex: 1; }
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 1rem 1.25rem 1.125rem;
+  flex-wrap: wrap;
+}
+
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes dialog-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.975); }
+}
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+}
+
+/* --------------------------------------------------------------- popover --- */
+.popover,
+.dropdown-menu {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: var(--shadow-lg);
+  animation: pop-in var(--dur) var(--ease);
+  overflow: hidden;
+}
+.dropdown-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 9rem;
+  padding: 0.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.dropdown-item {
+  justify-content: flex-start;
+  height: 1.875rem;
+  padding-inline: 0.5rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+  font-size: 0.78125rem;
+  font-weight: 400;
+  text-align: left;
+  width: 100%;
+}
+.dropdown-item:hover { background: var(--accent); color: var(--accent-foreground); }
+.dropdown-label {
+  padding: 0.375rem 0.5rem 0.25rem;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.dropdown-separator { height: 1px; margin: 0.25rem -0.25rem; background: var(--border); }
+.dropdown-shortcut {
+  margin-left: auto;
+  padding-left: 1rem;
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+}
+.dropdown-item .check { width: 0.875rem; flex: none; color: var(--primary); }
+
+/* --------------------------------------------------------------- command ---
+   the ⌘K palette: input, scrolling list, grouped items */
+.command {
+  width: 100%;
+  max-width: 36rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: var(--shadow-xl);
+  overflow: hidden;
+  animation: dialog-in var(--dur-slow) var(--ease);
+}
+.command-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding-inline: 0.875rem;
+  border-bottom: 1px solid var(--border);
+}
+.command-input-wrap .command-icon { flex: none; color: var(--muted-foreground); font-size: 0.875rem; }
+.command-input {
+  flex: 1;
+  height: 2.875rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 0.875rem;
+}
+.command-input:focus,
+.command-input:focus-visible { border: 0; box-shadow: none; outline: none; }
+.command-list { max-height: min(52vh, 24rem); overflow-y: auto; padding: 0.25rem; }
+.command-group-label {
+  padding: 0.5rem 0.625rem 0.25rem;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.command-item {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.4375rem 0.625rem;
+  border-radius: var(--radius-md);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+.command-item[aria-selected="true"],
+.command-item:hover { background: var(--accent); color: var(--accent-foreground); }
+.command-item .ci-kind {
+  flex: none;
+  min-width: 5rem;
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.command-item .ci-label { overflow-wrap: anywhere; font-weight: 500; }
+.command-item .ci-hint {
+  flex: 1;
+  min-width: 3rem;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+  font-size: 0.72rem;
+}
+.command-empty { padding: 1.5rem 0.875rem; text-align: center; color: var(--muted-foreground); font-size: 0.8125rem; }
+.command-footer {
+  display: flex;
+  gap: 0.875rem;
+  align-items: center;
+  padding: 0.4375rem 0.875rem;
+  border-top: 1px solid var(--border);
+  background: color-mix(in oklab, var(--muted) 55%, transparent);
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+}
+
+/* ----------------------------------------------------------------- toast ---
+   sonner-style: top-right stack, subtle slide-in, errors stay until dismissed */
+.toaster {
+  position: fixed;
+  top: 0.875rem;
+  right: 0.875rem;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: min(24rem, calc(100vw - 1.75rem));
+  pointer-events: none;
+}
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.625rem;
+  padding: 0.6875rem 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: var(--shadow-lg);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  pointer-events: auto;
+  animation: toast-in var(--dur-slow) var(--ease);
+  overflow-wrap: anywhere;
+}
+.toast.leaving { animation: toast-out var(--dur) var(--ease) forwards; }
+.toast-icon { flex: none; margin-top: 0.0625rem; font-size: 0.8125rem; line-height: 1.3; }
+.toast-body { flex: 1; min-width: 0; }
+.toast-actions { display: flex; gap: 0.375rem; margin-top: 0.5rem; }
+.toast-close {
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+  line-height: 1;
+}
+.toast-close:hover { background: var(--accent); color: var(--foreground); }
+.toast-success { border-color: color-mix(in oklab, var(--success) 40%, var(--border)); }
+.toast-success .toast-icon { color: var(--success); }
+.toast-error { border-color: color-mix(in oklab, var(--destructive) 45%, var(--border)); }
+.toast-error .toast-icon { color: var(--destructive); }
+.toast-info .toast-icon { color: var(--info); }
+.toast-loading .toast-icon { color: var(--muted-foreground); animation: spin 1s linear infinite; }
+
+@keyframes toast-in { from { opacity: 0; transform: translateX(12px) scale(0.97); } }
+@keyframes toast-out { to { opacity: 0; transform: translateX(12px) scale(0.97); } }
+@keyframes spin { to { rotate: 360deg; } }
+
+/* -------------------------------------------------------------- skeleton --- */
+.skeleton {
+  border-radius: var(--radius-md);
+  background: linear-gradient(
+    90deg,
+    var(--muted) 25%,
+    color-mix(in oklab, var(--muted) 55%, var(--card)) 37%,
+    var(--muted) 63%
+  );
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+.skeleton-row { height: 3rem; margin-bottom: 0.375rem; }
+.skeleton-text { height: 0.75rem; margin-bottom: 0.5rem; }
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+
+/* -------------------------------------------------------------- progress --- */
+.progress {
+  position: relative;
+  height: 0.5rem;
+  border-radius: 99px;
+  background: var(--muted);
+  overflow: hidden;
+}
+.progress-bar { height: 100%; border-radius: 99px; background: var(--primary); }
+
+/* --------------------------------------------------------------- tooltip ---
+   CSS-only: any element with data-tip renders one on hover/focus. */
+[data-tip] { position: relative; }
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  z-index: 70;
+  translate: -50% 0;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: var(--foreground);
+  color: var(--background);
+  font-family: var(--font-sans);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur) var(--ease);
+}
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after { opacity: 1; }
+[data-tip=""]::after { content: none; }
+
+/* ----------------------------------------------------------- empty state --- */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 2.25rem 1rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--muted-foreground);
+  text-align: center;
+}
+.empty-state .es-icon { font-size: 1.5rem; opacity: 0.6; line-height: 1; }
+.empty-state .es-title { font-size: 0.8125rem; font-weight: 500; color: var(--foreground); }
+.empty-state .es-hint { font-size: 0.75rem; max-width: 34rem; overflow-wrap: anywhere; }
+
+/* -------------------------------------------------------------- surfaces --- */
+/* a terminal-looking pane, used by the statusline preview and code output */
+.terminal {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--card);
+}
+.terminal-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.4375rem 0.6875rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--muted);
+}
+.terminal-bar .dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; opacity: 0.85; }
+.terminal-bar .dot.r { background: var(--red); }
+.terminal-bar .dot.y { background: var(--yellow); }
+.terminal-bar .dot.g { background: var(--green); }
+.terminal-bar .terminal-title {
+  margin-left: 0.375rem;
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.terminal-body {
+  padding: 0.75rem 0.9375rem;
+  background: var(--term);
+  color: var(--term-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.7;
+}
+
+/* a scrollable mono pane for command output / diffs */
+.code-pane {
+  padding: 0.6875rem 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--term);
+  color: var(--term-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------ icon ---
+   lucide geometry at 24×24; size comes from the box it sits in. */
+.icon {
+  width: 1em;
+  height: 1em;
+  flex: none;
+  font-size: 0.9375rem;
+  stroke-width: 2;
+  vertical-align: -0.15em;
+}
+.btn .icon,
+button .icon { font-size: 0.875rem; }
+.btn-sm .icon,
+button.small .icon { font-size: 0.8125rem; }
+.icon.check { font-size: 0.75rem; }
+.alert-icon .icon,
+.toast-icon .icon { font-size: 0.9375rem; }
+.tabs-trigger .icon { font-size: 0.8125rem; margin-right: 0.375rem; opacity: 0.8; }
+.tabs-trigger[aria-selected="true"] .icon { opacity: 1; color: var(--primary); }
+.empty-state .es-icon .icon { font-size: 1.5rem; stroke-width: 1.5; }
+
+/* three-colour palette preview used by the theme picker */
+.swatch-trio {
+  display: inline-flex;
+  flex: none;
+  width: 1.375rem;
+  height: 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.swatch-trio i { flex: 1; }
+
+/* ------------------------------------------------------------------ misc --- */
+.muted { color: var(--muted-foreground); }
+.mono { font-family: var(--font-mono); }
+.spring { flex: 1 1 auto; }
+.stack { display: flex; flex-direction: column; }
+.row-flex { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

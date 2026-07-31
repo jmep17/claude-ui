@@ -1,6 +1,31 @@
+/* ===========================================================================
+   app.js — data, routing, and the views.
+
+   Component primitives (el/icon/toast/modal/openMenu/filterSelect/…) come from
+   ui.js, which is loaded first. Nothing in here builds a toast, dialog, menu
+   or combobox by hand, and nothing hard-codes a colour: every surface is a
+   class from components.css over a token from theme.css.
+   =========================================================================== */
+
 let DATA = { items: {}, config_files: [], config_dir: "", settings: {}, mcp: {}, statusline: {} };
+
 const ITEM_TABS = ["skills", "commands", "agents", "output-styles"];
 const TABS = [...ITEM_TABS, "mcp", "statusline", "setup", "settings", "insight", "costs", "doctor"];
+
+const TAB_META = {
+  "skills": { icon: "sparkles", label: "Skills" },
+  "commands": { icon: "terminal", label: "Commands" },
+  "agents": { icon: "bot", label: "Agents" },
+  "output-styles": { icon: "droplet", label: "Output styles" },
+  "mcp": { icon: "server", label: "MCP" },
+  "statusline": { icon: "panel", label: "Statusline" },
+  "setup": { icon: "wrench", label: "Setup" },
+  "settings": { icon: "settings", label: "Settings" },
+  "insight": { icon: "chart", label: "Insight" },
+  "costs": { icon: "dollar", label: "Costs" },
+  "doctor": { icon: "pulse", label: "Doctor" },
+};
+
 let TAB = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "skills";
 let IQ = "";  // inventory filter
 
@@ -15,455 +40,129 @@ async function api(path, body) {
   return json;
 }
 
-// Theme: JS sets data-theme so a manual choice survives reloads.
-(function () {
-  let t = null;
-  try { t = localStorage.getItem("claude-ui-theme"); } catch (e) {}
-  if (t !== "light" && t !== "dark")
-    t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-  document.documentElement.dataset.theme = t;
-})();
-
-function toggleTheme() {
-  const t = document.documentElement.dataset.theme === "light" ? "dark" : "light";
-  document.documentElement.dataset.theme = t;
-  try { localStorage.setItem("claude-ui-theme", t); } catch (e) {}
+function goTab(t) {
+  if (!TABS.includes(t) || (EDITING && !confirmDiscard())) return;
+  TAB = t;
+  location.hash = t;
+  render();
 }
 
-// Toasts stack; errors stick around until dismissed (they may contain paths).
-// An optional action ({label, fn}) renders as a button — used for undo.
-function toast(msg, err, action) {
-  const box = document.getElementById("toasts");
-  const el = document.createElement("div");
-  el.className = "toastmsg" + (err ? " err" : "");
-  const span = document.createElement("span");
-  span.textContent = msg;
-  el.appendChild(span);
-  if (action) {
-    const ab = document.createElement("button");
-    ab.className = "small";
-    ab.textContent = action.label;
-    ab.onclick = () => { el.remove(); action.fn(); };
-    el.appendChild(ab);
-  }
-  const x = document.createElement("span");
-  x.className = "x";
-  x.textContent = "×";
-  x.onclick = () => el.remove();
-  el.appendChild(x);
-  box.appendChild(el);
-  while (box.children.length > 5) box.firstChild.remove();
-  if (!err) setTimeout(() => el.remove(), action ? 10000 : 3500);
-}
-
-// Generic modal replacing prompt()/confirm(): resolves to {field: value} on OK,
-// null on cancel/Escape. fields: [{id, label, type: "text"|"select", ...}]
-function modal({ title, text, fields = [], ok = "OK", danger = false }) {
-  return new Promise((resolve) => {
-    const m = document.getElementById("modal");
-    m.hidden = false;
-    m.innerHTML = "";
-    const box = document.createElement("div");
-    box.className = "mbox";
-    if (title) {
-      const h = document.createElement("h3");
-      h.textContent = title;
-      box.appendChild(h);
-    }
-    if (text) {
-      const p = document.createElement("div");
-      p.className = "mtext";
-      p.textContent = text;
-      box.appendChild(p);
-    }
-    const inputs = {};
-    for (const f of fields) {
-      const row = document.createElement("div");
-      row.className = "mrow";
-      if (f.label) {
-        const l = document.createElement("label");
-        l.textContent = f.label;
-        row.appendChild(l);
-      }
-      let inp;
-      if (f.type === "select") {
-        inp = document.createElement("select");
-        for (const o of f.options) {
-          const op = document.createElement("option");
-          op.value = o.value !== undefined ? o.value : o;
-          op.textContent = o.label !== undefined ? o.label : o;
-          if (op.value === f.value) op.selected = true;
-          inp.appendChild(op);
-        }
-      } else {
-        inp = document.createElement("input");
-        inp.type = "text";
-        inp.value = f.value || "";
-        if (f.placeholder) inp.placeholder = f.placeholder;
-      }
-      inputs[f.id] = inp;
-      row.appendChild(inp.tagName === "SELECT" ? filterSelect(inp) : inp);
-      box.appendChild(row);
-    }
-    const done = (val) => {
-      m.hidden = true;
-      m.innerHTML = "";
-      document.removeEventListener("keydown", onkey, true);
-      resolve(val);
-    };
-    const submit = () => done(Object.fromEntries(
-      Object.entries(inputs).map(([k, i]) => [k, i.value.trim()])));
-    const onkey = (e) => {
-      if (e.key === "Escape") { e.stopPropagation(); done(null); }
-      // Enter opens a dropdown (native or filterable) rather than submitting
-      else if (e.key === "Enter" && e.target.tagName !== "SELECT"
-               && !e.target.closest(".fsel")) {
-        e.preventDefault();
-        submit();
-      }
-    };
-    document.addEventListener("keydown", onkey, true);
-    m.onclick = (e) => { if (e.target === m) done(null); };
-    const btns = document.createElement("div");
-    btns.className = "mbtns";
-    const cancel = document.createElement("button");
-    cancel.textContent = "cancel";
-    cancel.onclick = () => done(null);
-    const okb = document.createElement("button");
-    okb.textContent = ok;
-    okb.className = danger ? "danger" : "primary";
-    okb.onclick = submit;
-    btns.append(cancel, okb);
-    box.appendChild(btns);
-    m.appendChild(box);
-    const first = Object.values(inputs)[0];
-    ((first && (first.fselTrigger || first)) || okb).focus();
-    if (first && first.select) first.select();
-  });
-}
-
-const mconfirm = (title, text, ok) =>
-  modal({ title, text, ok: ok || "confirm", danger: true }).then((r) => r !== null);
-
-// ----------------------------------------------------------- filterable pickers
-// Long value lists — hook events, docs-augmented enums, the 300-odd env var
-// names — are painful in a native dropdown or datalist, so anything past
-// FSEL_MIN values gets a filter: a popup list narrowed as you type with the same
-// fuzzy() the command palette uses. Two flavours share it. filterSelect() takes
-// a populated <select> and returns the node to lay out; the select stays in the
-// DOM as the value holder, so callers keep reading .value, listening for change,
-// and assigning .value programmatically. filterInput() does the same for a
-// free-text input with suggestions, standing in for its <datalist> — typed text
-// still wins, the list is only a shortcut. Shorter lists keep the native control.
-const FSEL_MIN = 6;
-
-// The popup itself: items are {value, text}, value() reports what is currently
-// set (marked in the list), own adds a filter box for owners that have nowhere
-// else to type. Returns a controller the owner drives from its key handling.
-function filterPopup(wrap, { items, value, own, onPick }) {
-  const pop = document.createElement("div");
-  pop.className = "fselpop";
-  const list = document.createElement("div");
-  list.className = "fsellist";
-  let hits = items;
-  // a select always keeps a row highlighted; an input starts with none, so a
-  // plain Enter commits what was typed instead of the first suggestion
-  let cur = own ? Math.max(0, items.findIndex((o) => o.value === value())) : -1;
-
-  const draw = () => {
-    list.innerHTML = "";
-    if (!hits.length) {
-      list.innerHTML = '<div class="fselempty">no matches</div>';
-      return;
-    }
-    hits.forEach((o, i) => {
-      const row = document.createElement("div");
-      row.className = "fselrow" + (i === cur ? " sel" : "")
-        + (o.value === value() ? " on" : "");
-      row.textContent = o.text;
-      row.onmousedown = (e) => { e.preventDefault(); onPick(o); };
-      list.appendChild(row);
-      if (i === cur) setTimeout(() => row.scrollIntoView({ block: "nearest" }));
-    });
-  };
-
-  const ctl = {
-    filter(s) {
-      s = s.trim().toLowerCase();
-      hits = s ? items.filter((o) => fuzzy(s, o.text + " " + o.value) >= 0) : items;
-      cur = own ? 0 : -1;
-      draw();
-    },
-    move(d) {
-      cur = Math.max(own ? 0 : -1, Math.min(cur + d, hits.length - 1));
-      draw();
-    },
-    take() {
-      const o = hits[cur];
-      if (o) onPick(o);
-      return !!o;
-    },
-    close: () => pop.remove(),
-  };
-
-  if (own) {
-    const q = document.createElement("input");
-    q.type = "text";
-    q.className = "fselq";
-    q.placeholder = "filter…";
-    q.oninput = () => ctl.filter(q.value);
-    pop.appendChild(q);
-    setTimeout(() => q.focus());
-  }
-  draw();
-  pop.appendChild(list);
-  wrap.appendChild(pop);
-  // hang the popup off the right edge instead when it would run off-screen
-  if (pop.getBoundingClientRect().right > innerWidth - 8) {
-    pop.style.left = "auto";
-    pop.style.right = "0";
-  }
-  return ctl;
-}
-
-function filterSelect(sel) {
-  if (sel.options.length <= FSEL_MIN) return sel;
-  const wrap = document.createElement("span");
-  wrap.className = "fsel";
-  sel.hidden = true;
-  sel.tabIndex = -1;
-  const trig = document.createElement("button");
-  trig.type = "button";
-  trig.className = "fseltrig";
-  const label = document.createElement("span");
-  label.className = "fsellbl";
-  const caret = document.createElement("span");
-  caret.className = "fselcar";
-  caret.textContent = "▾";
-  trig.append(label, caret);
-  wrap.append(trig, sel);
-  sel.fselTrigger = trig;  // modal() focuses this instead of the hidden select
-
-  // the current option's text, refreshed after every change (handlers may reset
-  // the value themselves, as the template picker does)
-  const sync = () => {
-    const o = sel.selectedOptions[0];
-    label.textContent = o ? o.textContent : "";
-  };
-  sync();
-
-  let pop = null;
-
-  const close = () => {
-    if (!pop) return;
-    pop.close();
-    pop = null;
-    removeEventListener("keydown", onkey, true);
-    removeEventListener("mousedown", onout, true);
-    sync();
-  };
-
-  const pick = (o) => {
-    sel.value = o.value;
-    close();
-    trig.focus();
-    sel.dispatchEvent(new Event("change", { bubbles: true }));
-    sync();
-  };
-
-  // capture on window so the popup's keys win over the modal's and the app's
-  // own document-level capture handlers while it is open
-  const onkey = (e) => {
-    if (!["ArrowDown", "ArrowUp", "Enter", "Escape", "Tab"].includes(e.key)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.key === "ArrowDown") pop.move(1);
-    else if (e.key === "ArrowUp") pop.move(-1);
-    else if (e.key === "Enter") pop.take();
-    else { close(); trig.focus(); }
-  };
-  const onout = (e) => { if (!wrap.contains(e.target)) close(); };
-
-  const open = () => {
-    // options can change between renders (live docs suggestions), so read them
-    // fresh; disabled entries are labels ("insert template…"), not choices
-    const items = [...sel.options].filter((o) => !o.disabled)
-      .map((o) => ({ value: o.value, text: o.textContent }));
-    pop = filterPopup(wrap, { items, value: () => sel.value, own: true, onPick: pick });
-    addEventListener("keydown", onkey, true);
-    addEventListener("mousedown", onout, true);
-  };
-
-  trig.onclick = () => { if (pop) { close(); trig.focus(); } else open(); };
-  return wrap;
-}
-
-// Free-text input with suggestions. Returns the node to lay out; the input is
-// still the value holder and anything typed is still accepted, so this only
-// replaces the datalist, which offers no way to see or narrow 300 names.
-function filterInput(inp, values) {
-  if (values.length <= FSEL_MIN) return null;  // caller keeps the datalist
-  const wrap = document.createElement("span");
-  wrap.className = ("fsel fcombo " + inp.className).trim();
-  inp.className = "";  // sizing rules move to the wrapper
-  const trig = document.createElement("button");
-  trig.type = "button";
-  trig.className = "fcaret";
-  trig.tabIndex = -1;  // Tab belongs to the input; the caret is mouse-only
-  trig.title = "browse suggestions";
-  trig.textContent = "▾";
-  wrap.append(inp, trig);
-  const items = values.map((v) => ({ value: String(v), text: String(v) }));
-
-  let pop = null, quiet = false;
-
-  const close = () => {
-    if (!pop) return;
-    pop.close();
-    pop = null;
-    removeEventListener("keydown", onkey, true);
-    removeEventListener("mousedown", onout, true);
-  };
-
-  const pick = (o) => {
-    inp.value = o.value;
-    close();
-    inp.focus();
-    // notify like a typed edit would, without the input event reopening the list
-    quiet = true;
-    inp.dispatchEvent(new Event("input", { bubbles: true }));
-    inp.dispatchEvent(new Event("change", { bubbles: true }));
-    quiet = false;
-  };
-
-  const onkey = (e) => {
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      e.preventDefault();
-      e.stopPropagation();
-      pop.move(e.key === "ArrowDown" ? 1 : -1);
-    } else if (e.key === "Enter") {
-      // only a row the user arrowed onto wins; otherwise the typed text stands
-      // and the key carries on to whatever else handles it (modals submit)
-      if (pop.take()) { e.preventDefault(); e.stopPropagation(); }
-      else close();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
-      close();
-      inp.focus();
-    } else if (e.key === "Tab") {
-      close();
-    }
-  };
-  const onout = (e) => { if (!wrap.contains(e.target)) close(); };
-
-  // q is what to narrow by: the typed text while typing, nothing when the caret
-  // is used to browse the whole list
-  const open = (q) => {
-    if (!pop) {
-      pop = filterPopup(wrap, { items, value: () => inp.value, own: false, onPick: pick });
-      addEventListener("keydown", onkey, true);
-      addEventListener("mousedown", onout, true);
-    }
-    pop.filter(q);
-  };
-
-  inp.oninput = () => { if (!quiet) open(inp.value); };
-  inp.onkeydown = (e) => {
-    if (!pop && e.key === "ArrowDown") { e.preventDefault(); open(inp.value); }
-  };
-  trig.onclick = () => { if (pop) close(); else { inp.focus(); open(""); } };
-  return wrap;
-}
-
-// Small popup menu anchored to a button (row overflow actions).
-function openMenu(anchor, entries) {
-  closeMenu();
-  const m = document.createElement("div");
-  m.className = "menu";
-  m.id = "menu";
-  for (const e of entries) {
-    const b = document.createElement("button");
-    b.textContent = e.label;
-    if (e.danger) b.className = "danger";
-    b.onclick = () => { closeMenu(); e.fn(); };
-    m.appendChild(b);
-  }
-  document.body.appendChild(m);
-  const r = anchor.getBoundingClientRect();
-  m.style.left = Math.max(8, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 8)) + "px";
-  m.style.top = Math.max(8, Math.min(r.bottom + 4, innerHeight - m.offsetHeight - 8)) + "px";
-  setTimeout(() => document.addEventListener("click", closeMenu, { once: true }));
-}
-
-function closeMenu() {
-  const m = document.getElementById("menu");
-  if (m) m.remove();
-}
-
-const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// ------------------------------------------------------------------- header
 
 let CFGEDIT = false;
 
 function renderHeader() {
-  document.getElementById("cfgprefix").textContent = DATA.config_dir.replace(/\/?$/, "/");
-  const row = document.getElementById("cfgrow");
-  if (CFGEDIT) {
-    row.innerHTML =
-      `<span>config dir</span>` +
-      `<input type="text" id="cfgdir" value="${esc(DATA.config_dir)}">` +
-      `<button class="small" onclick="saveCfgDir()">save</button>` +
-      `<button class="small" onclick="CFGEDIT=false;render()">cancel</button>`;
-  } else {
-    row.innerHTML =
-      `<span>managing <b>${esc(DATA.config_dir)}</b>` +
-      (DATA.default_dir ? " (the default — Claude Code reads this automatically)" : "") +
-      `</span><span style="flex:1"></span>` +
-      `<button class="small" onclick="CFGEDIT=true;render()">change…</button>` +
-      (DATA.default_dir ? "" : `<button class="small" onclick="resetCfgDir()">reset to default</button>`);
+  const chip = document.getElementById("cfgchip");
+  chip.innerHTML = "";
+  chip.append(
+    icon("folder"),
+    el("span.cc-path", { text: DATA.config_dir || "…" }),
+    DATA.default_dir ? null : el("span.cc-warn", { title: "non-default config directory" }, icon("warn")),
+    el("span.cc-caret", {}, icon("chevronDown")));
+  chip.title = DATA.default_dir
+    ? DATA.config_dir + " — the default; Claude Code reads it automatically"
+    : DATA.config_dir + " — non-default; Claude Code only uses it when CLAUDE_CONFIG_DIR is exported";
+
+  const notice = document.getElementById("cfgnotice");
+  notice.innerHTML = "";
+  if (!DATA.default_dir) {
+    notice.append(el("div.alert.alert-warning", { style: { marginBottom: "1rem" } },
+      el("span.alert-icon", {}, icon("warn")),
+      el("div.alert-body", {},
+        el("div.alert-title", { text: "Non-default config directory" }),
+        el("div", { text: "Claude Code only reads " + DATA.config_dir
+          + " when CLAUDE_CONFIG_DIR is exported in your shell. Otherwise it uses ~/.claude." }))));
   }
-  document.getElementById("cfghint").textContent = DATA.default_dir
-    ? "" : "non-default config dir: Claude Code only uses it if CLAUDE_CONFIG_DIR is exported in your shell";
 }
 
-async function saveCfgDir() {
-  const v = document.getElementById("cfgdir").value.trim();
+function openCfgMenu(anchor) {
+  const entries = [
+    { label: "Change directory…", icon: "pencil", fn: changeCfgDir },
+    { label: "Copy path", icon: "copy", fn: () => copyText(DATA.config_dir, "config directory path") },
+  ];
+  if (!DATA.default_dir)
+    entries.push({ separator: true },
+      { label: "Reset to default (~/.claude)", icon: "refresh", fn: resetCfgDir });
+  openMenu(anchor, entries);
+}
+
+async function changeCfgDir() {
+  const r = await modal({
+    title: "Config directory",
+    text: "Absolute path (or ~/…) of the Claude Code config directory this dashboard manages. "
+        + "Stored machine-locally in .claude-ui.json beside the checkout.",
+    fields: [{ id: "p", label: "Path", value: DATA.config_dir, mono: true }],
+    ok: "Save",
+  });
+  if (!r) return;
   try {
-    await api("/api/config-dir", { path: v === DATA.config_dir ? "" : v });
-    CFGEDIT = false;
-    toast("config dir updated");
+    await api("/api/config-dir", { path: r.p === DATA.config_dir ? "" : r.p });
+    toast("Config directory updated");
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
 
 async function resetCfgDir() {
-  try { await api("/api/config-dir", { path: "" }); toast("config dir reset to default"); await refresh(); }
-  catch (e) { toast(e.message, true); }
+  try {
+    await api("/api/config-dir", { path: "" });
+    toast("Config directory reset to the default");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
 }
 
-const allTabs = () => TABS;
+async function copyText(text, what) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Copied " + (what || "to clipboard"));
+  } catch (e) { toast("Could not copy: " + e.message, true); }
+}
+
+// --------------------------------------------------------------------- tabs
+
+function tabBadge(t) {
+  if (ITEM_TABS.includes(t))
+    return String(((DATA.items || {})[t] || []).filter((i) => i.enabled).length);
+  if (t === "settings") return String(Object.keys((DATA.settings || {}).data || {}).length);
+  if (t === "mcp") return String(((DATA.mcp || {}).servers || []).filter((s) => s.enabled).length);
+  if (t === "doctor" && DOCTOR && DOCTOR.warns) return String(DOCTOR.warns);
+  return null;
+}
 
 function renderTabs() {
-  const el = document.getElementById("tabs");
-  el.innerHTML = "";
-  for (const t of allTabs()) {
-    const b = document.createElement("button");
-    b.textContent = ITEM_TABS.includes(t)
-      ? t + " · " + ((DATA.items || {})[t] || []).filter((i) => i.enabled).length
-      : t === "settings"
-      ? "settings · " + Object.keys((DATA.settings || {}).data || {}).length
-      : t === "mcp"
-      ? "mcp · " + ((DATA.mcp || {}).servers || []).length
-      : t === "statusline"
-      ? "statusline" + ((DATA.statusline || {}).applied ? " ✓" : "")
-      : t === "doctor"
-      ? "doctor" + (DOCTOR && DOCTOR.warns ? " · " + DOCTOR.warns + "⚠" : "")
-      : t;
-    b.className = t === TAB ? "on" : "";
-    b.onclick = () => { TAB = t; location.hash = t; render(); };
-    el.appendChild(b);
+  const nav = document.getElementById("tabs");
+  nav.innerHTML = "";
+  for (const t of TABS) {
+    const meta = TAB_META[t];
+    const on = t === TAB;
+    const b = el("button.btn.tabs-trigger", {
+      role: "tab",
+      id: "tab-" + t,
+      "aria-selected": String(on),
+      "aria-controls": t + "view",
+      tabIndex: on ? 0 : -1,
+      onclick: () => goTab(t),
+      onkeydown: (e) => {
+        const d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+        if (!d) return;
+        e.preventDefault();
+        goTab(TABS[(TABS.indexOf(t) + d + TABS.length) % TABS.length]);
+        document.getElementById("tab-" + TAB)?.focus();
+      },
+    }, icon(meta.icon), el("span", { text: meta.label }));
+
+    const count = tabBadge(t);
+    if (count && count !== "0")
+      b.append(el("span.tab-count", { class: t === "doctor" ? "warn" : "", text: count }));
+    if (t === "statusline" && (DATA.statusline || {}).applied)
+      b.append(el("span.tab-dot.ok", { title: "statusLine is set in settings.json" }));
+    nav.append(b);
   }
 }
+
+// -------------------------------------------------- schema-driven settings
+// Every settings control resolves to a `collect()` that returns the value to
+// write, `undefined` to clear the key, or throws on invalid input. Selects
+// (bool/enum) commit on change; everything else commits on the "Set" button.
 
 function settingsGet(key) {
   let node = (DATA.settings || {}).data || {};
@@ -474,15 +173,11 @@ function settingsGet(key) {
   return node;
 }
 
-// ---- schema-driven form controls ------------------------------------------
-// Every settings control resolves to a `collect()` that returns the value to
-// write, `undefined` to clear the key, or throws on invalid input. Selects
-// (bool/enum) commit on change; everything else commits on the "set" button.
-
 async function commitSetting(key, value) {
   try {
     await api("/api/settings-set", { key, value });
-    toast(value === null ? key + " cleared" : key + " set");
+    toast(value === null ? key + " cleared" : key + " set",
+      false, value === null ? null : undefined);
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
@@ -492,27 +187,20 @@ const clearSetting = (key) => commitSetting(key, null);
 function trySet(key, collect) {
   let v;
   try { v = collect(); }
-  catch (e) { toast("invalid value: " + e.message, true); return; }
+  catch (e) { toast("Invalid value: " + e.message, true); return; }
   if (v === undefined) clearSetting(key);
   else commitSetting(key, v);
 }
 
-const opt = (v, label) => {
-  const o = document.createElement("option");
-  o.value = v; o.textContent = label == null ? v : label;
-  return o;
-};
-const mkbtn = (cls, label, onclick) => {
-  const b = document.createElement("button");
-  b.className = cls; b.textContent = label; b.onclick = onclick;
-  return b;
-};
+const opt = (v, label) => el("option", { value: v, text: label == null ? v : label });
+
+const mkbtn = (cls, label, onclick, title) =>
+  el("button.btn", { class: cls, text: label, onclick, title: title || "" });
 
 let DL_SEQ = 0;
 function datalist(values) {
-  const dl = document.createElement("datalist");
-  dl.id = "dl_" + (++DL_SEQ);
-  for (const v of values) dl.appendChild(opt(v));
+  const dl = el("datalist", { id: "dl_" + (++DL_SEQ) });
+  for (const v of values) dl.append(opt(v));
   return dl;
 }
 
@@ -528,6 +216,8 @@ const LIVE_SUGGEST = {
   "mcpServerTimeouts:key": mcpNames,
   "enabledMcpjsonServers": mcpNames,
   "disabledMcpjsonServers": mcpNames,
+  "agents:key": () => itemNames("agents"),
+  "alwaysAllowedSkills": () => itemNames("skills"),
 };
 function suggestFor(key, base) {
   const out = (base || []).map(String);
@@ -541,30 +231,29 @@ function suggestFor(key, base) {
 // Returns { node, aux?, collect } — aux is an optional <datalist> to append.
 function scalarControl(f, value, ph) {
   if (f.type === "bool") {
-    const sel = document.createElement("select");
-    sel.append(opt("", "(unset" + (f.default !== undefined ? ", default: " + f.default : "") + ")"),
-      opt("true"), opt("false"));
+    const sel = el("select");
+    sel.append(opt("", "Unset" + (f.default !== undefined ? " · default " + f.default : "")),
+      opt("true", "true"), opt("false", "false"));
     if (value === true) sel.value = "true";
     else if (value === false) sel.value = "false";
     return { node: sel, collect: () => sel.value === "" ? undefined : sel.value === "true" };
   }
   if (f.type === "enum") {
-    const sel = document.createElement("select");
-    sel.appendChild(opt("", "(unset" + (f.default !== undefined ? ", default: " + f.default : "") + ")"));
+    const sel = el("select");
+    sel.append(opt("", "Unset" + (f.default !== undefined ? " · default " + f.default : "")));
     // schema values plus any live docs-discovered values for this key
     const vals = suggestFor(f.key, f.values);
-    for (const v of vals) sel.appendChild(opt(v));
-    // keep an out-of-vocabulary current value visible instead of showing "(unset)"
+    for (const v of vals) sel.append(opt(v));
+    // keep an out-of-vocabulary current value visible instead of showing "Unset"
     if (value !== undefined && value !== null && !vals.includes(String(value)))
-      sel.appendChild(opt(String(value), String(value) + " (current)"));
+      sel.append(opt(String(value), String(value) + " (current)"));
     if (value !== undefined && value !== null) sel.value = String(value);
     return { node: filterSelect(sel), collect: () => sel.value === "" ? undefined : sel.value };
   }
-  const inp = document.createElement("input");
   const sugg = suggestFor(f.key, f.values);
   // datalist on type=number is ignored by Safari/Firefox, so suggested
   // numbers use a text input; collect() still validates numerically
-  inp.type = f.type === "number" && !sugg.length ? "number" : "text";
+  const inp = el("input.mono", { type: f.type === "number" && !sugg.length ? "number" : "text" });
   if (f.type === "number") inp.inputMode = "decimal";
   if (value === "") inp.value = '""';
   else if (value !== undefined && value !== null) inp.value = String(value);
@@ -590,24 +279,24 @@ function scalarControl(f, value, ph) {
 
 // list → one input per entry, with add/remove; optional per-row suggestions.
 function listForm(ctrl, s, cur) {
-  const box = document.createElement("div");
-  box.className = "formrows";
-  ctrl.appendChild(box);
+  const box = el("div.formrows");
+  ctrl.append(box);
   const sugg = suggestFor(s.key, s.item_values);
   // long lists filter in a popup instead (see filterInput), so no datalist
   const dl = sugg.length && sugg.length <= FSEL_MIN ? datalist(sugg) : null;
-  if (dl) ctrl.appendChild(dl);
+  if (dl) ctrl.append(dl);
   const addRow = (val) => {
-    const r = document.createElement("div");
-    r.className = "formrow";
-    const inp = document.createElement("input");
-    inp.type = "text"; inp.value = val || "";
+    const inp = el("input.mono", { type: "text", value: val || "" });
     if (dl) inp.setAttribute("list", dl.id);
-    r.append(filterInput(inp, sugg) || inp, mkbtn("small danger", "×", () => r.remove()));
-    box.appendChild(r);
+    const r = el("div.formrow", {}, filterInput(inp, sugg) || inp);
+    r.append(mkbtn("btn-sm danger btn-icon", "", () => r.remove(), "Remove"));
+    r.lastChild.append(icon("x"));
+    box.append(r);
+    return inp;
   };
   (Array.isArray(cur) ? cur : []).forEach((v) => addRow(String(v)));
-  ctrl.appendChild(mkbtn("small", "+ add", () => addRow("")));
+  ctrl.append(mkbtn("btn-sm", "Add", () => addRow("").focus()));
+  ctrl.lastChild.prepend(icon("plus"));
   return () => {
     const vals = [...box.querySelectorAll("input")]
       .map((i) => i.value.trim()).filter(Boolean);
@@ -618,29 +307,27 @@ function listForm(ctrl, s, cur) {
 // kv → key/value row editor; value control is a dropdown (s.values),
 // number input (s.value_type === "number"), or free text.
 function mapForm(ctrl, s, cur) {
-  const box = document.createElement("div");
-  box.className = "formrows";
-  ctrl.appendChild(box);
+  const box = el("div.formrows");
+  ctrl.append(box);
   const ksugg = suggestFor(s.key + ":key", s.key_values);
   // env alone suggests 300-odd names — those filter in a popup, not a datalist
   const kdl = ksugg.length && ksugg.length <= FSEL_MIN ? datalist(ksugg) : null;
-  if (kdl) ctrl.appendChild(kdl);
+  if (kdl) ctrl.append(kdl);
   const addRow = (k, v) => {
-    const r = document.createElement("div");
-    r.className = "formrow";
-    const kin = document.createElement("input");
-    kin.type = "text"; kin.className = "kk"; kin.placeholder = "key";
-    kin.value = k || "";
+    const kin = el("input.kk.mono", { type: "text", placeholder: "key", value: k || "" });
     if (kdl) kin.setAttribute("list", kdl.id);
     const val = scalarControl(
       s.values ? { type: "enum", values: s.values }
         : s.value_type === "number" ? { type: "number" } : { type: "string" },
       v, "value");
-    r.append(filterInput(kin, ksugg) || kin, val.node);
-    if (val.aux) r.appendChild(val.aux);
-    r.append(mkbtn("small danger", "×", () => r.remove()));
-    box.appendChild(r);
+    const r = el("div.formrow", {}, filterInput(kin, ksugg) || kin, val.node);
+    if (val.aux) r.append(val.aux);
+    const del = mkbtn("btn-sm danger btn-icon", "", () => r.remove(), "Remove");
+    del.append(icon("x"));
+    r.append(del);
+    box.append(r);
     return () => {
+      if (!r.isConnected) return null;
       const key = kin.value.trim();
       let out;
       try { out = val.collect(); } catch (e) { throw new Error(key + ": " + e.message); }
@@ -654,7 +341,9 @@ function mapForm(ctrl, s, cur) {
   const entries = cur && typeof cur === "object" && !Array.isArray(cur)
     ? Object.entries(cur) : [];
   entries.forEach(([k, v]) => collectors.push(addRow(k, v)));
-  ctrl.appendChild(mkbtn("small", "+ add", () => collectors.push(addRow("", ""))));
+  const addBtn = mkbtn("btn-sm", "Add", () => collectors.push(addRow("", "")));
+  addBtn.prepend(icon("plus"));
+  ctrl.append(addBtn);
   return () => {
     const out = {};
     for (const c of collectors) {
@@ -667,24 +356,19 @@ function mapForm(ctrl, s, cur) {
 
 // object → labeled mini-form over declared fields; const fields are always written.
 function objectForm(ctrl, s, cur) {
-  const box = document.createElement("div");
-  box.className = "formobj";
-  ctrl.appendChild(box);
+  const box = el("div.formobj");
+  ctrl.append(box);
   const obj = cur && typeof cur === "object" && !Array.isArray(cur) ? cur : {};
   const collectors = [];
   for (const f of s.fields) {
     if (f.const !== undefined) continue;
-    const line = document.createElement("label");
-    line.className = "formfield";
-    const lab = document.createElement("span");
-    lab.className = "flabel";
-    lab.textContent = f.key + (f.desc ? " — " + f.desc : "");
-    line.appendChild(lab);
+    const line = el("label.formfield", {},
+      el("span.flabel", { text: f.key + (f.desc ? " — " + f.desc : "") }));
     // dotted path so subfields resolve live/server suggestions by full key
     const sc = scalarControl({ ...f, key: s.key + "." + f.key }, obj[f.key]);
-    line.appendChild(sc.node);
-    if (sc.aux) line.appendChild(sc.aux);
-    box.appendChild(line);
+    line.append(sc.node);
+    if (sc.aux) line.append(sc.aux);
+    box.append(line);
     collectors.push([f.key, sc.collect]);
   }
   return () => {
@@ -701,15 +385,14 @@ function objectForm(ctrl, s, cur) {
 }
 
 function jsonForm(ctrl, s, cur, isSet) {
-  const ta = document.createElement("textarea");
-  ta.placeholder = "JSON";
-  const text = isSet ? JSON.stringify(cur, null, 2) : "";
-  ta.value = text;
-  const fit = () => { ta.rows = Math.min(12, Math.max(2, ta.value.split("\n").length)); };
+  const ta = el("textarea.mono", { placeholder: "JSON", spellcheck: false });
+  ta.value = isSet ? JSON.stringify(cur, null, 2) : "";
+  const fit = () => { ta.rows = Math.min(16, Math.max(3, ta.value.split("\n").length + 1)); };
   fit();
+  ta.oninput = fit;
   if ((s.templates || []).length) {
-    const sel = document.createElement("select");
-    const ph = opt("", "insert template…");
+    const sel = el("select");
+    const ph = opt("", "Insert template…");
     ph.disabled = true;
     sel.append(ph, ...s.templates.map((t, i) => opt(String(i), t.name)));
     sel.value = "";
@@ -717,16 +400,15 @@ function jsonForm(ctrl, s, cur, isSet) {
       const t = s.templates[Number(sel.value)];
       sel.value = "";
       if (!t) return;
-      if (ta.value.trim() && !(await mconfirm("replace " + s.key,
-          "replace the editor contents with the '" + t.name + "' template?",
-          "replace")))
+      if (ta.value.trim() && !(await mconfirm("Replace " + s.key + "?",
+          "Replace the editor contents with the “" + t.name + "” template?", "Replace")))
         return;
       ta.value = JSON.stringify(t.value, null, 2);
       fit();
     };
-    ctrl.appendChild(filterSelect(sel));
+    ctrl.append(filterSelect(sel));
   }
-  ctrl.appendChild(ta);
+  ctrl.append(ta);
   return () => {
     const r = ta.value.trim();
     if (!r) return undefined;
@@ -735,23 +417,43 @@ function jsonForm(ctrl, s, cur, isSet) {
   };
 }
 
+// Where to read more about a key. Most live on the settings reference; the
+// handful with a page of their own get sent there instead.
+const DOC_BASE = "https://code.claude.com/docs/en/";
+const SETTING_DOCS = [
+  [/^hooks|^disableAllHooks/, "hooks"],
+  [/^statusLine/, "statusline"],
+  [/^sandbox|^autoMode|^warningOnSandboxEscape/, "sandboxing"],
+  [/^permissions/, "iam"],
+  [/Mcp|^mcpServer/, "mcp"],
+  [/^plugin/, "plugins"],
+  [/^outputStyle/, "output-styles"],
+  [/^autoMemory|^claudeMdExcludes|^autoCompact/, "memory"],
+  [/^env$/, "settings#environment-variables"],
+  [/^model$|^fallbackModel|Model$/, "model-config"],
+  [/^keyBindings|^editorMode/, "terminal-config"],
+  [/^fileCheckpointing/, "checkpointing"],
+];
+const docUrlFor = (key) =>
+  DOC_BASE + ((SETTING_DOCS.find(([re]) => re.test(key)) || [null, "settings"])[1]);
+
 function settingRow(s) {
   const cur = settingsGet(s.key);
   const isSet = cur !== undefined;
-  const row = document.createElement("div");
-  row.className = "srow";
+  const row = el("div.srow", { class: isSet ? "is-set" : "" });
 
-  const meta = document.createElement("div");
-  meta.className = "smeta";
-  meta.innerHTML =
-    `<span class="skey">${esc(s.key)}</span>` +
-    (isSet ? '<span class="badge group">set</span>' : "") +
-    `<div class="sdesc">${esc(s.desc || "")}</div>`;
+  const meta = el("div.smeta", {},
+    el("div.row-flex", { style: { gap: ".375rem" } },
+      el("span.skey", { text: s.key }),
+      isSet ? badge("set", "default") : null,
+      el("a.sdoc", {
+        href: docUrlFor(s.key), target: "_blank", rel: "noreferrer",
+        title: "Open the documentation for " + s.key,
+      }, icon("link"))),
+    s.desc ? el("div.sdesc", { text: s.desc }) : null);
 
-  const ctrl = document.createElement("div");
-  ctrl.className = "sctrl";
-  if (s.type === "object" || s.type === "list" || s.type === "kv" || s.type === "json")
-    ctrl.classList.add("wide");
+  const ctrl = el("div.sctrl");
+  if (["object", "list", "kv", "json"].includes(s.type)) ctrl.classList.add("wide");
 
   if (s.type === "bool" || s.type === "enum") {
     // fixed-choice dropdown that commits immediately
@@ -760,7 +462,7 @@ function settingRow(s) {
       const v = sc.collect();
       v === undefined ? clearSetting(s.key) : commitSetting(s.key, v);
     };
-    ctrl.appendChild(sc.node);
+    ctrl.append(sc.node);
   } else {
     let collect;
     if (s.type === "object") collect = objectForm(ctrl, s, cur);
@@ -768,19 +470,23 @@ function settingRow(s) {
     else if (s.type === "kv") collect = mapForm(ctrl, s, cur);
     else if (s.type === "json") collect = jsonForm(ctrl, s, cur, isSet);
     else {
-      const ph = s.default !== undefined ? "default: " + s.default : "(unset)";
+      const ph = s.default !== undefined ? "default: " + s.default : "unset";
       const sc = scalarControl(s, cur, ph);
-      ctrl.appendChild(sc.node);
-      if (sc.aux) ctrl.appendChild(sc.aux);
+      ctrl.append(sc.node);
+      if (sc.aux) ctrl.append(sc.aux);
       collect = sc.collect;
     }
-    ctrl.appendChild(mkbtn("small", "set", () => trySet(s.key, collect)));
-    if (isSet) ctrl.appendChild(mkbtn("small danger", "clear", () => clearSetting(s.key)));
+    const actions = el("div.row-flex", { style: { gap: ".375rem" } },
+      mkbtn("btn-sm btn-primary", "Set", () => trySet(s.key, collect)));
+    if (isSet) actions.append(mkbtn("btn-sm danger", "Clear", () => clearSetting(s.key)));
+    ctrl.append(actions);
   }
 
   row.append(meta, ctrl);
   return row;
 }
+
+// ------------------------------------------------------------------- hooks
 
 const HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse",
   "PostToolUse", "Notification", "Stop", "SubagentStop", "PreCompact",
@@ -811,14 +517,14 @@ async function hooksSave(newHooks) {
 }
 
 async function hookAdd() {
-  const r = await modal({ title: "add hook",
-    text: "the command receives the event JSON on stdin; exit code 2 blocks the action (tool events)",
+  const r = await modal({ title: "Add hook",
+    text: "The command receives the event JSON on stdin; exit code 2 blocks the action (tool events).",
     fields: [
-      { id: "e", label: "event", type: "select", options: HOOK_EVENTS },
-      { id: "m", label: "matcher — tool name pattern, tool events only (blank = all)",
-        placeholder: "e.g. Bash or Edit|Write" },
-      { id: "c", label: "command" },
-      { id: "t", label: "timeout seconds (optional)" }], ok: "add" });
+      { id: "e", label: "Event", type: "select", options: HOOK_EVENTS },
+      { id: "m", label: "Matcher — tool name pattern, tool events only (blank = all)",
+        placeholder: "e.g. Bash or Edit|Write", mono: true },
+      { id: "c", label: "Command", mono: true },
+      { id: "t", label: "Timeout in seconds (optional)" }], ok: "Add" });
   if (!r || !r.c) return;
   const hooks = JSON.parse(JSON.stringify(((DATA.settings || {}).data || {}).hooks || {}));
   const arr = (hooks[r.e] = hooks[r.e] || []);
@@ -832,12 +538,12 @@ async function hookAdd() {
   (entry.hooks = entry.hooks || []).push(h);
   try {
     await hooksSave(hooks);
-    toast("hook added — applies to new sessions");
+    toast("Hook added — applies to new sessions");
   } catch (e) { toast(e.message, true); }
 }
 
 async function hookDelete(row) {
-  if (!(await mconfirm("delete hook", row.event + ": " + row.command, "delete"))) return;
+  if (!(await mconfirm("Delete hook", row.event + ": " + row.command, "Delete"))) return;
   const hooks = JSON.parse(JSON.stringify(DATA.settings.data.hooks));
   const m = hooks[row.event][row.mi];
   m.hooks.splice(row.hi, 1);
@@ -845,130 +551,160 @@ async function hookDelete(row) {
   if (!hooks[row.event].length) delete hooks[row.event];
   try {
     await hooksSave(hooks);
-    toast("hook removed");
+    toast("Hook removed");
   } catch (e) { toast(e.message, true); }
 }
 
 async function hookFire(row) {
-  toast("piping a sample " + row.event + " event into the command…");
+  const t = toast({ title: "Firing a sample " + row.event + " event…", variant: "loading", duration: 0 });
   try {
     const r = await api("/api/hook-test", { command: row.command, event: row.event });
-    const bits = [row.event + " test: " + r.detail];
+    t.close();
+    const bits = [];
     if ((r.stdout || "").trim()) bits.push("stdout: " + r.stdout.trim().slice(0, 300));
     if ((r.stderr || "").trim()) bits.push("stderr: " + r.stderr.trim().slice(0, 300));
-    toast(bits.join(" · "), !r.ok);
-  } catch (e) { toast(e.message, true); }
+    toast({ title: row.event + " test: " + r.detail,
+      description: bits.join("\n") || undefined,
+      variant: r.ok ? "success" : "error" });
+  } catch (e) { t.close(); toast(e.message, true); }
 }
 
+// ---------------------------------------------------------------- settings
+
 let SFILTER = { q: "", set: false };
+const SOPEN = new Set();      // categories the user has explicitly toggled open
+const SCLOSED = new Set();    // …and closed
 
 function renderSettings() {
-  const el = document.getElementById("settingsview");
+  const view = document.getElementById("settingsview");
   const st = DATA.settings || {};
-  el.innerHTML =
-    `<div class="sethead">editing <b>${esc(st.path || "")}</b>` +
-    (st.exists ? "" : " (file will be created on first set)") +
-    " · changes apply to new sessions</div>";
+  view.innerHTML = "";
+
+  view.append(el("div.view-head", {
+    html: "Editing <b>" + esc(st.path || "") + "</b>"
+      + (st.exists ? "" : " (created on the first set)")
+      + " · changes apply to new sessions",
+  }));
+
   if (st.error) {
-    const b = document.createElement("div");
-    b.className = "banner warn";
-    b.textContent = "settings.json has invalid JSON — fix the file by hand; form editing is disabled. " + st.error;
-    el.appendChild(b);
+    view.append(el("div.alert.alert-destructive", {},
+      el("span.alert-icon", {}, icon("error")),
+      el("div.alert-body", {},
+        el("div.alert-title", { text: "settings.json has invalid JSON" }),
+        el("div", { text: "Form editing is disabled until the file parses. " + st.error }))));
     return;
   }
 
-  // hooks builder
-  const hooksH = document.createElement("h2");
-  hooksH.textContent = "hooks";
-  el.appendChild(hooksH);
+  // ---- hooks builder
   const rows = hooksList(st.data || {});
-  const hbar = document.createElement("div");
-  hbar.className = "bar";
-  const note = document.createElement("span");
-  note.style.cssText = "align-self:center;font-size:.75rem;color:var(--fg2);flex:1;min-width:12rem";
-  note.textContent = rows === null
-    ? "hooks config has a non-standard shape — edit it as raw JSON in the schema list below"
-    : "lifecycle commands: each receives the event JSON on stdin; test fires a sample event";
-  hbar.appendChild(note);
-  if (rows !== null) {
-    const addb = document.createElement("button");
-    addb.className = "small primary";
-    addb.textContent = "+ add hook";
-    addb.onclick = hookAdd;
-    hbar.appendChild(addb);
-  }
-  el.appendChild(hbar);
-  for (const row of rows || []) {
-    const d = document.createElement("div");
-    d.className = "drow";
-    d.innerHTML =
-      `<span class="badge group">${esc(row.event)}</span>` +
-      (row.matcher ? `<span class="badge link">${esc(row.matcher)}</span>` : "") +
-      `<span class="dmsg">${esc(row.command)}</span>` +
-      (row.timeout ? `<span class="badge ok">${esc(String(row.timeout))}s</span>` : "");
-    const tb = document.createElement("button");
-    tb.className = "small";
-    tb.textContent = "test";
-    tb.onclick = () => hookFire(row);
-    d.appendChild(tb);
-    const db = document.createElement("button");
-    db.className = "small danger";
-    db.textContent = "delete";
-    db.onclick = () => hookDelete(row);
-    d.appendChild(db);
-    el.appendChild(d);
-  }
+  const hookCard = el("div.card", { style: { marginBottom: "1.25rem" } });
+  hookCard.append(el("div.card-header", {},
+    el("div", {},
+      el("div.card-title", { text: "Lifecycle hooks" }),
+      el("div.card-description", {
+        text: rows === null
+          ? "The hooks config has a non-standard shape — edit it as raw JSON under “environment & hooks” below."
+          : "Commands run at session and tool events. Each receives the event JSON on stdin; Test fires a sample event.",
+      })),
+    rows === null ? null : el("div.card-action", {},
+      (() => {
+        const b = mkbtn("btn-sm btn-primary", "Add hook", hookAdd);
+        b.prepend(icon("plus"));
+        return b;
+      })())));
 
-  // schema-driven settings with filter
-  const fbar = document.createElement("div");
-  fbar.className = "bar";
-  fbar.style.marginTop = "1.2rem";
-  const fin = document.createElement("input");
-  fin.type = "search";
-  fin.id = "setq";
-  fin.placeholder = "filter settings…";
-  fin.value = SFILTER.q;
-  fin.oninput = () => {
-    SFILTER.q = fin.value;
-    renderSettings();
-    const nf = document.getElementById("setq");
-    nf.focus();
-    nf.setSelectionRange(nf.value.length, nf.value.length);
-  };
-  fbar.appendChild(fin);
-  const ob = document.createElement("button");
-  ob.className = "small" + (SFILTER.set ? " primary" : "");
-  ob.textContent = "only set";
-  ob.title = "show only keys that are set in the file";
-  ob.onclick = () => { SFILTER.set = !SFILTER.set; renderSettings(); };
-  fbar.appendChild(ob);
-  el.appendChild(fbar);
+  if (rows && rows.length) {
+    const body = el("div.card-content.flush");
+    for (const row of rows) {
+      body.append(el("div.drow", {},
+        badge(row.event, "default"),
+        row.matcher ? badge(row.matcher, "outline") : null,
+        el("span.dmsg.dmono", { text: row.command }),
+        row.timeout ? badge(row.timeout + "s", "secondary") : null,
+        el("div.dactions", {},
+          (() => { const b = mkbtn("btn-sm", "Test", () => hookFire(row), "Pipe a sample event into this command"); b.prepend(icon("play")); return b; })(),
+          mkbtn("btn-sm danger", "Delete", () => hookDelete(row)))));
+    }
+    hookCard.append(body);
+  } else if (rows) {
+    hookCard.append(el("div.card-content", {},
+      el("div.muted", { style: { fontSize: ".78125rem" },
+        text: "No hooks configured." })));
+  }
+  view.append(hookCard);
+
+  // ---- schema-driven settings
+  const setCount = Object.keys(st.data || {}).length;
+  const bar = el("div.toolbar");
+  const fin = el("input", {
+    type: "search", id: "setq", placeholder: "Filter settings by key or description…",
+    value: SFILTER.q,
+    oninput: () => {
+      SFILTER.q = fin.value;
+      renderSettings();
+      const nf = document.getElementById("setq");
+      nf.focus();
+      nf.setSelectionRange(nf.value.length, nf.value.length);
+    },
+  });
+  bar.append(fin);
+  bar.append(el("div.toolbar-end", {},
+    switchToggle("Only set", SFILTER.set, (v) => { SFILTER.set = v; renderSettings(); },
+      "Show only keys present in settings.json"),
+    el("span.muted", { style: { fontSize: ".72rem" },
+      text: setCount + " of " + SCHEMA.length + " documented keys set" })));
+  view.append(bar);
 
   const q = SFILTER.q.toLowerCase();
   const match = (s) =>
-    (!q || s.key.toLowerCase().includes(q) || (s.desc || "").toLowerCase().includes(q)) &&
-    (!SFILTER.set || settingsGet(s.key) !== undefined);
-  const cats = {};
-  for (const s of SCHEMA) if (match(s)) (cats[s.cat] = cats[s.cat] || []).push(s);
-  for (const [cat, items] of Object.entries(cats)) {
-    const h = document.createElement("h2");
-    h.textContent = cat;
-    el.appendChild(h);
-    for (const s of items) el.appendChild(settingRow(s));
+    (!q || s.key.toLowerCase().includes(q) || (s.desc || "").toLowerCase().includes(q))
+    && (!SFILTER.set || settingsGet(s.key) !== undefined);
+
+  const cats = new Map();
+  for (const s of SCHEMA) if (match(s)) {
+    if (!cats.has(s.cat)) cats.set(s.cat, []);
+    cats.get(s.cat).push(s);
   }
+
   const covered = new Set(SCHEMA.map((s) => s.key.split(".")[0]));
   const extra = Object.keys(st.data || {})
     .filter((k) => !covered.has(k))
-    .map((k) => ({ key: k, type: "json",
-      desc: "(not in the documented schema — edited as raw JSON)" }))
+    .map((k) => ({ key: k, type: "json", cat: "other keys in this file",
+      desc: "Not in the documented schema — edited as raw JSON" }))
     .filter(match);
-  if (extra.length) {
-    const h = document.createElement("h2");
-    h.textContent = "other keys in file";
-    el.appendChild(h);
-    for (const s of extra) el.appendChild(settingRow(s));
+  if (extra.length) cats.set("other keys in this file", extra);
+
+  if (!cats.size) {
+    view.append(emptyState("No matching settings",
+      q ? "Nothing matches “" + SFILTER.q + "”." : "No keys are set yet.", "filter"));
+    return;
+  }
+
+  for (const [cat, items] of cats) {
+    const nSet = items.filter((s) => settingsGet(s.key) !== undefined).length;
+    // filtering forces everything open so results are never hidden behind a fold
+    const open = q || SFILTER.set ? true
+      : SOPEN.has(cat) ? true
+      : SCLOSED.has(cat) ? false
+      : nSet > 0 || cat === "model";
+    const group = el("details.setgroup", { open });
+    group.ontoggle = () => {
+      if (q || SFILTER.set) return;
+      (group.open ? SOPEN : SCLOSED).add(cat);
+      (group.open ? SCLOSED : SOPEN).delete(cat);
+    };
+    group.append(el("summary", {},
+      el("span.sg-caret", {}, icon("chevronRight")),
+      el("span.sg-name", { text: cat }),
+      el("span.sg-meta", {},
+        nSet ? badge(nSet + " set", "default") : null,
+        el("span.muted", { style: { fontSize: ".72rem" }, text: items.length + " keys" }))));
+    for (const s of items) group.append(settingRow(s));
+    view.append(group);
   }
 }
+
+// --------------------------------------------------------------------- MCP
 
 let MCPEDIT = null;
 
@@ -987,42 +723,35 @@ function mcpSummary(cfg) {
 }
 
 function mcpEditPanel() {
-  const p = document.createElement("div");
-  p.className = "mcppanel";
-  p.innerHTML =
-    `<div class="bar"><input type="text" id="mcpname" placeholder="server name"` +
-    ` value="${esc(MCPEDIT.name || "")}" ${MCPEDIT.isNew ? "" : "disabled"}>` +
-    (MCPEDIT.enabled === false ? '<span class="badge link">disabled</span>' : "") +
-    `<span style="flex:1"></span>` +
-    (MCPEDIT.isNew ? "" :
-      `<button class="small danger" onclick="mcpDelete()">delete</button>`) +
-    `</div>`;
-  const ta = document.createElement("textarea");
-  ta.id = "mcpjson";
-  ta.className = "fedit";
-  ta.rows = 12;
-  ta.value = MCPEDIT.json;
-  p.appendChild(ta);
-  const bar = document.createElement("div");
-  bar.className = "bar";
-  bar.style.marginTop = ".6rem";
-  bar.innerHTML =
-    `<button class="primary" onclick="mcpSave()">save</button>` +
-    `<button onclick="MCPEDIT=null;render()">cancel</button>`;
-  p.appendChild(bar);
-  return p;
+  const name = el("input.mono", {
+    type: "text", id: "mcpname", placeholder: "server name",
+    value: MCPEDIT.name || "", disabled: !MCPEDIT.isNew,
+  });
+  const ta = el("textarea.fedit.mono", {
+    id: "mcpjson", rows: 12, spellcheck: false, value: MCPEDIT.json,
+    style: { minHeight: "14rem" },
+  });
+  return el("div.mcppanel", {},
+    el("div.toolbar", {},
+      name,
+      MCPEDIT.enabled === false ? badge("disabled", "outline") : null,
+      el("div.toolbar-end", {},
+        MCPEDIT.isNew ? null : mkbtn("btn-sm danger", "Delete", mcpDelete))),
+    ta,
+    el("div.toolbar", { style: { marginTop: ".625rem", marginBottom: 0 } },
+      mkbtn("btn-primary", "Save", mcpSave),
+      mkbtn("", "Cancel", () => { MCPEDIT = null; render(); })));
 }
 
 async function mcpSave() {
   let config;
   try { config = JSON.parse(document.getElementById("mcpjson").value); }
-  catch (e) { toast("invalid JSON: " + e.message, true); return; }
+  catch (e) { toast("Invalid JSON: " + e.message, true); return; }
   const name = (document.getElementById("mcpname").value || "").trim();
   const enabled = MCPEDIT.enabled !== false;
   try {
     await api("/api/mcp-save", { name, config, enabled });
-    toast(name + " saved" + (enabled ? "" : " (still disabled)") +
-      " — applies to new sessions");
+    toast(name + " saved" + (enabled ? "" : " (still disabled)") + " — applies to new sessions");
     MCPEDIT = null;
     await refresh();
   } catch (e) { toast(e.message, true); }
@@ -1030,9 +759,9 @@ async function mcpSave() {
 
 async function mcpDelete() {
   const enabled = MCPEDIT.enabled !== false;
-  if (!(await mconfirm("delete " + MCPEDIT.name,
+  if (!(await mconfirm("Delete " + MCPEDIT.name,
     enabled ? "Removes it from " + DATA.mcp.machine_path + "."
-      : "Removes it from disabled/mcp-servers.json.", "delete"))) return;
+      : "Removes it from disabled/mcp-servers.json.", "Delete"))) return;
   try {
     await api("/api/mcp-delete", { name: MCPEDIT.name, enabled });
     toast(MCPEDIT.name + " deleted");
@@ -1042,156 +771,158 @@ async function mcpDelete() {
 }
 
 async function mcpNew() {
-  const r = await modal({ title: "add MCP server", fields: [
-    { id: "n", label: "server name" },
-    { id: "k", label: "transport", type: "select", options: [
+  const r = await modal({ title: "Add MCP server", fields: [
+    { id: "n", label: "Server name", mono: true },
+    { id: "k", label: "Transport", type: "select", options: [
       { value: "stdio", label: "stdio — local command" },
-      { value: "http", label: "http/sse — remote URL" }] }], ok: "create" });
+      { value: "http", label: "http/sse — remote URL" }] }], ok: "Create" });
   if (!r || !r.n) return;
-  MCPEDIT = { name: r.n, isNew: true,
-    json: JSON.stringify(MCP_TEMPLATE[r.k], null, 2) };
+  MCPEDIT = { name: r.n, isNew: true, json: JSON.stringify(MCP_TEMPLATE[r.k], null, 2) };
   render();
-}
-
-function renderMcp() {
-  const el = document.getElementById("mcpview");
-  const st = DATA.mcp || { servers: [] };
-  el.innerHTML =
-    `<div class="sethead">user-scope MCP servers in <b>${esc(st.machine_path)}</b>` +
-    ` — Claude Code's machine store${st.machine_exists ? "" : " (created on first save)"}.` +
-    " Changes apply to new sessions.</div>";
-  const machineOk = !st.machine_error;
-  if (st.machine_error) {
-    const b = document.createElement("div");
-    b.className = "banner warn";
-    b.textContent = "~/.claude.json has invalid JSON — editing disabled; fix the file by hand. " + st.machine_error;
-    el.appendChild(b);
-  }
-  if (machineOk) {
-    const bar = document.createElement("div");
-    bar.className = "bar";
-    bar.innerHTML =
-      `<span style="flex:1"></span>` +
-      `<button class="primary" onclick="mcpNew()">+ add server</button>`;
-    el.appendChild(bar);
-    if (MCPEDIT) el.appendChild(mcpEditPanel());
-  }
-  if (!st.servers.length) {
-    const d = document.createElement("div");
-    d.className = "empty";
-    d.textContent = "no MCP servers on this machine";
-    el.appendChild(d);
-    return;
-  }
-  for (const s of st.servers) {
-    const row = document.createElement("div");
-    row.className = "row" + (s.enabled ? "" : " off");
-    row.innerHTML =
-      `<span class="name">${esc(s.name)}</span>` +
-      (s.enabled ? "" : '<span class="badge link">disabled</span>') +
-      `<span class="desc">${esc(mcpSummary(s.config))}</span>`;
-    const act = document.createElement("span");
-    act.className = "actions";
-    const btn = (label, fn, cls) => {
-      const b = document.createElement("button");
-      b.textContent = label;
-      if (cls) b.className = cls;
-      b.onclick = fn;
-      act.appendChild(b);
-    };
-    btn("test", () => mcpTest(s.name));
-    if (machineOk)
-      btn("edit", () => {
-        MCPEDIT = { name: s.name, isNew: false, enabled: s.enabled,
-          json: JSON.stringify(s.config, null, 2) };
-        render();
-      });
-    if (machineOk)
-      btn(s.enabled ? "disable" : "enable", () => mcpToggle(s.name, !s.enabled),
-        "small" + (s.enabled ? " danger" : ""));
-    row.appendChild(act);
-    el.appendChild(row);
-  }
 }
 
 async function mcpToggle(name, enabled) {
   try {
     await api("/api/mcp-toggle", { name, enabled });
-    toast(name + (enabled ? " enabled" : " disabled — parked in disabled/mcp-servers.json") +
-      " · applies to new sessions");
+    toast(name + (enabled ? " enabled" : " disabled — parked in disabled/mcp-servers.json")
+      + " · applies to new sessions");
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
 
+async function mcpTest(name) {
+  const t = toast({ title: "Testing " + name + "…", variant: "loading", duration: 0 });
+  try {
+    const r = await api("/api/mcp-test", { name });
+    t.close();
+    toast(name + ": " + r.detail, !r.ok);
+  } catch (e) { t.close(); toast(e.message, true); }
+}
+
+function renderMcp() {
+  const view = document.getElementById("mcpview");
+  const st = DATA.mcp || { servers: [] };
+  view.innerHTML = "";
+  view.append(el("div.view-head", {
+    html: "User-scope MCP servers in <b>" + esc(st.machine_path) + "</b> — Claude Code's machine store"
+      + (st.machine_exists ? "" : " (created on the first save)")
+      + ". Changes apply to new sessions.",
+  }));
+
+  const machineOk = !st.machine_error;
+  if (st.machine_error) {
+    view.append(el("div.alert.alert-destructive", { style: { marginBottom: "1rem" } },
+      el("span.alert-icon", {}, icon("error")),
+      el("div.alert-body", {},
+        el("div.alert-title", { text: "~/.claude.json has invalid JSON" }),
+        el("div", { text: "Editing is disabled; fix the file by hand. " + st.machine_error }))));
+  }
+
+  if (machineOk) {
+    const addBtn = mkbtn("btn-primary", "Add server", mcpNew);
+    addBtn.prepend(icon("plus"));
+    view.append(el("div.toolbar", {}, el("div.toolbar-end", {}, addBtn)));
+    if (MCPEDIT) view.append(mcpEditPanel());
+  }
+
+  if (!st.servers.length) {
+    view.append(emptyState("No MCP servers on this machine",
+      "Add one to give Claude Code extra tools — a local stdio command or a remote HTTP endpoint.",
+      "server"));
+    return;
+  }
+
+  const list = el("div.list");
+  for (const s of st.servers) {
+    const actions = el("div.li-actions", {});
+    const testBtn = mkbtn("btn-sm", "Test", () => mcpTest(s.name), "Start the server and list its tools");
+    testBtn.prepend(icon("play"));
+    actions.append(testBtn);
+    if (machineOk) {
+      const ed = mkbtn("btn-sm", "Edit", () => {
+        MCPEDIT = { name: s.name, isNew: false, enabled: s.enabled,
+          json: JSON.stringify(s.config, null, 2) };
+        render();
+      });
+      ed.prepend(icon("pencil"));
+      actions.append(ed);
+      actions.append(mkbtn("btn-sm" + (s.enabled ? " danger" : ""),
+        s.enabled ? "Disable" : "Enable", () => mcpToggle(s.name, !s.enabled)));
+    }
+    list.append(el("div.list-item", { class: s.enabled ? "" : "off" },
+      el("div.li-main", {},
+        el("span.li-name", { text: s.name }),
+        s.enabled ? null : badge("disabled", "outline")),
+      el("span.li-desc.mono", { text: mcpSummary(s.config) }),
+      actions));
+  }
+  view.append(list);
+}
+
+// ------------------------------------------------------------------- setup
+
 let SETUP = null;
 
 async function renderSetup(reload) {
-  const el = document.getElementById("setupview");
+  const view = document.getElementById("setupview");
   if (!SETUP || reload) {
-    if (!SETUP) el.innerHTML = '<div class="empty">checking setup pieces…</div>';
+    if (!SETUP) {
+      view.innerHTML = "";
+      view.append(skeletonList(2));
+    }
     try { SETUP = await api("/api/setup"); }
-    catch (e) { el.innerHTML = '<div class="banner warn">' + esc(e.message) + "</div>"; return; }
+    catch (e) {
+      view.innerHTML = "";
+      view.append(el("div.alert.alert-destructive", {},
+        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
+      return;
+    }
     if (TAB !== "setup") return;
   }
-  el.innerHTML =
-    '<div class="sethead">Installable pieces of environment setup. Applying a ' +
-    'piece <b>patches your existing setup in place</b> — it never replaces your ' +
-    'files. Whether a piece is installed is derived by looking, not recorded; ' +
-    'removing touches only that piece’s own artifacts.</div>';
+  view.innerHTML = "";
+  view.append(el("div.view-head", {
+    text: "Installable pieces of environment setup. Applying a piece patches your existing setup "
+        + "in place — it never replaces your files. Whether a piece is installed is derived by "
+        + "looking, not recorded; removing touches only that piece's own artifacts.",
+  }));
+
+  const list = el("div.list");
   for (const p of SETUP.pieces) {
-    const row = document.createElement("div");
-    row.className = "row";
-    row.innerHTML =
-      `<span class="name">${esc(p.label)}</span>` +
-      (p.installed ? '<span class="badge ok">installed</span>'
-                   : '<span class="badge link">not installed</span>') +
-      `<span class="desc">${esc(p.desc)}${p.detail ? " — " + esc(p.detail) : ""}</span>`;
-    const act = document.createElement("span");
-    act.className = "actions";
-    const btn = (label, fn, cls) => {
-      const b = document.createElement("button");
-      b.textContent = label;
-      if (cls) b.className = cls;
-      b.onclick = fn;
-      act.appendChild(b);
-    };
-    btn(p.installed ? "re-apply" : "apply", () => setupAct("apply", p),
-        "small primary");
+    const actions = el("div.li-actions", {},
+      mkbtn("btn-sm btn-primary", p.installed ? "Re-apply" : "Apply", () => setupAct("apply", p)));
     if (p.removable && p.installed)
-      btn("remove", () => setupAct("remove", p), "small danger");
-    row.appendChild(act);
-    el.appendChild(row);
+      actions.append(mkbtn("btn-sm danger", "Remove", () => setupAct("remove", p)));
+    list.append(el("div.list-item", {},
+      el("div.li-main", {},
+        el("span.li-name", { text: p.label }),
+        p.installed ? badge("installed", "success") : badge("not installed", "outline")),
+      el("span.li-desc", { text: p.desc + (p.detail ? " — " + p.detail : "") }),
+      actions));
   }
+  view.append(list);
 }
 
 async function setupAct(action, p) {
   if (action === "remove" &&
-      !(await mconfirm("remove " + p.label,
+      !(await mconfirm("Remove " + p.label,
         "Removes only this piece's own artifacts (" + (p.target || "its files") +
-        ") and clears the setting it set. Your own config is left as-is.", "remove")))
+        ") and clears the setting it set. Your own config is left as-is.", "Remove")))
     return;
   try {
     await api("/api/setup-" + action, { id: p.id });
-    toast(p.label + (action === "apply" ? " applied" : " removed") +
-      " · applies to new sessions");
+    toast(p.label + (action === "apply" ? " applied" : " removed") + " · applies to new sessions");
     await refresh();
     renderSetup(true);
   } catch (e) { toast(e.message, true); }
 }
 
-async function mcpTest(name) {
-  toast("testing " + name + "…");
-  try {
-    const r = await api("/api/mcp-test", { name });
-    toast(name + ": " + r.detail, !r.ok);
-  } catch (e) { toast(e.message, true); }
-}
+// -------------------------------------------------------------- statusline
 
 let STL = null;
 let STL_DRAG = null;
 
 const STL_COLORS = { yellow: "var(--yellow)", blue: "var(--blue)", green: "var(--green)",
-  aqua: "var(--aqua)", orange: "var(--orange)", gray: "var(--fg2)",
+  aqua: "var(--aqua)", orange: "var(--orange)", gray: "var(--muted-foreground)",
   purple: "var(--purple)", red: "var(--red)" };
 let STL_WIDTH = null;  // preview truncation width in columns (null = full)
 
@@ -1275,7 +1006,7 @@ function stlFields() {
 
 function stlColor(id) {
   const c = STL.colors[id] || (stlAvail().get(id) || {}).color;
-  return c && c.startsWith("#") ? c : STL_COLORS[c] || "var(--fg)";
+  return c && c.startsWith("#") ? c : STL_COLORS[c] || "var(--term-foreground)";
 }
 
 function stlPalAdd(id) {
@@ -1321,13 +1052,13 @@ function stlSetColor(id, color) {
 function stlChip(id, li, fi) {
   const a = stlAvail().get(id);
   const col = stlColor(id);
-  const chip = document.createElement("span");
-  chip.className = "stlchip" + (STL.sel === id ? " sel" : "");
-  chip.style.color = col;
-  chip.style.borderColor = col;
-  if (STL.bold[id]) chip.style.fontWeight = "bold";
-  chip.title = a.desc + " (drag to move, click for colour & bold)";
-  chip.draggable = true;
+  const chip = el("span.stlchip", {
+    class: STL.sel === id ? "sel" : "",
+    draggable: true,
+    title: a.desc + " (drag to move, click for colour & bold)",
+    style: { color: col, borderColor: col, fontWeight: STL.bold[id] ? "700" : "" },
+    onclick: () => { STL.sel = STL.sel === id ? null : id; renderStatusline(); },
+  });
   chip.ondragstart = (e) => {
     STL_DRAG = { src: "line", line: li, idx: fi, id };
     e.dataTransfer.setData("text/plain", id);
@@ -1350,30 +1081,28 @@ function stlChip(id, li, fi) {
     const r = chip.getBoundingClientRect();
     stlDrop(li, e.clientX - r.left < r.width / 2 ? fi : fi + 1);
   };
-  chip.onclick = () => { STL.sel = STL.sel === id ? null : id; renderStatusline(); };
-  const label = document.createElement("span");
-  label.textContent = a.label;
-  chip.appendChild(label);
-  const smp = document.createElement("span");
-  smp.className = "smp";
-  smp.textContent = a.sample;
-  chip.appendChild(smp);
-  const x = document.createElement("span");
-  x.className = "x";
-  x.textContent = "×";
-  x.title = "remove from the statusline";
-  x.onclick = (e) => { e.stopPropagation(); stlRemove(id); };
-  chip.appendChild(x);
+  chip.append(
+    el("span", { text: a.label }),
+    el("span.smp", { text: a.sample }),
+    el("span.x", {
+      text: "×", title: "Remove from the statusline",
+      onclick: (e) => { e.stopPropagation(); stlRemove(id); },
+    }));
   return chip;
 }
 
 function stlPalChip(id) {
   const a = stlAvail().get(id);
-  const chip = document.createElement("span");
-  chip.className = "stlchip pal";
-  chip.style.color = stlColor(id);
-  chip.title = a.sample + " — " + a.desc + " (click or drag onto a line to add)";
-  chip.draggable = true;
+  const chip = el("span.stlchip.pal", {
+    draggable: true,
+    title: a.sample + " — " + a.desc + " (click or drag onto a line to add)",
+    style: { color: stlColor(id) },
+    onclick: () => {
+      STL.palette = STL.palette.filter((x) => x !== id);
+      STL.lines[STL.lines.length - 1].push(id);
+      renderStatusline();
+    },
+  }, el("span", { text: a.label }));
   chip.ondragstart = (e) => {
     STL_DRAG = { src: "palette", id };
     e.dataTransfer.setData("text/plain", id);
@@ -1381,101 +1110,66 @@ function stlPalChip(id) {
     chip.classList.add("dragging");
   };
   chip.ondragend = () => { STL_DRAG = null; chip.classList.remove("dragging"); };
-  chip.onclick = () => {
-    STL.palette = STL.palette.filter((x) => x !== id);
-    STL.lines[STL.lines.length - 1].push(id);
-    renderStatusline();
-  };
-  const label = document.createElement("span");
-  label.textContent = a.label;
-  chip.appendChild(label);
   return chip;
 }
 
 function stlColorPanel() {
   const id = STL.sel;
   const a = stlAvail().get(id);
-  const box = document.createElement("div");
-  box.className = "stlcolors";
   const cur = STL.colors[id] || null;
-  const who = document.createElement("span");
-  who.className = "who";
-  who.textContent = "colour for " + a.label + ":";
-  box.appendChild(who);
+  const box = el("div.stlcolors", {}, el("span.who", { text: "Colour for " + a.label }));
   for (const name of Object.keys(STL_COLORS)) {
-    const b = document.createElement("button");
-    b.className = "swatch" + (cur === name ? " on" : "");
-    b.style.background = STL_COLORS[name];
-    b.title = name;
-    b.onclick = () => stlSetColor(id, name);
-    box.appendChild(b);
+    box.append(el("button.btn.swatch", {
+      class: cur === name ? "on" : "", title: name, "aria-label": name,
+      style: { background: STL_COLORS[name] },
+      onclick: () => stlSetColor(id, name),
+    }));
   }
-  const custom = document.createElement("input");
-  custom.type = "color";
-  custom.title = "custom colour (truecolor terminals)";
-  if (cur && cur.startsWith("#")) { custom.value = cur; custom.classList.add("on"); }
-  custom.oninput = () => stlSetColor(id, custom.value);
-  box.appendChild(custom);
-  const bold = document.createElement("button");
-  bold.className = "small boldbtn" + (STL.bold[id] ? " on" : "");
-  bold.textContent = "bold";
-  bold.title = "toggle bold for this field";
-  bold.onclick = () => {
+  const custom = el("input", {
+    type: "color", title: "Custom colour (truecolor terminals)",
+    oninput: () => stlSetColor(id, custom.value),
+  });
+  if (cur && cur.startsWith("#")) custom.value = cur;
+  box.append(custom);
+  box.append(mkbtn("btn-sm boldbtn" + (STL.bold[id] ? " on" : ""), "Bold", () => {
     if (STL.bold[id]) delete STL.bold[id];
     else STL.bold[id] = true;
     renderStatusline();
-  };
-  box.appendChild(bold);
-  const def = document.createElement("button");
-  def.className = "small";
-  def.textContent = cur ? "reset to default (" + a.color + ")" : "default (" + a.color + ")";
+  }, "Toggle bold for this field"));
+  const def = mkbtn("btn-sm", cur ? "Reset to " + a.color : "Default (" + a.color + ")",
+    () => stlSetColor(id, null));
   def.disabled = !cur;
-  def.onclick = () => stlSetColor(id, null);
-  box.appendChild(def);
-  const close = document.createElement("button");
-  close.className = "small";
-  close.textContent = "close";
-  close.onclick = () => { STL.sel = null; renderStatusline(); };
-  box.appendChild(close);
+  box.append(def);
+  box.append(mkbtn("btn-sm btn-ghost", "Close", () => { STL.sel = null; renderStatusline(); }));
   return box;
 }
 
 function renderStatusline() {
-  const el = document.getElementById("stlview");
+  const view = document.getElementById("stlview");
   const st = DATA.statusline || {};
   if (!STL) stlInit();
-  el.innerHTML = "";
-  const head = document.createElement("div");
-  head.className = "sethead";
-  head.innerHTML =
-    `generates <b>${esc(st.script_path || "")}</b>, linked into the config dir as ` +
-    `<b>~/.claude/statusline.sh</b> and referenced from settings.json ` +
-    (st.applied
-      ? '<span style="color:var(--green)">✓ statusLine is set</span>'
-      : '<span style="color:var(--orange)">— not set in settings.json yet; use save &amp; apply</span>') +
-    `<br>no restart needed: Claude Code re-runs the script after every assistant ` +
-    `message (and picks up settings.json edits on your next interaction); set a ` +
-    `refresh interval below to also update while the session sits idle.`;
-  el.appendChild(head);
-  const term = document.createElement("div");
-  term.className = "stlterm";
-  term.innerHTML =
-    '<div class="stltermhead"><span class="dot r"></span><span class="dot y"></span>' +
-    '<span class="dot g"></span><span class="ttl">preview</span></div>';
-  const wsel = document.createElement("span");
-  wsel.className = "wsel";
+  view.innerHTML = "";
+
+  view.append(el("div.view-head", {
+    html: "Generates <b>" + esc(st.script_path || "") + "</b>, linked into the config dir as "
+      + "<b>~/.claude/statusline.sh</b> and referenced from settings.json "
+      + (st.applied
+        ? '<span class="ok">✓ statusLine is set</span>'
+        : '<span class="warn">— not set in settings.json yet; use Save &amp; apply</span>')
+      + "<br>No restart needed: Claude Code re-runs the script after every assistant message "
+      + "(and picks up settings.json edits on your next interaction); set a refresh interval "
+      + "below to also update while the session sits idle.",
+  }));
+
+  // ---- terminal preview
+  const wsel = el("span.wsel");
   for (const w of [null, 120, 80]) {
-    const b = document.createElement("button");
-    b.className = "small" + (STL_WIDTH === w ? " on" : "");
-    b.textContent = w ? w + " col" : "full";
-    b.title = w ? "truncate the preview at ~" + w + " columns, like a narrow terminal"
-      : "no truncation";
-    b.onclick = () => { STL_WIDTH = w; renderStatusline(); };
-    wsel.appendChild(b);
+    wsel.append(mkbtn("btn-sm btn-ghost" + (STL_WIDTH === w ? " on" : ""),
+      w ? w + " col" : "Full",
+      () => { STL_WIDTH = w; renderStatusline(); },
+      w ? "Truncate the preview at ~" + w + " columns, like a narrow terminal" : "No truncation"));
   }
-  term.querySelector(".stltermhead").appendChild(wsel);
-  const prev = document.createElement("div");
-  prev.className = "stlpreview";
+  const prev = el("div.terminal-body.stlpreview");
   if (STL_WIDTH) {
     prev.classList.add("trunc");
     prev.style.width = "calc(" + STL_WIDTH + "ch + 1.8rem)";
@@ -1485,122 +1179,112 @@ function renderStatusline() {
     ? `<span class="psep">${esc(" " + raw.trim() + " ")}</span>` : esc(raw);
   const rendered = STL.lines
     .map((line) => line
-      .map((id) => `<span style="color:${stlColor(id)}${STL.bold[id] ? ";font-weight:bold" : ""}">` +
-                   `${esc(stlAvail().get(id).sample)}</span>`)
+      .map((id) => `<span style="color:${stlColor(id)}${STL.bold[id] ? ";font-weight:700" : ""}">`
+                 + `${esc(stlAvail().get(id).sample)}</span>`)
       .join(sep))
     .filter((l) => l.length);
   prev.innerHTML = rendered.length
     ? rendered.join("<br>")
-    : '<span style="color:var(--bg2)">(no fields enabled — add some from the palette)</span>';
-  term.appendChild(prev);
-  el.appendChild(term);
-  const bar = document.createElement("div");
-  bar.className = "bar";
-  bar.innerHTML =
-    `<span style="align-self:center;font-size:.8rem;color:var(--fg2)"` +
-    ` title="a visible separator automatically gets one space on each side; leave blank/spaces for space-only separation">separator</span>` +
-    `<input type="text" id="stlsep" value="${esc(STL.separator)}" style="width:6rem"` +
-    ` oninput="STL.separator=this.value" onchange="renderStatusline()">` +
-    ["│", "·", "»"].map((ch) =>
-      `<button class="small" title="separator preset"` +
-      ` onclick="STL.separator='${ch}';renderStatusline()">${ch}</button>`).join("") +
-    `<button class="small" title="plain spaces, no separator character"` +
-    ` onclick="STL.separator='  ';renderStatusline()">space</button>` +
-    `<span style="align-self:center;font-size:.8rem;color:var(--fg2)"` +
-    ` title="Claude Code re-runs the script after each assistant message; a refresh interval also re-runs it every N seconds while idle, so edits show up without any interaction. 0 = only on updates.">` +
-    `refresh every</span>` +
-    `<input type="number" min="0" max="3600" value="${STL.refresh}" style="width:4.5rem"` +
-    ` oninput="STL.refresh=Math.max(0,parseInt(this.value)||0)">` +
-    `<span style="align-self:center;font-size:.8rem;color:var(--fg2)">s (0 = on updates only)</span>` +
-    `<span style="flex:1"></span>` +
-    `<button onclick="stlSave(false)">save</button>` +
-    `<button class="primary" onclick="stlSave(true)">save &amp; apply</button>`;
-  el.appendChild(bar);
-  const grid = document.createElement("div");
-  grid.className = "stlgrid";
-  const build = document.createElement("div");
-  build.className = "stlbuild";
-  const presets = document.createElement("div");
-  presets.className = "stlpresets";
-  presets.append("presets:");
-  for (const name of Object.keys(STL_PRESETS)) {
-    const b = document.createElement("button");
-    b.className = "small";
-    b.textContent = name;
-    b.title = "replace the current layout with the " + name + " preset " +
-      "(colours and bold are kept)";
-    b.onclick = () => stlPreset(name);
-    presets.appendChild(b);
-  }
-  build.appendChild(presets);
-  if (STL.sel && STL.lines.some((l) => l.includes(STL.sel))) build.appendChild(stlColorPanel());
+    : '<span class="muted">(no fields enabled — add some from the palette)</span>';
+
+  view.append(el("div.terminal", { style: { marginBottom: "1rem" } },
+    el("div.terminal-bar", {},
+      el("span.dot.r"), el("span.dot.y"), el("span.dot.g"),
+      el("span.terminal-title", { text: "preview" }),
+      wsel),
+    prev));
+
+  // ---- separator + refresh + save
+  const sepInput = el("input", {
+    type: "text", value: STL.separator, style: { width: "5rem", flex: "none" },
+    "aria-label": "Separator",
+    oninput: () => { STL.separator = sepInput.value; },
+    onchange: renderStatusline,
+  });
+  const refreshInput = el("input", {
+    type: "number", min: 0, max: 3600, value: STL.refresh,
+    style: { width: "5rem", flex: "none" }, "aria-label": "Refresh seconds",
+    oninput: () => { STL.refresh = Math.max(0, parseInt(refreshInput.value) || 0); },
+  });
+  const bar = el("div.toolbar", {},
+    el("span.muted", {
+      style: { fontSize: ".78125rem" }, text: "Separator",
+      title: "A visible separator automatically gets one space on each side; leave blank for space-only separation",
+    }),
+    sepInput);
+  for (const ch of ["│", "·", "»"])
+    bar.append(mkbtn("btn-sm", ch, () => { STL.separator = ch; renderStatusline(); }, "Separator preset"));
+  bar.append(mkbtn("btn-sm", "Space", () => { STL.separator = "  "; renderStatusline(); },
+    "Plain spaces, no separator character"));
+  bar.append(el("span.separator.separator-v"));
+  bar.append(el("span.muted", {
+    style: { fontSize: ".78125rem" }, text: "Refresh every",
+    title: "Claude Code re-runs the script after each assistant message; a refresh interval also "
+         + "re-runs it every N seconds while idle. 0 = only on updates.",
+  }), refreshInput, el("span.muted", { style: { fontSize: ".78125rem" }, text: "s" }));
+  const saveBtn = mkbtn("btn-primary", "Save & apply", () => stlSave(true));
+  saveBtn.prepend(icon("save"));
+  bar.append(el("div.toolbar-end", {}, mkbtn("", "Save only", () => stlSave(false)), saveBtn));
+  view.append(bar);
+
+  // ---- builder
+  const build = el("div.stlbuild");
+  const presets = el("div.stlpresets", {}, el("span", { text: "Presets" }));
+  for (const name of Object.keys(STL_PRESETS))
+    presets.append(mkbtn("btn-sm", name, () => stlPreset(name),
+      "Replace the current layout with the " + name + " preset (colours and bold are kept)"));
+  build.append(presets);
+
+  if (STL.sel && STL.lines.some((l) => l.includes(STL.sel))) build.append(stlColorPanel());
   else STL.sel = null;
+
   STL.lines.forEach((line, li) => {
-    const lineEl = document.createElement("div");
-    lineEl.className = "stlline";
+    const lineEl = el("div.stlline", {});
     lineEl.ondragover = (e) => { e.preventDefault(); lineEl.classList.add("drag"); };
     lineEl.ondragleave = () => lineEl.classList.remove("drag");
     lineEl.ondrop = (e) => { e.preventDefault(); stlDrop(li, null); };
-    const lno = document.createElement("span");
-    lno.className = "lno";
-    lno.textContent = String(li + 1);
-    lno.title = "line " + (li + 1);
-    lineEl.appendChild(lno);
-    line.forEach((id, fi) => lineEl.appendChild(stlChip(id, li, fi)));
-    if (!line.length) {
-      const ph = document.createElement("span");
-      ph.className = "empty";
-      ph.style.pointerEvents = "none";
-      ph.textContent = "drop fields here";
-      lineEl.appendChild(ph);
-    }
+    lineEl.append(el("span.lno", { text: String(li + 1), title: "Line " + (li + 1) }));
+    line.forEach((id, fi) => lineEl.append(stlChip(id, li, fi)));
+    if (!line.length)
+      lineEl.append(el("span.stl-placeholder", { text: "Drop fields here" }));
     if (STL.lines.length > 1) {
-      const del = document.createElement("button");
-      del.className = "small ldel";
-      del.textContent = "× line";
-      del.title = "remove this line (its fields move to the line above)";
-      del.onclick = () => {
+      const del = mkbtn("btn-sm btn-ghost ldel", "Remove line", () => {
         const dst = li > 0 ? li - 1 : 1;
         STL.lines[dst].push(...STL.lines[li]);
         STL.lines.splice(li, 1);
         renderStatusline();
-      };
-      lineEl.appendChild(del);
+      }, "Remove this line (its fields move to the line above)");
+      lineEl.append(del);
     }
-    build.appendChild(lineEl);
+    build.append(lineEl);
   });
-  const add = document.createElement("button");
-  add.className = "small";
-  add.textContent = "+ line";
-  add.disabled = STL.lines.length >= STL_MAX_LINES;
-  add.title = add.disabled
-    ? "max " + STL_MAX_LINES + " lines (the config has three line breaks)"
-    : "add a line — narrow terminals truncate long lines instead of wrapping";
-  add.onclick = () => { STL.lines.push([]); renderStatusline(); };
-  build.appendChild(add);
-  grid.appendChild(build);
-  const side = document.createElement("div");
-  side.className = "stlside";
-  side.innerHTML =
-    `<h3>available fields</h3>` +
-    `<div class="hint">click or drag onto a line · drag a chip back here to remove</div>`;
+
+  const addLine = mkbtn("btn-sm", "Add line", () => { STL.lines.push([]); renderStatusline(); });
+  addLine.prepend(icon("plus"));
+  addLine.disabled = STL.lines.length >= STL_MAX_LINES;
+  addLine.title = addLine.disabled
+    ? "Max " + STL_MAX_LINES + " lines (the config has three line breaks)"
+    : "Add a line — narrow terminals truncate long lines instead of wrapping";
+  build.append(addLine);
+
+  // ---- field palette
+  const side = el("div.stlside", {},
+    el("h3", { text: "Available fields" }),
+    el("div.hint", { text: "Click or drag onto a line · drag a chip back here to remove" }));
   side.ondragover = (e) => {
     if (STL_DRAG && STL_DRAG.src === "line") { e.preventDefault(); side.classList.add("drag"); }
   };
   side.ondragleave = () => side.classList.remove("drag");
   side.ondrop = (e) => {
     e.preventDefault();
+    side.classList.remove("drag");
     const d = STL_DRAG;
     STL_DRAG = null;
     if (!d || d.src !== "line") return;
     stlRemove(d.id);
   };
-  if (!STL.palette.length) {
-    const chips = document.createElement("div");
-    chips.className = "stlchips";
-    chips.innerHTML = '<span class="empty">all fields in use</span>';
-    side.appendChild(chips);
-  }
+  if (!STL.palette.length)
+    side.append(el("div.muted", { style: { fontSize: ".75rem" }, text: "All fields are in use." }));
   const cats = new Map();
   for (const id of STL.palette) {
     const cat = (stlAvail().get(id) || {}).cat || "other";
@@ -1608,16 +1292,13 @@ function renderStatusline() {
     cats.get(cat).push(id);
   }
   for (const [cat, ids] of cats) {
-    const h = document.createElement("h4");
-    h.textContent = cat;
-    side.appendChild(h);
-    const chips = document.createElement("div");
-    chips.className = "stlchips";
-    for (const id of ids) chips.appendChild(stlPalChip(id));
-    side.appendChild(chips);
+    side.append(el("h4", { text: cat }));
+    const chips = el("div.stlchips");
+    for (const id of ids) chips.append(stlPalChip(id));
+    side.append(chips);
   }
-  grid.appendChild(side);
-  el.appendChild(grid);
+
+  view.append(el("div.stlgrid", {}, build, side));
 }
 
 async function stlSave(apply) {
@@ -1626,20 +1307,20 @@ async function stlSave(apply) {
       config: { separator: STL.separator, refresh: STL.refresh, fields: stlFields() },
       apply });
     toast(apply
-      ? "statusline saved and statusLine set in settings.json — make sure statusline.sh and settings.json are linked"
-      : "statusline script regenerated — a running Claude Code picks it up on its next update");
+      ? "Statusline saved and statusLine set in settings.json"
+      : "Statusline script regenerated — a running Claude Code picks it up on its next update");
     STL = null;
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
 
+// ------------------------------------------------------------ insight/costs
 
 let INSIGHT = null;
 let DOCTOR = null;
 
-const BUDGET_COLORS = { "CLAUDE.md": "var(--yellow)", skills: "var(--aqua)",
-  commands: "var(--blue)", agents: "var(--purple)",
-  "output-styles": "var(--orange)" };
+const BUDGET_COLORS = { "CLAUDE.md": "var(--chart-1)", skills: "var(--chart-2)",
+  commands: "var(--chart-3)", agents: "var(--chart-4)", "output-styles": "var(--chart-5)" };
 const USAGE_KIND = { skills: "skill", commands: "command", agents: "agent" };
 
 function tokfmt(n) {
@@ -1660,27 +1341,42 @@ function relTime(iso) {
   return Math.round(d / (30 * day)) + "mo ago";
 }
 
+// a titled table wrapped in the shadcn table surface
+function dataTable(headers, rows) {
+  const t = el("table.table");
+  t.append(el("thead", {}, el("tr", {}, ...headers.map((h) => el("th", { text: h })))));
+  const body = el("tbody");
+  for (const r of rows) {
+    const tr = el("tr");
+    tr.innerHTML = r;
+    body.append(tr);
+  }
+  t.append(body);
+  return el("div.table-wrap", { style: { marginBottom: "1.25rem" } }, t);
+}
+
 async function renderInsight(rescan) {
-  const el = document.getElementById("insightview");
+  const view = document.getElementById("insightview");
   if (!INSIGHT || rescan) {
-    el.innerHTML = '<div class="empty">estimating context cost and scanning session transcripts…</div>';
+    view.innerHTML = "";
+    view.append(el("div.muted", { style: { marginBottom: ".75rem", fontSize: ".8125rem" },
+      text: "Estimating context cost and scanning session transcripts…" }), skeletonList(5));
     try { INSIGHT = await api("/api/insight" + (rescan ? "?rescan" : "")); }
     catch (e) {
-      el.innerHTML = '<div class="banner warn">' + esc(e.message) + "</div>";
+      view.innerHTML = "";
+      view.append(el("div.alert.alert-destructive", {},
+        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
       return;
     }
     if (TAB !== "insight") return;
   }
   const b = INSIGHT.budget, u = INSIGHT.usage;
-  el.innerHTML = "";
-  const head = document.createElement("div");
-  head.className = "sethead";
-  head.innerHTML =
-    "what your config costs at the start of <i>every</i> session " +
-    "(chars÷4 estimate — CLAUDE.md is injected wholesale, each active item " +
-    "contributes its name + description), and what actually gets used " +
-    "(session transcripts in <b>" + esc(u.dir) + "</b>, parsed locally)";
-  el.appendChild(head);
+  view.innerHTML = "";
+  view.append(el("div.view-head", {
+    html: "What your config costs at the start of <i>every</i> session (chars÷4 estimate — CLAUDE.md "
+      + "is injected wholesale, each active item contributes its name + description), and what "
+      + "actually gets used (session transcripts in <b>" + esc(u.dir) + "</b>, parsed locally).",
+  }));
 
   const used = u.by || {};
   const now = Date.now();
@@ -1694,62 +1390,38 @@ async function renderInsight(rescan) {
     }
   }
 
-  const tiles = document.createElement("div");
-  tiles.className = "tiles";
-  const tile = (num, lbl) =>
-    `<div class="tile"><div class="tnum">${num}</div><div class="tlbl">${lbl}</div></div>`;
-  tiles.innerHTML =
-    tile(tokfmt(b.total), "tokens every session") +
-    tile(tokfmt(b.claude_md), "CLAUDE.md") +
-    tile(tokfmt((b.types.skills || {}).tokens || 0), "skill descriptions") +
-    (u.available ? tile(u.sessions, "sessions scanned") : "") +
-    (u.available && u.sessions ? tile(unused.length, "unused 90d+") : "");
-  el.appendChild(tiles);
+  const stats = el("div.stat-grid", { style: { marginBottom: "1.25rem" } },
+    statCard(tokfmt(b.total), "tokens every session", { accent: true }),
+    statCard(tokfmt(b.claude_md), "CLAUDE.md"),
+    statCard(tokfmt((b.types.skills || {}).tokens || 0), "skill descriptions"));
+  if (u.available) stats.append(statCard(String(u.sessions), "sessions scanned"));
+  if (u.available && u.sessions) stats.append(statCard(String(unused.length), "unused 90d+"));
+  view.append(stats);
 
   const segs = [["CLAUDE.md", b.claude_md],
     ...Object.entries(b.types).map(([t, v]) => [t, v.tokens])];
-  const bar = document.createElement("div");
-  bar.className = "budgetbar";
-  const key = document.createElement("div");
-  key.className = "budgetkey";
+  const bar = el("div.budgetbar");
+  const key = el("div.budgetkey");
   for (const [name, tok] of segs) {
     if (!tok) continue;
-    const d = document.createElement("div");
-    d.style.flex = String(tok);
-    d.style.background = BUDGET_COLORS[name] || "var(--fg2)";
-    d.title = name + ": ~" + tokfmt(tok) + " tokens";
-    bar.appendChild(d);
-    const k = document.createElement("span");
-    k.innerHTML = `<span class="sw" style="background:${BUDGET_COLORS[name] || "var(--fg2)"}"></span>` +
-      `${esc(name)} ~${tokfmt(tok)}`;
-    key.appendChild(k);
+    const color = BUDGET_COLORS[name] || "var(--muted-foreground)";
+    bar.append(el("div", { style: { flex: String(tok), background: color },
+      title: name + ": ~" + tokfmt(tok) + " tokens" }));
+    key.append(el("span", {},
+      el("span.sw", { style: { background: color } }),
+      el("span", { text: name + " ~" + tokfmt(tok) })));
   }
-  el.appendChild(bar);
-  el.appendChild(key);
-
-  const table = (title, headers, rows) => {
-    const h = document.createElement("h2");
-    h.textContent = title;
-    el.appendChild(h);
-    const t = document.createElement("table");
-    t.className = "itable";
-    t.innerHTML = "<tr>" + headers.map((x) => `<th>${x}</th>`).join("") + "</tr>";
-    for (const r of rows) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = r;
-      t.appendChild(tr);
-    }
-    el.appendChild(t);
-  };
+  view.append(bar, key);
 
   const consumers = Object.entries(b.types)
     .flatMap(([t, v]) => v.items.map((it) => ({ type: t, ...it })))
     .sort((a, b2) => b2.tokens - a.tokens)
     .slice(0, 12);
-  table("top context consumers", ["item", "type", "~tokens"],
+  view.append(sectionTitle("Top context consumers"));
+  view.append(dataTable(["Item", "Type", "~tokens"],
     consumers.map((c) =>
-      `<td>${esc(c.name)}</td><td class="dim">${esc(c.type)}</td>` +
-      `<td class="num">${tokfmt(c.tokens)}</td>`));
+      `<td class="mono">${esc(c.name)}</td><td class="dim">${esc(c.type)}</td>`
+      + `<td class="num">${tokfmt(c.tokens)}</td>`)));
 
   if (u.available && u.sessions) {
     const rows = [];
@@ -1757,20 +1429,22 @@ async function renderInsight(rescan) {
       for (const [name, rec] of Object.entries(names))
         rows.push({ kind, name, count: rec.count, last: rec.last });
     rows.sort((a, b2) => b2.count - a.count);
-    table("most used (all transcripts)", ["name", "kind", "uses", "last used"],
+    view.append(sectionTitle("Most used", rows.length));
+    view.append(dataTable(["Name", "Kind", "Uses", "Last used"],
       rows.slice(0, 15).map((r) =>
-        `<td>${esc(r.name)}</td><td class="dim">${esc(r.kind)}</td>` +
-        `<td class="num">${r.count}</td><td class="dim">${esc(relTime(r.last))}</td>`));
-    if (unused.length)
-      table("unused in 90+ days — archive candidates", ["name", "type", "last used"],
+        `<td class="mono">${esc(r.name)}</td><td class="dim">${esc(r.kind)}</td>`
+        + `<td class="num">${r.count}</td><td class="dim">${esc(relTime(r.last))}</td>`)));
+    if (unused.length) {
+      view.append(sectionTitle("Unused in 90+ days — archive candidates", unused.length));
+      view.append(dataTable(["Name", "Type", "Last used"],
         unused.slice(0, 30).map((r) =>
-          `<td>${esc(r.name)}</td><td class="dim">${esc(r.type)}</td>` +
-          `<td class="dim">${r.last ? esc(relTime(new Date(r.last).toISOString())) : "never"}</td>`));
+          `<td class="mono">${esc(r.name)}</td><td class="dim">${esc(r.type)}</td>`
+          + `<td class="dim">${r.last ? esc(relTime(new Date(r.last).toISOString())) : "never"}</td>`)));
+    }
   } else if (!u.available) {
-    const n = document.createElement("div");
-    n.className = "empty";
-    n.textContent = "no transcripts found at " + u.dir + " — usage analytics appear once Claude Code has recorded sessions on this machine";
-    el.appendChild(n);
+    view.append(emptyState("No transcripts found",
+      "Usage analytics appear once Claude Code has recorded sessions on this machine. Looked in "
+      + u.dir + ".", "chart"));
   }
 
   // permission advisor: Bash prefixes approved often -> propose allow rules
@@ -1783,57 +1457,46 @@ async function renderInsight(rescan) {
     });
     const cand = Object.entries(u.bash)
       .filter(([p, n]) => n >= 5 && !covered(p))
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b2) => b2[1] - a[1])
       .slice(0, 15);
     if (cand.length) {
-      const h = document.createElement("h2");
-      h.textContent = "permission advisor — frequent Bash commands with no allow rule";
-      el.appendChild(h);
-      const note = document.createElement("div");
-      note.className = "sethead";
-      note.textContent = "these ran repeatedly across your sessions; an allow rule in settings.json skips the permission prompt for them";
-      el.appendChild(note);
-      const t = document.createElement("table");
-      t.className = "itable";
-      t.innerHTML = "<tr><th>command</th><th>uses</th><th>proposed rule</th><th></th></tr>";
+      view.append(sectionTitle("Permission advisor", cand.length));
+      view.append(el("div.view-head", {
+        text: "These Bash commands ran repeatedly across your sessions with no allow rule. "
+            + "Adding one skips the permission prompt for them.",
+      }));
+      const t = el("table.table");
+      t.append(el("thead", {}, el("tr", {},
+        el("th", { text: "Command" }), el("th", { text: "Uses" }),
+        el("th", { text: "Proposed rule" }), el("th"))));
+      const body = el("tbody");
       for (const [prefix, n] of cand) {
         const rule = "Bash(" + prefix + ":*)";
-        const tr = document.createElement("tr");
-        tr.innerHTML =
-          `<td>${esc(prefix)}</td><td class="num">${n}</td>` +
-          `<td class="dim">${esc(rule)}</td>`;
-        const td = document.createElement("td");
-        const b = document.createElement("button");
-        b.className = "small";
-        b.textContent = "allow";
-        b.onclick = async () => {
+        const btn = mkbtn("btn-sm btn-primary", "Allow", async () => {
           try {
-            await api("/api/settings-set", { key: "permissions.allow",
-              value: [...allow, rule] });
+            await api("/api/settings-set", { key: "permissions.allow", value: [...allow, rule] });
             toast(rule + " added to permissions.allow");
             await refresh();
             INSIGHT = null;
             renderInsight();
           } catch (e) { toast(e.message, true); }
-        };
-        td.appendChild(b);
-        tr.appendChild(td);
-        t.appendChild(tr);
+        });
+        body.append(el("tr", {},
+          el("td.mono", { text: prefix }),
+          el("td.num", { text: String(n) }),
+          el("td.dim.mono", { text: rule }),
+          el("td", { style: { textAlign: "right" } }, btn)));
       }
-      el.appendChild(t);
+      t.append(body);
+      view.append(el("div.table-wrap", { style: { marginBottom: "1.25rem" } }, t));
     }
   }
 
-  const bar2 = document.createElement("div");
-  bar2.className = "bar";
-  const rb = document.createElement("button");
-  rb.className = "small";
-  rb.textContent = "rescan transcripts";
-  rb.title = "drop the cache and re-read every transcript" +
-    (u.scanned_now ? " (last run read " + u.scanned_now + " new file(s))" : "");
-  rb.onclick = () => renderInsight(true);
-  bar2.appendChild(rb);
-  el.appendChild(bar2);
+  const rb = mkbtn("btn-sm", "Rescan transcripts", () => renderInsight(true),
+    "Drop the cache and re-read every transcript"
+    + (u.scanned_now ? " (last run read " + u.scanned_now + " new file(s))" : ""));
+  rb.prepend(icon("refresh"));
+  view.append(el("div.toolbar", {}, rb));
 }
 
 let COSTS = null;
@@ -1845,194 +1508,185 @@ function usd(n) {
 }
 
 async function renderCosts(rescan) {
-  const el = document.getElementById("costsview");
+  const view = document.getElementById("costsview");
   if (!COSTS || rescan) {
-    el.innerHTML = '<div class="empty">reading transcripts and pricing usage…</div>';
+    view.innerHTML = "";
+    view.append(el("div.muted", { style: { marginBottom: ".75rem", fontSize: ".8125rem" },
+      text: "Reading transcripts and pricing usage…" }), skeletonList(4));
     try { COSTS = await api("/api/costs" + (rescan ? "?rescan" : "")); }
     catch (e) {
-      el.innerHTML = '<div class="banner warn">' + esc(e.message) + "</div>";
+      view.innerHTML = "";
+      view.append(el("div.alert.alert-destructive", {},
+        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
       return;
     }
     if (TAB !== "costs") return;
   }
   const c = COSTS;
-  el.innerHTML = "";
-  const head = document.createElement("div");
-  head.className = "sethead";
-  head.innerHTML =
-    "estimated API-price cost of your Claude Code usage, computed locally from " +
-    "the transcripts in <b>" + esc(c.dir) + "</b> (input/output/cache tokens × " +
-    "list prices for the day they were used; cache writes at 2× base for the " +
-    "1-hour TTL and 1.25× for the 5-minute one, cache reads at 0.1×; fast-mode " +
-    "requests at 2× and US-pinned inference at 1.1× on top of those, plus $10 " +
-    "per 1,000 web searches). Days are " +
-    "your local days. On a Pro/Max subscription this shows what the same usage " +
-    "<i>would</i> cost via the API.";
-  el.appendChild(head);
+  view.innerHTML = "";
+  view.append(el("div.view-head", {
+    html: "Estimated API-price cost of your Claude Code usage, computed locally from the transcripts "
+      + "in <b>" + esc(c.dir) + "</b> (input/output/cache tokens × list prices for the day they were "
+      + "used; cache writes at 2× base for the 1-hour TTL and 1.25× for the 5-minute one, cache reads "
+      + "at 0.1×; fast-mode requests at 2× and US-pinned inference at 1.1× on top of those, plus $10 "
+      + "per 1,000 web searches). Days are your local days. On a Pro/Max subscription this shows what "
+      + "the same usage <i>would</i> cost via the API.",
+  }));
+
   if (!c.available || !c.sessions) {
-    el.innerHTML += '<div class="empty">no transcripts found — cost data appears once Claude Code has recorded sessions on this machine</div>';
+    view.append(emptyState("No transcripts found",
+      "Cost data appears once Claude Code has recorded sessions on this machine.", "dollar"));
     return;
   }
-  const tiles = document.createElement("div");
-  tiles.className = "tiles";
-  const tile = (num, lbl) =>
-    `<div class="tile"><div class="tnum">${num}</div><div class="tlbl">${lbl}</div></div>`;
-  tiles.innerHTML =
-    tile(usd(c.totals.today), "today") +
-    tile(usd(c.totals.last7), "last 7 days") +
-    tile(usd(c.totals.last30), "last 30 days") +
-    tile(usd(c.totals.month), "month to date") +
-    tile(usd(c.totals.all), "all time") +
-    tile(usd(c.cache_savings), "saved by caching, all time");
-  el.appendChild(tiles);
+
+  view.append(el("div.stat-grid", { style: { marginBottom: "1.25rem" } },
+    statCard(usd(c.totals.today), "today", { accent: true }),
+    statCard(usd(c.totals.last7), "last 7 days"),
+    statCard(usd(c.totals.last30), "last 30 days"),
+    statCard(usd(c.totals.month), "month to date"),
+    statCard(usd(c.totals.all), "all time"),
+    statCard(usd(c.cache_savings), "saved by caching")));
 
   if (c.days.length) {
     const max = Math.max(...c.days.map((d) => d.cost), 0.0001);
-    const chart = document.createElement("div");
-    chart.className = "chart";
+    const chart = el("div.chart");
     for (const d of c.days) {
-      const bar = document.createElement("div");
-      bar.className = "cbar";
-      bar.style.height = Math.max(2, (d.cost / max) * 100) + "%";
-      bar.title = d.day + ": " + usd(d.cost) + "\n" +
-        Object.entries(d.by).map(([m, v]) => m + ": " + usd(v)).join("\n");
-      chart.appendChild(bar);
+      chart.append(el("div.cbar", {
+        style: { height: Math.max(2, (d.cost / max) * 100) + "%" },
+        title: d.day + ": " + usd(d.cost) + "\n"
+          + Object.entries(d.by).map(([m, v]) => m + ": " + usd(v)).join("\n"),
+      }));
     }
-    el.appendChild(chart);
-    const key = document.createElement("div");
-    key.className = "chartkey";
-    key.innerHTML = `<span>${esc(c.days[0].day)}</span>` +
-      `<span>daily cost, last ${c.days.length} active days</span>` +
-      `<span>${esc(c.days[c.days.length - 1].day)}</span>`;
-    el.appendChild(key);
+    view.append(chart);
+    view.append(el("div.chartkey", {},
+      el("span", { text: c.days[0].day }),
+      el("span", { text: "daily cost, last " + c.days.length + " active days" }),
+      el("span", { text: c.days[c.days.length - 1].day })));
   }
 
-  const table = (title, headers, rows) => {
-    const h = document.createElement("h2");
-    h.textContent = title;
-    el.appendChild(h);
-    const t = document.createElement("table");
-    t.className = "itable";
-    t.innerHTML = "<tr>" + headers.map((x) => `<th>${x}</th>`).join("") + "</tr>";
-    for (const r of rows) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = r;
-      t.appendChild(tr);
-    }
-    el.appendChild(t);
-  };
-
-  table("by model", ["model", "cost", "input", "output", "cache read", "msgs"],
+  view.append(sectionTitle("By model", c.by_model.length));
+  view.append(dataTable(["Model", "Cost", "Input", "Output", "Cache read", "Msgs"],
     c.by_model.map((m) =>
-      `<td>${esc(m.model)}</td><td class="num">${usd(m.cost)}</td>` +
-      `<td class="dim">${tokfmt(m.in)}</td><td class="dim">${tokfmt(m.out)}</td>` +
-      `<td class="dim">${tokfmt(m.cacheR)}</td><td class="dim">${m.msgs}</td>`));
+      `<td class="mono">${esc(m.model)}</td><td class="num">${usd(m.cost)}</td>`
+      + `<td class="num dim">${tokfmt(m.in)}</td><td class="num dim">${tokfmt(m.out)}</td>`
+      + `<td class="num dim">${tokfmt(m.cacheR)}</td><td class="num dim">${m.msgs}</td>`)));
 
-  if (c.by_project.length > 1)
-    table("by project", ["project", "cost", "assistant msgs"],
+  if (c.by_project.length > 1) {
+    view.append(sectionTitle("By project", c.by_project.length));
+    view.append(dataTable(["Project", "Cost", "Assistant msgs"],
       c.by_project.map((p) =>
-        `<td>${esc(p.cwd.replace(/^\/(home|Users)\/[^\/]+/, "~"))}</td>` +
-        `<td class="num">${usd(p.cost)}</td><td class="dim">${p.msgs}</td>`));
+        `<td class="mono">${esc(p.cwd.replace(/^\/(home|Users)\/[^/]+/, "~"))}</td>`
+        + `<td class="num">${usd(p.cost)}</td><td class="num dim">${p.msgs}</td>`)));
+  }
 
   if (c.unknown_models.length) {
-    const b = document.createElement("div");
-    b.className = "banner warn";
-    b.textContent = "no list price known for: " + c.unknown_models.join(", ") +
-      " — priced at opus-tier; override via 'pricing' in .claude-ui.json";
-    el.appendChild(b);
+    view.append(el("div.alert.alert-warning", { style: { marginBottom: "1rem" } },
+      el("span.alert-icon", {}, icon("warn")),
+      el("div.alert-body", { text: "No list price known for: " + c.unknown_models.join(", ")
+        + " — priced at opus-tier; override via 'pricing' in .claude-ui.json" })));
   }
-  const bar = document.createElement("div");
-  bar.className = "bar";
-  const rb = document.createElement("button");
-  rb.className = "small";
-  rb.textContent = "rescan transcripts";
-  rb.onclick = () => renderCosts(true);
-  bar.appendChild(rb);
-  el.appendChild(bar);
+
+  const rb = mkbtn("btn-sm", "Rescan transcripts", () => renderCosts(true));
+  rb.prepend(icon("refresh"));
+  view.append(el("div.toolbar", {}, rb));
 }
 
+// ------------------------------------------------------------------ doctor
+
+let DFILTER = "all";
+
 async function renderDoctor(rerun) {
-  const el = document.getElementById("doctorview");
+  const view = document.getElementById("doctorview");
   if (!DOCTOR || rerun) {
-    el.innerHTML = '<div class="empty">running checks…</div>';
+    view.innerHTML = "";
+    view.append(el("div.muted", { style: { marginBottom: ".75rem", fontSize: ".8125rem" },
+      text: "Running checks…" }), skeletonList(4));
     try { DOCTOR = await api("/api/doctor"); }
     catch (e) {
-      el.innerHTML = '<div class="banner warn">' + esc(e.message) + "</div>";
+      view.innerHTML = "";
+      view.append(el("div.alert.alert-destructive", {},
+        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
       return;
     }
     if (TAB !== "doctor") return;
     renderTabs();
   }
-  el.innerHTML = "";
-  const head = document.createElement("div");
-  head.className = "sethead";
+  view.innerHTML = "";
   const warns = DOCTOR.warns;
   const infos = DOCTOR.findings.length - warns;
-  head.innerHTML =
-    (DOCTOR.findings.length
-      ? `<b>${warns}</b> warning${warns === 1 ? "" : "s"}, ${infos} note${infos === 1 ? "" : "s"}`
-      : '<span style="color:var(--green)">✓ nothing to report</span>') +
-    ` · checked at ${esc(DOCTOR.ts)}`;
-  el.appendChild(head);
-  const bar = document.createElement("div");
-  bar.className = "bar";
-  const rb = document.createElement("button");
-  rb.className = "small";
-  rb.textContent = "run again";
-  rb.onclick = () => renderDoctor(true);
-  bar.appendChild(rb);
-  el.appendChild(bar);
-  for (const f of DOCTOR.findings) {
-    const row = document.createElement("div");
-    row.className = "drow";
-    row.innerHTML =
-      `<span class="badge ${f.level === "warn" ? "warn" : "link"}">${f.level}</span>` +
-      `<span class="badge group">${esc(f.area)}</span>` +
-      `<span class="dmsg">${esc(f.msg)}</span>`;
-    el.appendChild(row);
+
+  view.append(el("div.stat-grid", { style: { marginBottom: "1rem" } },
+    statCard(String(warns), "warnings", { accent: warns > 0 }),
+    statCard(String(infos), "notes"),
+    statCard(DOCTOR.ts, "last run")));
+
+  const bar = el("div.toolbar");
+  const seg = el("div.row-flex", { style: { gap: ".25rem" } });
+  for (const [k, label] of [["all", "All"], ["warn", "Warnings"], ["info", "Notes"]])
+    seg.append(mkbtn("btn-sm" + (DFILTER === k ? " on" : ""), label,
+      () => { DFILTER = k; renderDoctor(); }));
+  bar.append(seg);
+  const rb = mkbtn("btn-sm", "Run again", () => renderDoctor(true));
+  rb.prepend(icon("refresh"));
+  bar.append(el("div.toolbar-end", {}, rb));
+  view.append(bar);
+
+  const findings = DOCTOR.findings.filter((f) => DFILTER === "all" || f.level === DFILTER);
+  if (!findings.length) {
+    view.append(emptyState(
+      DOCTOR.findings.length ? "Nothing in this filter" : "Nothing to report",
+      DOCTOR.findings.length ? "Switch the filter to see the other findings."
+        : "No broken symlinks, missing executables, stale backups or item problems were found.",
+      "success"));
+    return;
   }
+
+  const list = el("div.list");
+  for (const f of findings) {
+    list.append(el("div.drow", {},
+      f.level === "warn" ? badge("warn", "destructive") : badge("note", "outline"),
+      badge(f.area, "secondary"),
+      el("span.dmsg", { text: f.msg })));
+  }
+  view.append(list);
 }
 
-// ------------------------------------------------------------- command palette
+// --------------------------------------------------------- command palette
 
 let PAL = null;
 
 function palItems() {
   const out = [];
-  for (const t of allTabs())
-    out.push({ kind: "go to", label: t,
-      run: () => { TAB = t; location.hash = t; render(); } });
+  for (const t of TABS)
+    out.push({ kind: "go to", label: TAB_META[t].label, icon: TAB_META[t].icon,
+      run: () => goTab(t) });
   for (const t of ITEM_TABS)
     for (const s of (DATA.items || {})[t] || [])
-      out.push({ kind: t.replace(/s$/, ""), label: s.name,
+      out.push({ kind: t.replace(/s$/, ""), label: s.name, icon: TAB_META[t].icon,
         hint: (s.enabled ? "" : "(disabled) ") + (s.description || ""),
         run: () => s.broken
           ? (() => { TAB = t; location.hash = t; IQ = s.name; render(); })()
           : openItemEditor(t, s.name, null, s.enabled) });
   for (const id of ["CLAUDE.md", "settings.json", "keybindings.json"])
-    out.push({ kind: "edit", label: id, run: () => openEditor(id) });
-  out.push({ kind: "action", label: "add mcp server",
-    run: () => { TAB = "mcp"; location.hash = TAB; render(); mcpNew(); } });
-  out.push({ kind: "action", label: "toggle light/dark theme", run: toggleTheme });
-  out.push({ kind: "action", label: "run doctor",
-    run: () => { TAB = "doctor"; location.hash = TAB; render(); renderDoctor(true); } });
-  out.push({ kind: "action", label: "setup pieces",
-    run: () => { TAB = "setup"; location.hash = TAB; render(); renderSetup(true); } });
-  out.push({ kind: "action", label: "rescan usage analytics",
-    run: () => { TAB = "insight"; location.hash = TAB; render(); renderInsight(true); } });
+    out.push({ kind: "edit", label: id, icon: "file", run: () => openEditor(id) });
+  out.push({ kind: "action", label: "Add MCP server", icon: "plus",
+    run: () => { goTab("mcp"); mcpNew(); } });
+  for (const t of THEMES)
+    out.push({ kind: "theme", label: t.label, icon: "droplet", hint: t.hint,
+      run: () => setTheme({ family: t.id }) });
+  for (const m of MODES)
+    out.push({ kind: "appearance", label: m.label, icon: m.icon, run: () => setTheme({ mode: m.id }) });
+  out.push({ kind: "action", label: "Run doctor", icon: "pulse",
+    run: () => { goTab("doctor"); renderDoctor(true); } });
+  out.push({ kind: "action", label: "Setup pieces", icon: "wrench",
+    run: () => { goTab("setup"); renderSetup(true); } });
+  out.push({ kind: "action", label: "Rescan usage analytics", icon: "chart",
+    run: () => { goTab("insight"); renderInsight(true); } });
+  out.push({ kind: "action", label: "Rescan costs", icon: "dollar",
+    run: () => { goTab("costs"); renderCosts(true); } });
+  out.push({ kind: "action", label: "Copy config directory path", icon: "copy",
+    run: () => copyText(DATA.config_dir, "config directory path") });
   return out;
-}
-
-function fuzzy(q, s) {
-  s = s.toLowerCase();
-  let score = 0, i = 0;
-  for (const ch of q) {
-    const j = s.indexOf(ch, i);
-    if (j < 0) return -1;
-    score += (j === i ? 3 : 1) + (j === 0 ? 2 : 0);
-    i = j + 1;
-  }
-  return score - s.length / 100;
 }
 
 function palMatches() {
@@ -2050,6 +1704,7 @@ function closePalette() {
   PAL = null;
   const p = document.getElementById("palette");
   p.hidden = true;
+  p.className = "";
   p.innerHTML = "";
 }
 
@@ -2057,31 +1712,40 @@ function openPalette() {
   PAL = { q: "", sel: 0, items: palItems() };
   const p = document.getElementById("palette");
   p.hidden = false;
+  p.className = "dialog-overlay palette-overlay";
   p.innerHTML = "";
-  const box = document.createElement("div");
-  box.className = "palbox";
-  const inp = document.createElement("input");
-  inp.placeholder = "jump to anything — items, tabs, actions…";
-  const listEl = document.createElement("div");
-  listEl.className = "pallist";
+
+  const inp = el("input.command-input", {
+    placeholder: "Jump to anything — items, tabs, themes, actions…",
+    "aria-label": "Command palette", spellcheck: false,
+  });
+  const listEl = el("div.command-list", { role: "listbox" });
+
   const renderList = () => {
     const list = palMatches();
     listEl.innerHTML = "";
     if (!list.length) {
-      listEl.innerHTML = '<div class="palempty">no matches</div>';
+      listEl.append(el("div.command-empty", { text: "No results." }));
       return;
     }
+    let lastKind = null;
     list.forEach((it, i) => {
-      const row = document.createElement("div");
-      row.className = "palrow" + (i === PAL.sel ? " sel" : "");
-      row.innerHTML =
-        `<span class="pk">${esc(it.kind)}</span>` +
-        `<span class="pl">${esc(it.label)}</span>` +
-        `<span class="ph">${esc(it.hint || "")}</span>`;
-      row.onclick = () => { closePalette(); it.run(); };
-      listEl.appendChild(row);
+      if (it.kind !== lastKind) {
+        listEl.append(el("div.command-group-label", { text: it.kind }));
+        lastKind = it.kind;
+      }
+      const row = el("div.command-item", {
+        role: "option", "aria-selected": String(i === PAL.sel),
+        onclick: () => { closePalette(); it.run(); },
+      },
+        it.icon ? icon(it.icon) : null,
+        el("span.ci-label", { text: it.label }),
+        it.hint ? el("span.ci-hint", { text: it.hint }) : null);
+      listEl.append(row);
+      if (i === PAL.sel) setTimeout(() => row.scrollIntoView({ block: "nearest" }));
     });
   };
+
   inp.oninput = () => { PAL.q = inp.value; PAL.sel = 0; renderList(); };
   inp.onkeydown = (e) => {
     const list = palMatches();
@@ -2100,17 +1764,29 @@ function openPalette() {
       closePalette();
     }
   };
-  box.appendChild(inp);
-  box.appendChild(listEl);
+
   p.onclick = (e) => { if (e.target === p) closePalette(); };
-  p.appendChild(box);
+  p.append(el("div.command", {},
+    el("div.command-input-wrap", {}, el("span.command-icon", {}, icon("search")), inp),
+    listEl,
+    el("div.command-footer", {},
+      el("span", {}, el("kbd", { text: "↑↓" }), " navigate"),
+      el("span", {}, el("kbd", { text: "↵" }), " open"),
+      el("span", {}, el("kbd", { text: "esc" }), " close"))));
   renderList();
   inp.focus();
 }
 
+// ------------------------------------------------------------------ editor
+
 let EDITING = null;
 
+const confirmDiscard = () =>
+  !EDITING || !EDITING.dirty
+  || confirm("You have unsaved changes in " + EDITING.path + ". Discard them?");
+
 async function openEditor(id) {
+  if (EDITING && !confirmDiscard()) return;
   try {
     EDITING = await api("/api/file?id=" + encodeURIComponent(id));
     render();
@@ -2118,10 +1794,11 @@ async function openEditor(id) {
 }
 
 async function openItemEditor(type, name, file, enabled) {
+  if (EDITING && !EDITING.item && !confirmDiscard()) return;
   try {
-    const q = "type=" + encodeURIComponent(type) + "&name=" + encodeURIComponent(name) +
-      "&enabled=" + (enabled ? "1" : "0") +
-      (file ? "&file=" + encodeURIComponent(file) : "");
+    const q = "type=" + encodeURIComponent(type) + "&name=" + encodeURIComponent(name)
+      + "&enabled=" + (enabled ? "1" : "0")
+      + (file ? "&file=" + encodeURIComponent(file) : "");
     EDITING = { item: true, ...(await api("/api/item?" + q)) };
     render();
   } catch (e) { toast(e.message, true); }
@@ -2189,110 +1866,97 @@ function edSync() {
 
 async function edAssist() {
   edSync();
-  const r = await modal({ title: "✨ ask claude",
-    text: "runs `claude -p` locally with this file (uses your own Claude Code auth; can take a minute)",
+  const r = await modal({ title: "Ask Claude",
+    text: "Runs `claude -p` locally with this file (uses your own Claude Code auth; can take a minute).",
     fields: [
-      { id: "m", label: "task", type: "select", options: [
-        { value: "improve", label: "improve — tighten description & triggers, return revised file" },
-        { value: "review", label: "review — list concrete problems, no changes" },
-        { value: "custom", label: "custom instruction…" }] },
-      { id: "c", label: "custom instruction (for custom)",
+      { id: "m", label: "Task", type: "select", options: [
+        { value: "improve", label: "Improve — tighten description & triggers, return revised file" },
+        { value: "review", label: "Review — list concrete problems, no changes" },
+        { value: "custom", label: "Custom instruction…" }] },
+      { id: "c", label: "Custom instruction (for custom)",
         placeholder: "e.g. add a 'Use when' trigger list for CI debugging" }],
-    ok: "run" });
+    ok: "Run" });
   if (!r) return;
-  toast("asking claude… (this can take a while)");
+  const t = toast({ title: "Asking Claude… this can take a while", variant: "loading", duration: 0 });
   try {
     const res = await api("/api/assist", { mode: r.m, custom: r.c,
       content: EDITING.content, path: EDITING.path });
+    t.close();
     EDITING.assist = { text: res.result, replaces: res.replaces };
     render();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { t.close(); toast(e.message, true); }
 }
 
 function renderEditor() {
-  const el = document.getElementById("editorview");
+  const view = document.getElementById("editorview");
   const f = EDITING;
-  el.innerHTML =
-    `<div class="sethead">editing <b>${esc(f.path)}</b>` +
-    (f.exists ? "" : " (new file — created on save)") +
-    (f.item && !f.enabled ? " · this item is disabled" : "") +
-    (f.id === "CLAUDE.md" || f.id === "settings.json" || f.item ? " · applies to new sessions" : "") +
-    `</div>`;
+  view.innerHTML = "";
+
+  view.append(el("div.view-head", {
+    html: "Editing <b>" + esc(f.path) + "</b>"
+      + (f.exists ? "" : " (new file — created on save)")
+      + (f.item && !f.enabled ? " · this item is disabled" : "")
+      + (f.dirty ? ' · <span class="warn">unsaved changes</span>' : "")
+      + (f.id === "CLAUDE.md" || f.id === "settings.json" || f.item ? " · applies to new sessions" : ""),
+  }));
+
+  const shell = el("div.editor-shell");
+
   if (f.item && f.files && f.files.length > 1) {
-    const tabs = document.createElement("div");
-    tabs.className = "ftabs";
-    for (const name of f.files) {
-      const b = document.createElement("button");
-      b.className = "small" + (name === f.file ? " on" : "");
-      b.textContent = name;
-      b.onclick = () => { edSync(); openItemEditor(f.type, f.name, name, f.enabled); };
-      tabs.appendChild(b);
-    }
-    el.appendChild(tabs);
+    const tabs = el("div.ftabs");
+    for (const name of f.files)
+      tabs.append(mkbtn("btn-sm" + (name === f.file ? " on" : ""), name, () => {
+        edSync();
+        openItemEditor(f.type, f.name, name, f.enabled);
+      }));
+    shell.append(tabs);
   }
+
   const isMd = (f.item ? f.file : f.path || "").endsWith(".md");
   if (f.preview && isMd) {
-    const pv = document.createElement("div");
-    pv.className = "mdprev";
-    pv.innerHTML = md2html(f.content || "");
-    el.appendChild(pv);
+    shell.append(el("div.mdprev", { html: md2html(f.content || "") }));
   } else {
-    const ta = document.createElement("textarea");
-    ta.id = "fileeditor";
-    ta.rows = 24;
-    ta.className = "fedit";
-    ta.value = f.content;
-    ta.oninput = () => { f.content = ta.value; };
-    el.appendChild(ta);
+    const ta = el("textarea.fedit", {
+      id: "fileeditor", rows: 24, spellcheck: false, value: f.content,
+      oninput: () => { f.content = ta.value; if (!f.dirty) { f.dirty = true; renderEditor(); ta.focus(); } },
+    });
+    shell.append(ta);
   }
+
   if (f.assist) {
-    const ap = document.createElement("div");
-    ap.className = "assistout";
-    ap.textContent = f.assist.text;
-    el.appendChild(ap);
-    const abar = document.createElement("div");
-    abar.className = "bar";
-    abar.style.marginTop = ".5rem";
-    if (f.assist.replaces) {
-      const use = document.createElement("button");
-      use.className = "small primary";
-      use.textContent = "use result";
-      use.onclick = () => {
+    shell.append(el("div.code-pane.assistout", { text: f.assist.text }));
+    const abar = el("div.toolbar", { style: { marginBottom: 0 } });
+    if (f.assist.replaces)
+      abar.append(mkbtn("btn-sm btn-primary", "Use result", () => {
         f.content = f.assist.text;
+        f.dirty = true;
         delete f.assist;
         render();
-      };
-      abar.appendChild(use);
-    }
-    const dis = document.createElement("button");
-    dis.className = "small";
-    dis.textContent = "dismiss";
-    dis.onclick = () => { edSync(); delete f.assist; render(); };
-    abar.appendChild(dis);
-    el.appendChild(abar);
+      }));
+    abar.append(mkbtn("btn-sm", "Dismiss", () => { edSync(); delete f.assist; render(); }));
+    shell.append(abar);
   }
-  const bar = document.createElement("div");
-  bar.className = "bar";
-  bar.style.marginTop = ".75rem";
-  const btn = (label, fn, cls, title) => {
-    const b = document.createElement("button");
-    b.textContent = label;
-    if (cls) b.className = cls;
-    if (title) b.title = title;
-    b.onclick = fn;
-    bar.appendChild(b);
-    return b;
-  };
-  btn("save", saveFile, "primary");
-  if (isMd)
-    btn(f.preview ? "edit" : "preview", () => {
+
+  const bar = el("div.toolbar", { style: { marginBottom: 0 } });
+  const save = mkbtn("btn-primary", "Save", saveFile);
+  save.prepend(icon("save"));
+  bar.append(save);
+  if (isMd) {
+    const pv = mkbtn("btn-sm" + (f.preview ? " on" : ""), f.preview ? "Edit" : "Preview", () => {
       edSync();
       f.preview = !f.preview;
       render();
-    }, f.preview ? "small on" : "small");
-  btn("✨ assist", edAssist, "small", "ask Claude (via the claude CLI) to improve or review this file");
-  btn("close", closeEditor);
-  el.appendChild(bar);
+    });
+    pv.prepend(icon(f.preview ? "pencil" : "eye"));
+    bar.append(pv);
+  }
+  const assist = mkbtn("btn-sm", "Assist", edAssist,
+    "Ask Claude (via the claude CLI) to improve or review this file");
+  assist.prepend(icon("sparkles"));
+  bar.append(assist);
+  bar.append(el("div.toolbar-end", {}, mkbtn("btn-ghost", "Close", closeEditor)));
+  shell.append(bar);
+  view.append(shell);
 }
 
 async function saveFile() {
@@ -2308,104 +1972,133 @@ async function saveFile() {
     }
     toast(EDITING.path + " saved");
     EDITING.exists = true;
+    EDITING.dirty = false;
+    renderEditor();
   } catch (e) { toast(e.message, true); }
 }
 
 function closeEditor() {
+  if (!confirmDiscard()) return;
   EDITING = null;
   refresh();
 }
 
+// --------------------------------------------------------------- inventory
+
 async function toggleItem(type, name, enabled) {
   try {
     await api("/api/item-toggle", { type, name, enabled });
-    toast(name + (enabled ? " enabled" : " disabled — moved to disabled/") +
-      " · applies to new sessions");
+    toast(name + (enabled ? " enabled" : " disabled — moved to disabled/") + " · applies to new sessions",
+      false, { label: "Undo", fn: () => toggleItem(type, name, !enabled) });
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
 
 function itemBadges(s) {
-  return (s.symlink && !s.broken ? '<span class="badge link">symlink</span>' : "") +
-    (s.broken ? '<span class="badge warn">broken</span>' : "") +
-    (s.incomplete && !s.broken ? '<span class="badge warn">no SKILL.md</span>' : "") +
-    (s.todo ? '<span class="badge warn" title="leftover TODO placeholder inside">TODO</span>' : "") +
-    (s.name_mismatch ? '<span class="badge warn" title="frontmatter name does not match the folder name">name≠dir</span>' : "") +
-    (s.long_desc ? '<span class="badge warn" title="description over 1024 characters — may be truncated">long desc</span>' : "");
+  const out = [];
+  if (s.symlink && !s.broken) out.push(badge("symlink", "outline"));
+  if (s.broken) out.push(badge("broken", "destructive"));
+  if (s.incomplete && !s.broken) out.push(badge("no SKILL.md", "destructive"));
+  if (s.todo) {
+    const b = badge("TODO", "warning");
+    b.title = "Leftover TODO placeholder inside";
+    out.push(b);
+  }
+  if (s.name_mismatch) {
+    const b = badge("name ≠ dir", "warning");
+    b.title = "The frontmatter name does not match the folder name";
+    out.push(b);
+  }
+  if (s.long_desc) {
+    const b = badge("long desc", "warning");
+    b.title = "Description over 1024 characters — it may be truncated";
+    out.push(b);
+  }
+  return out;
 }
 
 function renderInventory() {
-  const el = document.getElementById("itemsview");
+  const view = document.getElementById("itemsview");
   const all = (DATA.items || {})[TAB] || [];
   const q = IQ.toLowerCase();
-  const items = all.filter(
-    (s) => !q || s.name.toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q));
+  const items = all.filter((s) =>
+    !q || s.name.toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q));
   const on = items.filter((s) => s.enabled);
   const off = items.filter((s) => !s.enabled);
-  el.innerHTML =
-    `<div class="sethead">${TAB} in <b>${esc(DATA.config_dir)}/${TAB}</b>` +
-    ` — everything real on this machine. Disabling moves an item to ` +
-    `<b>disabled/${TAB}/</b>; nothing is deleted. Changes apply to new sessions.</div>`;
-  const bar = document.createElement("div");
-  bar.className = "bar";
-  const inp = document.createElement("input");
-  inp.type = "search";
-  inp.id = "iq";
-  inp.placeholder = "filter " + TAB + "…";
-  inp.value = IQ;
-  inp.oninput = () => {
-    IQ = inp.value;
-    renderInventory();
-    const n = document.getElementById("iq");
-    n.focus();
-    n.setSelectionRange(n.value.length, n.value.length);
-  };
-  bar.appendChild(inp);
-  el.appendChild(bar);
+
+  view.innerHTML = "";
+  view.append(el("div.view-head", {
+    html: TAB + " in <b>" + esc(DATA.config_dir) + "/" + TAB + "</b> — everything real on this machine. "
+      + "Disabling moves an item to <b>disabled/" + TAB + "/</b>; nothing is deleted. "
+      + "Changes apply to new sessions.",
+  }));
+
+  const inp = el("input", {
+    type: "search", id: "iq", placeholder: "Filter " + TAB + " by name or description…",
+    value: IQ,
+    oninput: () => {
+      IQ = inp.value;
+      renderInventory();
+      const n = document.getElementById("iq");
+      n.focus();
+      n.setSelectionRange(n.value.length, n.value.length);
+    },
+  });
+  view.append(el("div.toolbar", {}, inp,
+    el("div.toolbar-end", {},
+      el("span.muted", { style: { fontSize: ".72rem" },
+        text: on.length + " enabled · " + off.length + " disabled"
+          + (items.length !== all.length ? " · " + items.length + " of " + all.length + " shown" : "") }))));
+
+  if (!all.length) {
+    view.append(emptyState("No " + TAB + " yet",
+      "Anything you put in " + DATA.config_dir + "/" + TAB + " shows up here.",
+      TAB_META[TAB].icon));
+    return;
+  }
 
   const section = (list, label, enabled) => {
-    if (!list.length && !(enabled && !all.length)) return;
-    const h = document.createElement("h2");
-    h.innerHTML = label + ` <span class="count">· ${list.length}</span>`;
-    el.appendChild(h);
-    if (!list.length) {
-      const d = document.createElement("div");
-      d.className = "empty";
-      d.textContent = q ? "no matches" : "nothing here";
-      el.appendChild(d);
-      return;
-    }
+    if (!list.length) return;
+    view.append(sectionTitle(label, list.length));
+    const box = el("div.list");
     for (const s of list) {
-      const row = document.createElement("div");
-      row.className = "row" + (enabled ? "" : " off");
-      row.innerHTML =
-        `<span class="name" title="${esc(s.path || "")}">${esc(s.name)}</span>` +
-        itemBadges(s) +
-        `<span class="desc">${esc(s.description || "")}</span>`;
-      const act = document.createElement("span");
-      act.className = "actions";
+      const actions = el("div.li-actions");
       if (!s.broken) {
-        const eb = document.createElement("button");
-        eb.textContent = "edit";
-        eb.className = "small";
-        eb.onclick = () => openItemEditor(TAB, s.name, null, enabled);
-        act.appendChild(eb);
+        const eb = mkbtn("btn-sm", "Edit", () => openItemEditor(TAB, s.name, null, enabled));
+        eb.prepend(icon("pencil"));
+        actions.append(eb);
       }
-      const b = document.createElement("button");
-      b.textContent = enabled ? "disable" : "enable";
-      b.className = "small" + (enabled ? " danger" : "");
-      b.onclick = () => toggleItem(TAB, s.name, !enabled);
-      act.appendChild(b);
-      row.appendChild(act);
-      el.appendChild(row);
+      actions.append(mkbtn("btn-sm" + (enabled ? " danger" : ""),
+        enabled ? "Disable" : "Enable", () => toggleItem(TAB, s.name, !enabled)));
+      const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
+        { label: "Copy path", icon: "copy", fn: () => copyText(s.path || s.name, "path") },
+        { label: enabled ? "Disable" : "Enable", icon: "power",
+          fn: () => toggleItem(TAB, s.name, !enabled), danger: enabled },
+      ]), "More actions");
+      more.append(icon("chevronDown"));
+      actions.append(more);
+
+      box.append(el("div.list-item", { class: enabled ? "" : "off" },
+        el("div.li-main", {},
+          el("span.li-name", { title: s.path || "", text: s.name }),
+          ...itemBadges(s)),
+        el("span.li-desc", { text: s.description || "" }),
+        actions));
     }
+    view.append(box);
   };
-  section(on, "enabled", true);
-  section(off, "disabled", false);
+
+  section(on, "Enabled", true);
+  section(off, "Disabled", false);
+
+  if (!items.length)
+    view.append(emptyState("No matches", "Nothing here matches “" + IQ + "”.", "filter"));
 }
 
+// ------------------------------------------------------------------ render
+
 function render() {
-  closeMenu();
+  closeDropdown();
   renderHeader();
   renderTabs();
   const views = { settings: "settingsview", mcp: "mcpview", statusline: "stlview",
@@ -2436,15 +2129,38 @@ async function refresh() {
   render();
 }
 
-document.getElementById("themebtn").addEventListener("click", toggleTheme);
+// -------------------------------------------------------------------- wire
 
-// Keyboard: Ctrl/Cmd+K palette, Escape closes editor/menu, 1-9 switch tabs.
+document.getElementById("themebtn").append(icon("contrast"));
+document.getElementById("themebtn").onclick = (e) => openThemeMenu(e.currentTarget);
+document.getElementById("palettebtn").querySelector(".sb-icon").append(icon("search"));
+document.getElementById("palettebtn").onclick = openPalette;
+document.getElementById("cfgchip").onclick = (e) => openCfgMenu(e.currentTarget);
+
+addEventListener("hashchange", () => {
+  const t = location.hash.slice(1);
+  if (TABS.includes(t) && t !== TAB) { TAB = t; render(); }
+});
+
+addEventListener("beforeunload", (e) => {
+  if (EDITING && EDITING.dirty) { e.preventDefault(); e.returnValue = ""; }
+});
+
+// Keyboard: Ctrl/Cmd+K palette, "/" focuses the view filter, Escape closes the
+// editor or an open menu, 1-9 switch tabs.
 document.addEventListener("keydown", (e) => {
   if (!document.getElementById("modal").hidden) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
     if (PAL) closePalette();
     else openPalette();
+    return;
+  }
+  // Ctrl/Cmd-S saves the open editor — checked before the input-focus bailout
+  // below, since the cursor is in the textarea exactly when you press it
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s" && EDITING) {
+    e.preventDefault();
+    saveFile();
     return;
   }
   if (PAL) return;  // the palette input handles its own keys
@@ -2454,11 +2170,16 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (e.key === "Escape") {
-    closeMenu();
+    closeDropdown();
     if (EDITING) closeEditor();
+  } else if (e.key === "/") {
+    const f = document.getElementById("iq") || document.getElementById("setq");
+    if (f) { e.preventDefault(); f.focus(); f.select(); }
+  } else if (e.key === "?") {
+    openPalette();
   } else if (e.key >= "1" && e.key <= "9" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    const t = allTabs()[+e.key - 1];
-    if (t) { TAB = t; location.hash = t; render(); }
+    const t = TABS[+e.key - 1];
+    if (t) goTab(t);
   }
 });
 

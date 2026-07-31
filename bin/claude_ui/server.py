@@ -24,8 +24,22 @@ from .doctor import doctor
 
 
 STATIC = Path(__file__).resolve().parent / "static"
-STATIC_FILES = {"/style.css": ("style.css", "text/css; charset=utf-8"),
-                "/app.js": ("app.js", "text/javascript; charset=utf-8")}
+# Explicit allowlist rather than path joining — nothing user-supplied ever
+# reaches the filesystem here.
+_STATIC_NAMES = ("theme.css", "components.css", "app.css", "ui.js", "app.js")
+STATIC_FILES = {
+    "/" + n: (n, ("text/css" if n.endswith(".css") else "text/javascript")
+              + "; charset=utf-8")
+    for n in _STATIC_NAMES
+}
+
+# Brand mark, matching the header chip: a rounded square with a "C" cut out.
+ICON_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
+    "<rect width='32' height='32' rx='7' fill='#d0754e'/>"
+    "<path d='M21.4 21.1a7.2 7.2 0 1 1 0-10.2' fill='none' stroke='#fff' "
+    "stroke-width='3.4' stroke-linecap='round'/></svg>"
+)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -70,15 +84,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, (STATIC / fname).read_text(), ctype,
                       {"cache-control": "no-cache"})
         elif self.path in ("/favicon.ico", "/icon.svg"):
-            self.send(200, "<svg xmlns='http://www.w3.org/2000/svg' "
-                           "viewBox='0 0 16 16'><text y='13' font-size='13'>"
-                           "⚙️</text></svg>", "image/svg+xml")
+            self.send(200, ICON_SVG, "image/svg+xml")
         elif self.path == "/manifest.webmanifest":
             self.send(200, {"name": "claude config", "short_name": "claude-ui",
                             "start_url": "/", "display": "standalone",
-                            "background_color": "#282828", "theme_color": "#282828",
+                            "background_color": "#1c1917", "theme_color": "#d0754e",
                             "icons": [{"src": "/icon.svg", "sizes": "any",
-                                       "type": "image/svg+xml"}]},
+                                       "type": "image/svg+xml",
+                                       "purpose": "any"}]},
                       "application/manifest+json")
         elif self.path == "/api/state":
             self.send(200, {

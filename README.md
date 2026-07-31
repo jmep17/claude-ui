@@ -24,6 +24,38 @@ owns, links, tracks, or syncs anything:
 - **Doctor** for machine health: broken symlinks, leftover backups, hooks or
   statusline entries pointing at missing executables, and more.
 
+## Interface
+
+The UI is a hand-written port of the [shadcn/ui](https://ui.shadcn.com) design
+system — its token contract, component anatomy, and variant matrix — as plain
+CSS and DOM helpers. shadcn itself is React + Tailwind + Radix; none of that
+fits a zero-dependency, no-build-step app, so what is ported is the part that
+defines the look, not the runtime.
+
+- `static/theme.css` — the token layer. Semantic pairs
+  (`--background`/`--foreground`, `--card`, `--popover`, `--primary`, `--muted`,
+  `--accent`, `--destructive`), plus `--border`/`--input`/`--ring`, a `--radius`
+  scale, `--chart-1…5`, and an ANSI terminal palette for the statusline
+  preview. A theme is nothing but a block of custom properties.
+- `static/components.css` — the component layer, named after shadcn's own
+  vocabulary: `.btn` and its variants, `.card`, `.badge`, `.input`,
+  `.tabs-list`/`.tabs-trigger`, `.dialog-*`, `.dropdown-menu`, `.command-*`,
+  `.table`, `.switch`, `.alert`, `.skeleton`, `.toast`. Nothing here knows a
+  colour.
+- `static/app.css` — layout and views, in terms of the two layers above.
+- `static/ui.js` — the behavioural half: theme controller, a small inlined
+  [lucide](https://lucide.dev) icon set, toasts, focus-trapped dialogs, dropdown
+  menus, and the filterable combobox.
+
+Four themes — **clay** (default), **slate**, **gruvbox**, **nord** — each in
+light and dark, plus a *system* mode that follows `prefers-color-scheme`. The
+choice is stored in `localStorage` and applied before first paint, so there is
+no flash. Pick one from the header, or with <kbd>⌘K</kbd>.
+
+Keyboard: <kbd>⌘K</kbd> command palette, <kbd>1</kbd>–<kbd>9</kbd> for tabs,
+<kbd>/</kbd> to focus the current filter, <kbd>⌘S</kbd> to save in the editor,
+<kbd>Esc</kbd> to close.
+
 ## Run
 
 ```sh
@@ -49,7 +81,13 @@ The Claude Code config dir is resolved in this order:
 `bin/claude-ui` is a thin launcher; the code lives in `bin/claude_ui/*.py`
 (core → items/mcp/settings → statusline/insight/assist/setup → doctor →
 server, a clean DAG). The frontend is plain files in `bin/claude_ui/static/`
-(no build step).
+(no build step), layered theme → components → app, with `ui.js` before
+`app.js`.
+
+Tests are stdlib `unittest`: `python3 -m unittest discover tests`.
+
+[`docs/IDEAS.md`](docs/IDEAS.md) is the ranked backlog — what is worth building
+next and why, written against the code that exists.
 
 ---
 
