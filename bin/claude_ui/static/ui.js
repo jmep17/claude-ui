@@ -719,6 +719,21 @@ function filterInput(inp, values) {
   return wrap;
 }
 
+// A filter box whose keystrokes re-render the whole view around it: run the
+// re-render, then put the caret back where it was instead of yanking it to
+// end-of-string, which makes editing mid-word impossible. The selection has to
+// be read before render() — the old input node is detached afterwards.
+function refilter(id, render) {
+  const src = document.getElementById(id);
+  const [a, b, d] = [src.selectionStart, src.selectionEnd, src.selectionDirection];
+  render();
+  const nf = document.getElementById(id);
+  if (!nf) return;
+  nf.focus();
+  // keep the end and direction too, or shift-arrow selections collapse
+  try { nf.setSelectionRange(a, b, d); } catch { /* older engines */ }
+}
+
 applyTheme(false);
 addEventListener("storage", () => applyTheme(true));
 matchMedia("(prefers-color-scheme: dark)")

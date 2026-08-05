@@ -430,7 +430,9 @@ const SETTING_DOCS = [
   [/^outputStyle/, "output-styles"],
   [/^autoMemory|^claudeMdExcludes|^autoCompact/, "memory"],
   [/^env$/, "settings#environment-variables"],
-  [/^model$|^fallbackModel|Model$/, "model-config"],
+  // the env.* alternative is anchored and uppercase-only so it can't collide;
+  // adding /i to `Model$` would start matching unrelated future keys
+  [/^model$|^fallbackModel|Model$|^env\.[A-Z_]*MODEL$/, "model-config"],
   [/^keyBindings|^editorMode/, "terminal-config"],
   [/^fileCheckpointing/, "checkpointing"],
 ];
@@ -639,12 +641,11 @@ function renderSettings() {
   const fin = el("input", {
     type: "search", id: "setq", placeholder: "Filter settings by key or description…",
     value: SFILTER.q,
-    oninput: () => {
+    oninput: (e) => {
       SFILTER.q = fin.value;
-      renderSettings();
-      const nf = document.getElementById("setq");
-      nf.focus();
-      nf.setSelectionRange(nf.value.length, nf.value.length);
+      // re-rendering mid-composition destroys the composition (CJK input)
+      if (e.isComposing) return;
+      refilter("setq", renderSettings);
     },
   });
   bar.append(fin);
@@ -656,8 +657,11 @@ function renderSettings() {
   view.append(bar);
 
   const q = SFILTER.q.toLowerCase();
+  // aka is optional, and absent entirely on the synthetic "other keys" rows
   const match = (s) =>
-    (!q || s.key.toLowerCase().includes(q) || (s.desc || "").toLowerCase().includes(q))
+    (!q || s.key.toLowerCase().includes(q)
+      || (s.desc || "").toLowerCase().includes(q)
+      || (s.aka || []).some((a) => a.toLowerCase().includes(q)))
     && (!SFILTER.set || settingsGet(s.key) !== undefined);
 
   const cats = new Map();
@@ -2036,12 +2040,10 @@ function renderInventory() {
   const inp = el("input", {
     type: "search", id: "iq", placeholder: "Filter " + TAB + " by name or description…",
     value: IQ,
-    oninput: () => {
+    oninput: (e) => {
       IQ = inp.value;
-      renderInventory();
-      const n = document.getElementById("iq");
-      n.focus();
-      n.setSelectionRange(n.value.length, n.value.length);
+      if (e.isComposing) return;
+      refilter("iq", renderInventory);
     },
   });
   view.append(el("div.toolbar", {}, inp,

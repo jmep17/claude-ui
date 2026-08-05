@@ -33,16 +33,40 @@ from .core import CONFIG_FILES, atomic_write, config_dir, tilde
 #   json             raw-JSON textarea, for deeply nested / rarely-edited configs.
 #                    Optional "templates": [{"name", "value"}] starter configs
 #                    offered via an insert picker above the textarea.
+# Any entry may also carry "aka": [...] — extra keywords the settings filter
+# matches, for keys whose name and description don't contain the word people
+# actually search for (e.g. "background", or a deprecated env var name).
 # The frontend also merges live suggestions (git identity, installed skills,
 # MCP server names, ...) into datalists — see suggestFor() in static/app.js.
 # In string/combo inputs a literal "" (two quote characters) writes the empty
 # string; a blank input unsets the key.
-MODEL_ALIASES = ["default", "best", "fable", "sonnet", "opus", "haiku",
-                 "sonnet[1m]", "opus[1m]", "opusplan", "opusplan[1m]",
-                 # full model IDs (aliases resolve to these; snapshot 2026-07)
-                 "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7",
-                 "claude-opus-4-6", "claude-opus-4-5", "claude-sonnet-5",
-                 "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"]
+MODEL_ALIAS_NAMES = ["default", "best", "fable", "sonnet", "opus", "haiku",
+                     "sonnet[1m]", "opus[1m]", "opusplan", "opusplan[1m]"]
+# full model IDs (aliases resolve to these; snapshot 2026-07)
+MODEL_IDS = ["claude-fable-5", "claude-opus-5", "claude-opus-4-8",
+             "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
+             "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5",
+             "claude-haiku-4-5"]
+MODEL_ALIASES = MODEL_ALIAS_NAMES + MODEL_IDS
+
+
+def _family_first(fam):
+    """Full model IDs, that family first — for the ANTHROPIC_DEFAULT_*_MODEL
+    keys, which take an ID (an alias there would be circular)."""
+    return ([m for m in MODEL_IDS if fam in m]
+            + [m for m in MODEL_IDS if fam not in m])
+
+
+# Settings keys whose values are model IDs. Live IDs scraped from the models
+# doc are merged into each one's suggestions (see _fetch_docs_values). A ":key"
+# suffix targets a kv control's key input, matching suggestFor() in app.js.
+MODEL_VALUED_KEYS = [
+    "model", "fallbackModel", "availableModels", "advisorModel",
+    "modelOverrides:key",
+    "env.ANTHROPIC_MODEL", "env.CLAUDE_CODE_SUBAGENT_MODEL",
+    "env.ANTHROPIC_DEFAULT_OPUS_MODEL", "env.ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "env.ANTHROPIC_DEFAULT_HAIKU_MODEL", "env.ANTHROPIC_DEFAULT_FABLE_MODEL",
+]
 LANGS = ["en", "ja", "fr", "es", "de", "zh", "ko", "pt", "it", "ru"]
 # `language` takes the English name of a language, not an ISO code — the docs
 # example is "japanese"/"spanish"/"french".
@@ -229,8 +253,10 @@ ENV_VARS = [
 
 SETTINGS_SCHEMA = [
     {"key": "model", "type": "combo", "values": MODEL_ALIASES, "cat": "model",
+     "aka": ["main", "session"],
      "desc": "Model for the main session — alias (opus, sonnet, haiku…) or full model ID; read at startup"},
     {"key": "fallbackModel", "type": "list", "item_values": MODEL_ALIASES, "cat": "model",
+     "aka": ["overload"],
      "desc": "Fallback model chain tried in order on overload, max 3 models"},
     {"key": "effortLevel", "type": "enum", "values": ["low", "medium", "high", "xhigh"], "cat": "model",
      "desc": "Persist reasoning effort level across sessions"},
@@ -246,6 +272,7 @@ SETTINGS_SCHEMA = [
     {"key": "fastModePerSessionOptIn", "type": "bool", "cat": "model",
      "desc": "Require per-session opt-in for fast mode"},
     {"key": "agent", "type": "combo", "values": [], "cat": "model",
+     "aka": ["main thread", "subagent"],
      "desc": "Run the main thread as a named subagent, applying its prompt, tools, and model"},
     {"key": "availableModels", "type": "list", "item_values": MODEL_ALIASES, "cat": "model",
      "desc": "Allowlist of models selectable for the session, subagents, skills, and the advisor"},
@@ -253,6 +280,33 @@ SETTINGS_SCHEMA = [
      "desc": "Switch to the fallback model when a safety classifier flags a request"},
     {"key": "modelOverrides", "type": "kv", "key_values": MODEL_ALIASES, "cat": "model",
      "desc": "Map Anthropic model IDs to provider-specific IDs, e.g. a Bedrock inference profile ARN"},
+
+    # Model selection for subagents and for alias resolution lives in env vars,
+    # not top-level keys. They are editable in the `env` map too, but nobody
+    # finds them there — these rows put them in front of the model settings
+    # with model-ID suggestions. Writing env.X nests under `env` (settings_set).
+    {"key": "env.CLAUDE_CODE_SUBAGENT_MODEL", "type": "combo", "cat": "model",
+     "values": ["inherit"] + MODEL_ALIASES,
+     "aka": ["subagent", "task tool", "background", "delegate"],
+     "desc": "Model for every subagent — alias, full model ID, or 'inherit'; "
+             "overrides each agent's own model: frontmatter"},
+    {"key": "env.ANTHROPIC_MODEL", "type": "combo", "values": MODEL_ALIASES, "cat": "model",
+     "aka": ["launch", "session", "main"],
+     "desc": "Model for the main session at launch — the env-var form of the `model` key above"},
+    {"key": "env.ANTHROPIC_DEFAULT_HAIKU_MODEL", "type": "combo", "cat": "model",
+     "values": _family_first("haiku"),
+     "aka": ["background", "small fast model", "ANTHROPIC_SMALL_FAST_MODEL"],
+     "desc": "Model the 'haiku' alias resolves to, and what background functionality uses; "
+             "replaces the deprecated ANTHROPIC_SMALL_FAST_MODEL"},
+    {"key": "env.ANTHROPIC_DEFAULT_OPUS_MODEL", "type": "combo", "cat": "model",
+     "values": _family_first("opus"), "aka": ["alias"],
+     "desc": "Model the 'opus' alias resolves to — a full model ID"},
+    {"key": "env.ANTHROPIC_DEFAULT_SONNET_MODEL", "type": "combo", "cat": "model",
+     "values": _family_first("sonnet"), "aka": ["alias"],
+     "desc": "Model the 'sonnet' alias resolves to — a full model ID"},
+    {"key": "env.ANTHROPIC_DEFAULT_FABLE_MODEL", "type": "combo", "cat": "model",
+     "values": _family_first("fable"), "aka": ["alias"],
+     "desc": "Model the 'fable' alias resolves to — a full model ID"},
 
     {"key": "permissions.defaultMode", "type": "enum", "cat": "permissions",
      "values": ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions", "manual"],
@@ -282,7 +336,9 @@ SETTINGS_SCHEMA = [
      "desc": "Use auto-mode semantics during plan mode when auto mode is available"},
 
     {"key": "env", "type": "kv", "key_values": ENV_VARS, "cat": "environment & hooks",
-     "desc": "Environment variables applied to every session and subprocess"},
+     "aka": ["environment variable", "env var"],
+     "desc": "Environment variables applied to every session and subprocess. "
+             "Model-related vars have dedicated rows under “model” above; they also appear here"},
     {"key": "hooks", "type": "json", "cat": "environment & hooks",
      "templates": [
          {"name": "notify when done", "value": {"Stop": [{"hooks": [
@@ -672,8 +728,8 @@ SETTINGS_KEY_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_.$-]*$")
 # Live option values fetched once in the background at server start from the
 # public docs (no auth needed); on any failure the statics above remain the
 # fallback. Two sources:
-#   - models overview page: "Claude API ID/alias" table rows → model IDs for
-#     the model/fallbackModel suggestions
+#   - models overview page: "Claude API ID/alias" table rows → model IDs,
+#     merged into every key in MODEL_VALUED_KEYS
 #   - settings reference page: per-key table rows, where allowed values appear
 #     as backtick-wrapped quoted strings (`"latest"`) — merged into that
 #     setting's options/suggestions (incl. enum dropdowns, via suggestFor)
@@ -696,7 +752,10 @@ def _fetch_docs_values():
                 ids += [c for c in (c.strip() for c in line.split("|"))
                         if re.fullmatch(r"claude-[a-z0-9-]+", c)]
         if ids:
-            found["model"] = found["fallbackModel"] = list(dict.fromkeys(ids))
+            ids = list(dict.fromkeys(ids))
+            # a fresh list per key — the second pass below appends to these
+            for k in MODEL_VALUED_KEYS:
+                found[k] = list(ids)
     except (OSError, ValueError):
         pass
     try:
