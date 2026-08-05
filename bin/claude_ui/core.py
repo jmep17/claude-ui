@@ -22,6 +22,13 @@ def item_rel(name):
         raise ValueError("bad name")
     return Path(*parts)
 
+# Written into an adopted item's frontmatter. Claude Code ignores unknown keys;
+# the x- prefix marks it as ours. Keeping the fact in the file rather than a
+# sidecar manifest means it survives the user moving or committing the file.
+# Lives here because both plugins.py (which writes it) and items.py (which
+# reports it on every scan) need it, and neither imports the other.
+SOURCE_KEY = "x-claude-ui-source"
+
 # the four item-type directories inside the Claude config dir
 ITEM_TYPES = {
     "skills": {"kind": "dir"},

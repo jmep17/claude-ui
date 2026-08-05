@@ -1124,6 +1124,91 @@ async function renderPlugins(reload) {
   section("available", "Available",
     "On disk from a marketplace, with no entry in settings.json — Claude Code decides these "
     + "by the plugin's own default. You can split one without ever enabling it.");
+
+  adoptedSection(view);
+}
+
+/* What a Split left behind: ordinary items in your config dir that remember
+   which plugin they came from. They already show up under Skills/Commands/…,
+   but only here do you see them as a group, next to the plugin they answer to. */
+function adoptedSection(view) {
+  const rows = (PLUGINS.adopted || []).filter((a) =>
+    !PQ.trim() || (a.name + " " + a.source).toLowerCase().includes(PQ.trim().toLowerCase()));
+  if (!rows.length) return;
+
+  view.append(sectionTitle("Split into your config", rows.length));
+  view.append(el("div.view-head", { style: { marginTop: "-.35rem" },
+    text: "Yours now — edit them freely. Drift just means you have changed your "
+      + "copy, or the plugin moved on; it is only a problem if you meant to stay "
+      + "in step." }));
+
+  const box = el("div.list");
+  for (const a of rows) box.append(adoptedRow(a));
+  view.append(box);
+}
+
+function adoptedRow(a) {
+  const actions = el("div.li-actions", {});
+
+  const edit = mkbtn("btn-sm", "Edit",
+    () => openItemEditor(a.type, a.name, null, a.enabled));
+  edit.prepend(icon("pencil"));
+  actions.append(edit);
+
+  if (a.source_path) {
+    // not btn-ghost: app.css reserves the hover-to-reveal treatment for the
+    // overflow "…" alone, since a dimmed button reads as disabled
+    const view = mkbtn("btn-sm", "Plugin's copy",
+      () => openPath(a.source_path),
+      "Open the plugin's version read-only, to see what yours differs from");
+    view.prepend(icon("eye"));
+    actions.append(view);
+  }
+
+  const menu = [{ label: "Copy path", icon: "copy", fn: () => copyText(a.path, "path") }];
+  if (!a.missing)
+    menu.push({ label: "Re-sync from plugin", icon: "refresh",
+      fn: () => adoptedResync(a), danger: true });
+  const more = mkbtn("btn-sm btn-icon btn-ghost", "",
+    (e) => openMenu(e.currentTarget, menu), "More actions");
+  more.append(icon("chevronDown"));
+  actions.append(more);
+
+  const badges = [badge(a.type.replace(/s$/, ""), "outline")];
+  if (a.missing) {
+    const b = badge("source gone", "warning");
+    b.title = a.source + " is no longer installed — your copy is now the only one";
+    badges.push(b);
+  } else if (a.drift) {
+    const b = badge("differs", "info");
+    b.title = "Your copy and " + a.source + " are no longer identical";
+    badges.push(b);
+  }
+  if (!a.enabled) badges.push(badge("disabled", "secondary"));
+
+  return el("div.list-item", { class: a.enabled ? "" : "off" },
+    el("div.li-main", {},
+      el("span.li-name", { title: a.path, text: a.name }),
+      ...badges),
+    el("span.li-desc", { text: "from " + a.source }),
+    actions);
+}
+
+/* Re-sync overwrites your copy from the plugin. There is no undo — the toast
+   Undo pattern used elsewhere can't put back content we never held — so this
+   one asks first and says plainly what it will destroy. */
+async function adoptedResync(a) {
+  const ok = await mconfirm("Re-sync " + a.name + "?",
+    "This overwrites your copy with the current version from " + a.source
+    + ". Any edits you made to it are lost, and there is no undo.",
+    "Overwrite my copy");
+  if (!ok) return;
+  try {
+    await api("/api/plugin-resync", { type: a.type, name: a.name });
+    toast(a.name + " re-synced from " + a.source);
+    await refresh();
+    renderPlugins(true);
+  } catch (e) { toast(e.message, true); }
 }
 
 function pluginRow(p) {
@@ -2225,6 +2310,13 @@ function itemBadges(s) {
   if (s.long_desc) {
     const b = badge("long desc", "warning");
     b.title = "Description over 1024 characters — it may be truncated";
+    out.push(b);
+  }
+  if (s.source) {
+    // an item split out of a plugin is otherwise indistinguishable from one you
+    // wrote, and that matters before you edit it or re-sync over it
+    const b = badge("from plugin", "outline");
+    b.title = "Split out of " + s.source + " — see the Plugins tab";
     out.push(b);
   }
   return out;

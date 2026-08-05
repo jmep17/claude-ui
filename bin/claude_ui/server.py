@@ -15,8 +15,8 @@ from .items import (Conflict, config_files_state, item_read, item_save,
                     path_read, path_save, scan_items, set_enabled)
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
 from . import schema
-from .plugins import (plugin_resync, plugin_set_enabled, plugins_split,
-                      plugins_state, skill_override_set)
+from .plugins import (adopted_items, plugin_resync, plugin_set_enabled,
+                      plugins_split, plugins_state, skill_override_set)
 from .settings import (hook_test, settings_schema, settings_set, settings_state,
                        start_docs_fetch, suggest_state)
 from .statusline import statusline_save, statusline_state
@@ -147,7 +147,10 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/setup":
             self.send(200, setup_state())
         elif self.path == "/api/plugins":
-            self.send(200, plugins_state())
+            # adopted items are the other half of the plugin story — what a
+            # Split actually left in your config — and only the doctor could
+            # see them before
+            self.send(200, {**plugins_state(), "adopted": adopted_items()})
         else:
             self.send(404, {"error": "not found"})
 

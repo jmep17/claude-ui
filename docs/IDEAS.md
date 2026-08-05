@@ -37,6 +37,7 @@ Shipped in the editor pass. The editor moved out of `app.js` into `static/editor
 | General file access | `core.resolve_editable()` + `/api/path` replace the three-name `CONFIG_FILES` allowlist: anything inside the config dir, plus `~/.claude.json`, plus read-only access to installed plugins. `settings.file_read`/`file_save` are gone. |
 | Markdown preview worth reading | Split view; frontmatter rendered as a card with a live counter against the 1024-char description limit; tables, nested lists, task lists, fenced-code language labels. |
 | Config files are reachable | `DATA.config_files` was computed by `/api/state` and read by nothing; a **Config files** card on the settings tab now spends it. |
+| Adopted items are visible | `adopted_items()` was computed for the doctor only. `/api/plugins` now returns it, and a **Split into your config** section lists each one with **Edit**, **Plugin's copy** (read-only, to see what "differs" means) and **Re-sync** — which finally calls the `plugin-resync` action that shipped with no caller. `scan_items()` also reports `source`, so an adopted item is badged *from plugin* in the inventory where you actually edit it. |
 
 ---
 

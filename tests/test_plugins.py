@@ -54,6 +54,12 @@ class Base(unittest.TestCase):
             m.config_dir = fn
         self.tmpdir.cleanup()
 
+    def split(self, *picks):
+        plugins.plugins_split("demo@mkt", list(picks), disable=False)
+
+    def adopted(self, name):
+        return next(a for a in plugins.adopted_items() if a["name"] == name)
+
     def skill(self, name="helper", plugin=None):
         root = (plugin or self.plugin) / "skills" / name
         write(root / "SKILL.md", f"---\nname: {name}\ndescription: S\n---\nsk")
@@ -328,12 +334,6 @@ class TestSkillOverrides(Base):
 
 
 class TestDrift(Base):
-    def split(self, *picks):
-        plugins.plugins_split("demo@mkt", list(picks), disable=False)
-
-    def adopted(self, name):
-        return next(a for a in plugins.adopted_items() if a["name"] == name)
-
     def test_no_drift_when_identical(self):
         self.skill()
         self.split({"kind": "agents", "name": "alpha"},
@@ -402,6 +402,70 @@ class TestDrift(Base):
     def test_resync_of_a_missing_item_raises(self):
         with self.assertRaises(ValueError):
             plugins.plugin_resync("agents", "ghost")
+
+
+class TestSourcePath(Base):
+    """source_path is what the UI opens to show you the plugin's own copy, so
+    it has to be an absolute, readable *file* — a skill is a directory."""
+
+    def test_points_at_a_readable_file(self):
+        self.split({"kind": "agents", "name": "alpha"})
+        p = self.adopted("alpha")["source_path"]
+        self.assertTrue(os.path.isabs(p))
+        self.assertTrue(pathlib.Path(p).is_file())
+
+    def test_a_skill_points_at_its_skill_md(self):
+        self.skill()
+        self.split({"kind": "skills", "name": "helper"})
+        p = pathlib.Path(self.adopted("helper")["source_path"])
+        self.assertEqual(p.name, "SKILL.md")
+        self.assertTrue(p.is_file())
+
+    def test_empty_when_the_source_is_gone(self):
+        self.split({"kind": "agents", "name": "alpha"})
+        (self.plugin / "agents" / "alpha.md").unlink()
+        a = self.adopted("alpha")
+        self.assertTrue(a["missing"])
+        self.assertEqual(a["source_path"], "")
+
+    def test_is_not_tilded(self):
+        """tilde() is a display transform; reopening a tilde'd path fails."""
+        self.split({"kind": "agents", "name": "alpha"})
+        self.assertFalse(self.adopted("alpha")["source_path"].startswith("~"))
+
+
+class TestItemSource(Base):
+    """scan_items reports the plugin an item was split from, so the inventory
+    can say so where you actually edit it."""
+
+    def setUp(self):
+        super().setUp()
+        from claude_ui import items
+        self.items = items
+        self._items_cfg = items.config_dir
+        items.config_dir = lambda t=self.tmp: t
+
+    def tearDown(self):
+        self.items.config_dir = self._items_cfg
+        super().tearDown()
+
+    def test_adopted_item_reports_its_source(self):
+        plugins.plugins_split("demo@mkt", [{"kind": "agents", "name": "alpha"}],
+                              disable=False)
+        it = next(i for i in self.items.scan_items("agents") if i["name"] == "alpha")
+        self.assertEqual(it["source"], "demo@mkt/agents/alpha")
+
+    def test_a_hand_written_item_has_no_source(self):
+        write(self.tmp / "agents" / "mine.md", md("Mine"))
+        it = next(i for i in self.items.scan_items("agents") if i["name"] == "mine")
+        self.assertEqual(it["source"], "")
+
+    def test_adopted_skill_reports_its_source(self):
+        self.skill()
+        plugins.plugins_split("demo@mkt", [{"kind": "skills", "name": "helper"}],
+                              disable=False)
+        it = next(i for i in self.items.scan_items("skills") if i["name"] == "helper")
+        self.assertEqual(it["source"], "demo@mkt/skills/helper")
 
 
 if __name__ == "__main__":

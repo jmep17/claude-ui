@@ -16,8 +16,8 @@ import json
 import os
 import shutil
 
-from .core import (NAME_RE, _read_json_object, atomic_write, config_dir,
-                   disabled_dir, item_rel, parse_frontmatter, tilde)
+from .core import (NAME_RE, SOURCE_KEY, _read_json_object, atomic_write,
+                   config_dir, disabled_dir, item_rel, parse_frontmatter, tilde)
 from .mcp import mcp_machine_set, validate_mcp_config
 from .settings import settings_set, settings_state
 
@@ -29,11 +29,6 @@ PLUGIN_TYPES = ("agents", "commands", "skills", "output-styles")
 MAX_FILES = 200
 MAX_BYTES = 2 * 1024 * 1024
 MAX_TREE = 8 * 1024 * 1024
-
-# Written into an adopted item's frontmatter. Claude Code ignores unknown keys;
-# the x- prefix marks it as ours. Keeping the fact in the file rather than a
-# sidecar manifest means it survives the user moving or committing the file.
-SOURCE_KEY = "x-claude-ui-source"
 
 # A component whose text expands this only works while its plugin is enabled,
 # which splitting ends. Substring check, no parsing — we only need to warn.
@@ -545,9 +540,15 @@ def adopted_items():
                     drift = not missing and _differs(p, theirs)
                 except OSError:
                     drift = False
+                # absolute and readable: the UI opens the plugin's copy
+                # read-only to show what "drift" actually means. A skill is a
+                # directory, so point at the file, not the folder.
+                their_file = "" if missing else str(
+                    theirs / "SKILL.md" if kind == "skills" else theirs)
                 out.append({"type": kind, "name": name, "source": source,
                             "path": tilde(p), "enabled": enabled,
-                            "missing": missing, "drift": drift})
+                            "missing": missing, "drift": drift,
+                            "source_path": their_file})
     return out
 
 def plugin_resync(type_, name):

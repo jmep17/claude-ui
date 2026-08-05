@@ -3,9 +3,9 @@
 from pathlib import Path
 import json
 
-from .core import (CONFIG_FILES, ITEM_TYPES, atomic_write, config_dir,
-                   disabled_dir, item_rel, parse_frontmatter, resolve_editable,
-                   tilde)
+from .core import (CONFIG_FILES, ITEM_TYPES, SOURCE_KEY, atomic_write,
+                   config_dir, disabled_dir, item_rel, parse_frontmatter,
+                   resolve_editable, tilde)
 
 
 MAX_EDIT = 2 * 1024 * 1024
@@ -50,6 +50,9 @@ def _dir_item(entry, enabled):
         "path": tilde(entry), "mtime": mtime,
         "todo": "TODO" in text,
         "todo_line": _todo_line(text),
+        # the plugin this was split out of, if any — the frontmatter is already
+        # parsed here, so saying where an item came from costs nothing
+        "source": meta.get(SOURCE_KEY) or "",
         "name_mismatch": bool(meta.get("name")) and meta["name"] != entry.name,
         "long_desc": len(meta.get("description", "")) > 1024,
     }
@@ -89,6 +92,7 @@ def _scan_md_type(root, enabled):
             "path": tilde(p), "mtime": mtime,
             "todo": "TODO" in text,
             "todo_line": _todo_line(text),
+            "source": meta.get(SOURCE_KEY) or "",
             "name_mismatch": False,
             "long_desc": len(meta.get("description", "")) > 1024,
         })
