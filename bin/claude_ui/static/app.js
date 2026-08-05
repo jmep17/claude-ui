@@ -10,7 +10,7 @@
 let DATA = { items: {}, config_files: [], config_dir: "", settings: {}, mcp: {}, statusline: {} };
 
 const ITEM_TABS = ["skills", "commands", "agents", "output-styles"];
-const TABS = [...ITEM_TABS, "mcp", "statusline", "setup", "settings", "insight", "costs", "doctor"];
+const TABS = [...ITEM_TABS, "mcp", "statusline", "setup", "settings", "insight", "costs", "doctor", "plugins"];
 
 const TAB_META = {
   "skills": { icon: "sparkles", label: "Skills" },
@@ -24,6 +24,7 @@ const TAB_META = {
   "insight": { icon: "chart", label: "Insight" },
   "costs": { icon: "dollar", label: "Costs" },
   "doctor": { icon: "pulse", label: "Doctor" },
+  "plugins": { icon: "plug", label: "Plugins" },
 };
 
 let TAB = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "skills";
@@ -54,11 +55,12 @@ let CFGEDIT = false;
 function renderHeader() {
   const chip = document.getElementById("cfgchip");
   chip.innerHTML = "";
-  chip.append(
+  // add(), not chip.append() — Element.append(null) inserts the text "null"
+  add(chip, [
     icon("folder"),
     el("span.cc-path", { text: DATA.config_dir || "…" }),
     DATA.default_dir ? null : el("span.cc-warn", { title: "non-default config directory" }, icon("warn")),
-    el("span.cc-caret", {}, icon("chevronDown")));
+    el("span.cc-caret", {}, icon("chevronDown"))]);
   chip.title = DATA.default_dir
     ? DATA.config_dir + " — the default; Claude Code reads it automatically"
     : DATA.config_dir + " — non-default; Claude Code only uses it when CLAUDE_CONFIG_DIR is exported";
@@ -125,6 +127,8 @@ function tabBadge(t) {
   if (t === "settings") return String(Object.keys((DATA.settings || {}).data || {}).length);
   if (t === "mcp") return String(((DATA.mcp || {}).servers || []).filter((s) => s.enabled).length);
   if (t === "doctor" && DOCTOR && DOCTOR.warns) return String(DOCTOR.warns);
+  if (t === "plugins" && PLUGINS)
+    return String(PLUGINS.plugins.filter((p) => p.enabled).length);
   return null;
 }
 
@@ -861,6 +865,210 @@ function renderMcp() {
       actions));
   }
   view.append(list);
+}
+
+// ----------------------------------------------------------------- plugins
+
+let PLUGINS = null;
+let PQ = "";
+
+const KIND_LABEL = { agents: "agent", commands: "command", skills: "skill",
+  "output-styles": "output style", mcp: "MCP server", hooks: "hooks" };
+
+const pluralKind = (k, n) =>
+  n + " " + KIND_LABEL[k] + (n === 1 || k === "hooks" ? "" : "s");
+
+const countLine = (p) =>
+  Object.entries(p.counts).map(([k, n]) => pluralKind(k, n)).join(" · ");
+
+async function renderPlugins(reload) {
+  const view = document.getElementById("pluginsview");
+  if (!PLUGINS || reload) {
+    if (!PLUGINS) { view.innerHTML = ""; view.append(skeletonList(3)); }
+    try { PLUGINS = await api("/api/plugins"); }
+    catch (e) {
+      view.innerHTML = "";
+      view.append(el("div.alert.alert-destructive", {},
+        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
+      return;
+    }
+    if (TAB !== "plugins") return;
+  }
+  view.innerHTML = "";
+  view.append(el("div.view-head", {
+    html: "Plugins on disk under <b>" + esc(PLUGINS.root) + "</b>, as set in <b>settings.json</b>. "
+      + "A plugin is enabled as a whole — <b>Split</b> copies the parts you want into your own "
+      + "config and turns the plugin off, so they survive the next plugin update.",
+  }));
+
+  if (PLUGINS.error) {
+    view.append(el("div.alert.alert-destructive", { style: { marginBottom: "1rem" } },
+      el("span.alert-icon", {}, icon("error")),
+      el("div.alert-body", {},
+        el("div.alert-title", { text: "Could not read the plugin config" }),
+        el("div", { text: PLUGINS.error }))));
+  }
+
+  const all = PLUGINS.plugins;
+  const q = PQ.trim().toLowerCase();
+  const hit = (p) => !q || (p.id + " " + p.description).toLowerCase().includes(q)
+    || p.components.some((c) => c.name.toLowerCase().includes(q));
+  const shown = all.filter(hit);
+
+  const inp = el("input", {
+    type: "search", id: "pq", placeholder: "Filter plugins by name, description or component…",
+    value: PQ,
+    oninput: (e) => {
+      PQ = inp.value;
+      if (e.isComposing) return;
+      refilter("pq", renderPlugins);
+    },
+  });
+  const rescan = mkbtn("btn-sm", "Rescan", () => renderPlugins(true), "Re-read the plugin tree");
+  rescan.prepend(icon("refresh"));
+  view.append(el("div.toolbar", {}, inp,
+    el("div.toolbar-end", {},
+      el("span.muted", { style: { fontSize: ".72rem" },
+        text: shown.length + " of " + all.length + " shown" }),
+      rescan)));
+
+  if (!all.length) {
+    view.append(emptyState("No plugins on this machine",
+      "Install one with `claude plugin install <name>`, then rescan.", "plug"));
+    return;
+  }
+  if (!shown.length) {
+    view.append(emptyState("No matches", "Nothing here matches “" + PQ + "”.", "filter"));
+    return;
+  }
+
+  const section = (state, label, hint) => {
+    const rows = shown.filter((p) => p.state === state);
+    if (!rows.length) return;
+    view.append(sectionTitle(label, rows.length));
+    if (hint) view.append(el("div.view-head", { text: hint, style: { marginTop: "-.35rem" } }));
+    const box = el("div.list");
+    for (const p of rows) box.append(pluginRow(p));
+    view.append(box);
+  };
+  section("enabled", "Enabled");
+  section("disabled", "Disabled");
+  section("available", "Available",
+    "On disk from a marketplace, with no entry in settings.json — Claude Code decides these "
+    + "by the plugin's own default. You can split one without ever enabling it.");
+}
+
+function pluginRow(p) {
+  const splittable = p.components.some((c) => c.adoptable);
+  const actions = el("div.li-actions", {});
+  if (splittable) {
+    const b = mkbtn("btn-sm btn-primary", "Split…", () => pluginSplit(p),
+      "Keep the components you want, drop the rest");
+    b.prepend(icon("split"));
+    actions.append(b);
+  }
+  actions.append(mkbtn("btn-sm" + (p.enabled ? " danger" : ""),
+    p.enabled ? "Disable" : "Enable", () => pluginToggle(p.id, !p.enabled)));
+  const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
+    { label: "Copy path", icon: "copy", fn: () => copyText(p.path, "path") },
+    ...p.components.filter((c) => c.kind === "skills").map((c) => ({
+      label: "Turn off skill “" + c.name + "”", icon: "power",
+      fn: () => skillOverride(c.name, "off"),
+    })),
+  ]), "More actions");
+  more.append(icon("chevronDown"));
+  actions.append(more);
+
+  const badges = [badge(p.marketplace, "outline")];
+  if (p.state === "available") badges.push(badge("not set", "secondary"));
+  if (p.components.some((c) => c.warn)) {
+    const b = badge("plugin-relative paths", "warning");
+    b.title = "Some components expand ${CLAUDE_PLUGIN_ROOT}, which stops resolving once split";
+    badges.push(b);
+  }
+  return el("div.list-item", { class: p.enabled ? "" : "off" },
+    el("div.li-main", {},
+      el("span.li-name", { title: p.path, text: p.name }),
+      ...badges),
+    el("span.li-desc", {
+      text: countLine(p) + (p.description ? " — " + p.description : ""),
+    }),
+    actions);
+}
+
+/* Components grouped for the Split checklist. Anything that can't be copied
+   out — hooks, a ${CLAUDE_PLUGIN_ROOT} MCP server, a name you already use —
+   still shows, greyed, with the reason, so the dialog is the whole picture. */
+function splitGroups(p) {
+  const groups = [];
+  for (const kind of ["agents", "commands", "skills", "output-styles", "mcp", "hooks"]) {
+    const rows = p.components.filter((c) => c.kind === kind).map((c) => {
+      const badges = [];
+      if (c.warn) {
+        const b = badge("plugin-relative", "warning");
+        b.title = c.warn;
+        badges.push(b);
+      }
+      if (c.conflict) badges.push(badge("name taken", "destructive"));
+      return {
+        value: kind + "/" + c.name, name: c.name, desc: c.description,
+        badges, disabled: !c.adoptable || !!c.conflict,
+        reason: c.conflict || c.reason || (c.adoptable ? null : "stays with the plugin"),
+      };
+    });
+    if (rows.length) groups.push({ label: KIND_LABEL[kind] + (kind === "hooks" ? "" : "s"), rows });
+  }
+  return groups;
+}
+
+async function pluginSplit(p) {
+  const groups = splitGroups(p);
+  const keepable = groups.reduce((n, g) => n + g.rows.filter((r) => !r.disabled).length, 0);
+  if (!keepable) { toast("Nothing in " + p.name + " can be split out", true); return; }
+  const r = await modal({
+    title: "Split " + p.name,
+    text: "Keep the components you want — they are copied into your config and become "
+      + "ordinary items. The rest stay with the plugin"
+      + (p.state === "available" ? "." : ", which is turned off.")
+      + " Skills can also be turned off individually without splitting.",
+    wide: true,
+    fields: [{ id: "keep", type: "checklist", groups }],
+    ok: "Split",
+  });
+  if (!r) return;
+  const picks = (r.keep || []).map((v) => {
+    const i = v.indexOf("/");
+    return { kind: v.slice(0, i), name: v.slice(i + 1) };
+  });
+  if (!picks.length) { toast("Nothing selected — nothing changed"); return; }
+  try {
+    const res = await api("/api/plugin-split", { id: p.id, picks, disable: p.state !== "available" });
+    toast("Kept " + res.kept + " of " + res.total + " from " + p.name
+      + (res.disabled ? " · plugin disabled" : "") + " · applies to new sessions",
+      false, res.disabled
+        ? { label: "Re-enable plugin", fn: () => pluginToggle(p.id, true) }
+        : null);
+    await refresh();
+    renderPlugins(true);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function pluginToggle(id, enabled) {
+  try {
+    await api("/api/plugin-toggle", { id, enabled });
+    toast(id.split("@")[0] + (enabled ? " enabled" : " disabled") + " · applies to new sessions");
+    await refresh();
+    renderPlugins(true);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function skillOverride(name, value) {
+  try {
+    await api("/api/skill-override", { name, value });
+    toast("Skill " + name + " set to " + value + " · applies to new sessions",
+      false, { label: "Undo", fn: () => skillOverride(name, null) });
+    await refresh();
+  } catch (e) { toast(e.message, true); }
 }
 
 // ------------------------------------------------------------------- setup
@@ -2104,7 +2312,8 @@ function render() {
   renderHeader();
   renderTabs();
   const views = { settings: "settingsview", mcp: "mcpview", statusline: "stlview",
-    setup: "setupview", insight: "insightview", costs: "costsview", doctor: "doctorview" };
+    setup: "setupview", insight: "insightview", costs: "costsview", doctor: "doctorview",
+    plugins: "pluginsview" };
   const isEditor = !!EDITING;
   document.getElementById("editorview").hidden = !isEditor;
   document.getElementById("itemsview").hidden = isEditor || !ITEM_TABS.includes(TAB);
@@ -2123,6 +2332,7 @@ function render() {
   if (TAB === "insight") { renderInsight(); return; }
   if (TAB === "costs") { renderCosts(); return; }
   if (TAB === "doctor") { renderDoctor(); return; }
+  if (TAB === "plugins") { renderPlugins(); return; }
 }
 
 async function refresh() {
@@ -2175,7 +2385,8 @@ document.addEventListener("keydown", (e) => {
     closeDropdown();
     if (EDITING) closeEditor();
   } else if (e.key === "/") {
-    const f = document.getElementById("iq") || document.getElementById("setq");
+    // whichever view is showing owns the only visible filter box
+    const f = document.querySelector(".toolbar input[type=search]");
     if (f) { e.preventDefault(); f.focus(); f.select(); }
   } else if (e.key === "?") {
     openPalette();

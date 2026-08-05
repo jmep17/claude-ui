@@ -15,6 +15,13 @@ CONFIG_FILE = REPO / ".claude-ui.json"
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+def item_rel(name):
+    """Validate a possibly-nested item name ('git/pr') into a relative Path."""
+    parts = [p for p in (name or "").split("/") if p]
+    if not parts or any(not NAME_RE.match(p) for p in parts):
+        raise ValueError("bad name")
+    return Path(*parts)
+
 # the four item-type directories inside the Claude config dir
 ITEM_TYPES = {
     "skills": {"kind": "dir"},

@@ -24,6 +24,7 @@ Shipped in the design-system pass; listed so the backlog stays honest.
 | Docs deep-link per setting | `SETTING_DOCS` maps key prefixes to the right docs page; the link appears on row hover. |
 | Serve `static/` from a list | `_STATIC_NAMES` in `server.py` — adding a frontend file no longer needs a routing edit. |
 | 53 more settings keys | See the settings coverage note at the bottom. |
+| Plugins tab, with Split | Was idea 13. `plugins.py` inventories `<config>/plugins/`, the tab splits a plugin into your own items, `doctor` and `insight_budget()` now both see plugin components. |
 
 ---
 
@@ -152,14 +153,20 @@ suppression are all reimplemented in JS, and the two will drift. Pipe a
 realistic payload through the actual generated script and render its stdout.
 It turns the preview from a drawing into proof.
 
-### 13. Plugins and marketplaces inventory — M
+### 13. Rename-on-split, and marketplace management — M
 
-`doctor.py` already reaches into `~/.claude/plugins/*/*/skills/*/SKILL.md` to
-warn about shadowing, and the schema now has `enabledPlugins`,
-`pluginConfigs` and `extraKnownMarketplaces` — but there is no view. Plugins are
-the fastest-growing source of items in a config and are invisible here: the
-insight tab's context budget, the inventory counts, and the skill list all
-silently under-report.
+The Plugins tab shipped (see Done). Two pieces were deliberately left out.
+
+**Rename on split.** A component whose name you already use renders greyed with
+a `name taken` badge and cannot be ticked; the only way through is to rename
+your own item first. An inline rename input per conflicting row would fix that,
+but it breaks the one-decision-one-confirm shape the dialog was built around, so
+it wants its own thought.
+
+**Marketplaces.** `plugins_state()` returns the marketplace list and the schema
+has `extraKnownMarketplaces`, but nothing adds, updates or removes one — that is
+still `claude plugin marketplace` territory. Worth doing only alongside install,
+which means shelling out to the CLI: the first thing in this app that would.
 
 ---
 

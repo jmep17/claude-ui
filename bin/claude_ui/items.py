@@ -3,8 +3,8 @@
 from pathlib import Path
 import json
 
-from .core import (CONFIG_FILES, ITEM_TYPES, NAME_RE, atomic_write, config_dir,
-                   disabled_dir, parse_frontmatter, tilde)
+from .core import (CONFIG_FILES, ITEM_TYPES, atomic_write, config_dir,
+                   disabled_dir, item_rel, parse_frontmatter, tilde)
 
 
 MAX_EDIT = 2 * 1024 * 1024
@@ -13,13 +13,6 @@ def item_root(type_, enabled=True):
     """Directory holding a type's items: live, or the disabled parking area."""
     base = config_dir() if enabled else disabled_dir()
     return base / type_
-
-def item_rel(name):
-    """Validate a possibly-nested item name ('git/pr') into a relative Path."""
-    parts = [p for p in (name or "").split("/") if p]
-    if not parts or any(not NAME_RE.match(p) for p in parts):
-        raise ValueError("bad name")
-    return Path(*parts)
 
 def resolve_item(type_, name, enabled=True):
     if type_ not in ITEM_TYPES:

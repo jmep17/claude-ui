@@ -17,6 +17,13 @@ owns, links, tracks, or syncs anything:
   valid-option dropdowns and live value suggestions fetched from the public
   Claude Code docs.
 - **MCP** inventory and toggling of user-scope servers (`~/.claude.json`).
+- **Plugins** inventory of everything under `<config>/plugins/`, with per-plugin
+  enablement (`enabledPlugins`) and **Split** — Claude Code enables a plugin as
+  a whole, so splitting copies just the components you tick into your own
+  `agents/`, `commands/` and `skills/`, then turns the plugin off. Copies rather
+  than masks, because a marketplace is a tarball extract with no git history and
+  an update replaces the tree wholesale. Each copy records where it came from in
+  its own frontmatter, so Doctor can flag it when the two diverge.
 - **Statusline** generator — a setup piece that writes a dependency-free
   statusline script into the config dir and points the `statusLine` key at it.
   Setup pieces are idempotent, derive their installed state by inspection, and
@@ -79,8 +86,8 @@ The Claude Code config dir is resolved in this order:
 ## Layout
 
 `bin/claude-ui` is a thin launcher; the code lives in `bin/claude_ui/*.py`
-(core → items/mcp/settings → statusline/insight/assist/setup → doctor →
-server, a clean DAG). The frontend is plain files in `bin/claude_ui/static/`
+(core → settings → items/mcp/plugins → statusline/insight/assist/setup →
+doctor → server, a clean DAG). The frontend is plain files in `bin/claude_ui/static/`
 (no build step), layered theme → components → app, with `ui.js` before
 `app.js`.
 

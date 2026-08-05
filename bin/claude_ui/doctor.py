@@ -9,6 +9,7 @@ import time
 from .core import ITEM_TYPES, _read_json_object, config_dir, tilde
 from .items import scan_items
 from .mcp import mcp_state
+from .plugins import adopted_items, plugins_state
 from .settings import SETTINGS_SCHEMA, settings_state
 from .statusline import STATUSLINE_SCRIPT, statusline_paths
 
@@ -118,20 +119,30 @@ def doctor():
                 add("info", t, f"{it['name']}: description has no \"Use when …\" "
                                "trigger — Claude may not know when to load it")
 
-    # plugin skills sharing a name with config skills (one shadows the other)
-    plugins_dir = Path.home() / ".claude" / "plugins"
-    if plugins_dir.is_dir():
-        ours = {i["name"] for i in scan_items("skills") if i["enabled"]}
-        try:
-            for smd in list(plugins_dir.glob("*/*/skills/*/SKILL.md"))[:500] + \
-                       list(plugins_dir.glob("*/*/*/skills/*/SKILL.md"))[:500]:
-                pname = smd.parent.name
-                if pname in ours:
-                    add("info", "plugins",
-                        f"installed plugin skill '{pname}' shares a name with "
-                        f"your skill ({smd.parent}) — one may shadow the other")
-        except OSError:
-            pass
+    # enabled plugins shipping a component that shares a name with one of ours
+    # (either side: adopting on top of a disabled twin is its own breakage)
+    pst = plugins_state()
+    if pst["error"]:
+        add("warn", "plugins", f"{pst['root']}: {pst['error']}")
+    ours = {t: {i["name"] for i in scan_items(t)} for t in ITEM_TYPES}
+    for p in pst["plugins"]:
+        if not p["enabled"]:
+            continue
+        for c in p["components"]:
+            if c["name"] in ours.get(c["kind"], ()):
+                add("info", "plugins",
+                    f"{p['id']} ships {c['kind'][:-1]} '{c['name']}', which shares "
+                    "a name with yours — one may shadow the other")
+
+    # items split out of a plugin, and whether they still match their source
+    for a in adopted_items():
+        if a["missing"]:
+            add("info", "plugins",
+                f"{a['name']}: split from {a['source']}, which is no longer installed")
+        elif a["drift"]:
+            add("warn", "plugins",
+                f"{a['name']}: differs from {a['source']} — the plugin may have "
+                "been updated, or you edited your copy")
 
     order = {"warn": 0, "info": 1}
     finds.sort(key=lambda f: (order[f["level"]], f["area"]))

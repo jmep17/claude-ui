@@ -13,6 +13,8 @@ import webbrowser
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
 from .items import config_files_state, item_read, item_save, scan_items, set_enabled
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
+from .plugins import (plugin_resync, plugin_set_enabled, plugins_split,
+                      plugins_state, skill_override_set)
 from .settings import (SETTINGS_SCHEMA, file_read, file_save, hook_test,
                        settings_set, settings_state, start_docs_fetch,
                        suggest_state)
@@ -132,6 +134,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, doctor())
         elif self.path == "/api/setup":
             self.send(200, setup_state())
+        elif self.path == "/api/plugins":
+            self.send(200, plugins_state())
         else:
             self.send(404, {"error": "not found"})
 
@@ -185,6 +189,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, {"ok": True})
             elif action == "mcp-test":
                 self.send(200, mcp_test(req.get("name", "")))
+            elif action == "plugin-toggle":
+                plugin_set_enabled(req.get("id", ""), bool(req.get("enabled")))
+                self.send(200, {"ok": True})
+            elif action == "plugin-split":
+                self.send(200, {"ok": True, **plugins_split(
+                    req.get("id", ""), req.get("picks") or [],
+                    bool(req.get("disable", True)))})
+            elif action == "plugin-resync":
+                self.send(200, {"ok": True, **plugin_resync(
+                    req.get("type", ""), req.get("name", ""))})
+            elif action == "skill-override":
+                skill_override_set(req.get("name", ""), req.get("value"))
+                self.send(200, {"ok": True})
             elif action == "assist":
                 self.send(200, assist(req.get("mode", ""), req.get("custom", ""),
                                       req.get("content", ""), req.get("path", "")))

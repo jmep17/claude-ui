@@ -95,6 +95,8 @@ const ICONS = {
   save: '<path d="M15.2 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.8Z"/><path d="M17 21v-7H7v7M7 3v5h8"/>',
   filter: '<path d="M3 5h18l-7 8v6l-4 2v-8Z"/>',
   copy: '<rect width="13" height="13" x="8" y="8" rx="2"/><path d="M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2"/>',
+  plug: '<path d="M12 22v-5M9 8V2M15 8V2"/><path d="M18 8v4a6 6 0 0 1-12 0V8Z"/>',
+  split: '<path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M21 3 3 21"/><path d="m15 15 6 6v-5"/>',
 };
 
 function icon(name, cls) {
@@ -374,6 +376,8 @@ function modal({ title, text, fields = [], ok = "OK", cancel = "Cancel", danger 
           }
         } else if (f.type === "textarea") {
           inp = el("textarea", { value: f.value || "", rows: f.rows || 5 });
+        } else if (f.type === "checklist") {
+          inp = checklist(f);
         } else {
           inp = el("input", { type: "text", value: f.value || "", placeholder: f.placeholder || "" });
           if (f.mono) inp.className = "mono";
@@ -398,8 +402,8 @@ function modal({ title, text, fields = [], ok = "OK", cancel = "Cancel", danger 
       if (restore && restore.isConnected && restore.focus) restore.focus();
       resolve(val);
     };
-    const submit = () => done(Object.fromEntries(
-      Object.entries(inputs).map(([k, i]) => [k, String(i.value).trim()])));
+    const submit = () => done(Object.fromEntries(Object.entries(inputs).map(
+      ([k, i]) => [k, Array.isArray(i.value) ? i.value : String(i.value).trim()])));
 
     const focusables = () => [...content.querySelectorAll(
       'button:not(:disabled), input:not([hidden]):not(:disabled), select:not([hidden]), textarea, [tabindex]:not([tabindex="-1"])')]
@@ -483,6 +487,60 @@ function switchToggle(label, checked, onchange, title) {
     },
   });
   return el("label.switch-row", { title: title || "" }, sw, el("span", { text: label }));
+}
+
+/* ---------------------------------------------------------------- checklist --
+   A grouped multi-select field for modal(). Groups are
+   {label, rows: [{value, name, desc, badges, disabled, reason}]}; rows that
+   can't be picked render greyed with their reason in place of a checkbox.
+   Exposes .value as the array of checked values, which modal()'s submit()
+   passes through untouched. */
+function checklist({ groups = [], hint }) {
+  const node = el("div.checklist");
+  const count = el("span.cl-count");
+  const boxes = [];
+
+  const sync = () => {
+    const on = boxes.filter((b) => b.checked).length;
+    count.textContent = on + " of " + boxes.length + " kept";
+  };
+  const setAll = (v) => { for (const b of boxes) b.checked = v; sync(); };
+
+  node.append(el("div.cl-head", {},
+    count,
+    el("div.cl-head-actions", {},
+      el("button.btn.btn-sm.btn-ghost", { type: "button", text: "All", onclick: () => setAll(true) }),
+      el("button.btn.btn-sm.btn-ghost", { type: "button", text: "None", onclick: () => setAll(false) }))));
+
+  for (const g of groups) {
+    if (!g.rows || !g.rows.length) continue;
+    node.append(el("div.cl-group", {}, sectionTitle(g.label, g.rows.length)));
+    for (const r of g.rows) {
+      const row = el("label.cl-row", { class: r.disabled ? "off" : "", title: r.reason || "" });
+      if (r.disabled) {
+        row.append(el("span.cl-slot"));
+      } else {
+        const box = el("input", { type: "checkbox", value: r.value, checked: r.checked !== false });
+        box.onchange = sync;
+        boxes.push(box);
+        row.append(box);
+      }
+      row.append(el("div.cl-body", {},
+        el("div.cl-line", {},
+          el("span.li-name", { text: r.name }),
+          ...(r.badges || [])),
+        el("span.li-desc", { text: r.reason || r.desc || "" })));
+      node.append(row);
+    }
+  }
+  if (hint) node.append(el("div.field-hint", { text: hint }));
+  sync();
+
+  Object.defineProperty(node, "value", {
+    get: () => boxes.filter((b) => b.checked).map((b) => b.value),
+  });
+  node.fselTrigger = boxes[0] || null;
+  return node;
 }
 
 /* ---------------------------------------------------------------- combobox --

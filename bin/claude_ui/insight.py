@@ -9,6 +9,7 @@ import time
 
 from .core import ITEM_TYPES, config_dir, read_cfg, tilde
 from .items import scan_items
+from .plugins import PLUGIN_TYPES, plugins_state
 
 
 def _tok(s):
@@ -25,6 +26,14 @@ def insight_budget():
                 for it in items if it["enabled"] and not it.get("broken")]
         rows.sort(key=lambda r: -r["tokens"])
         per_type[t] = {"tokens": sum(r["tokens"] for r in rows), "items": rows}
+    # enabled plugins load their components alongside yours, so a budget that
+    # counted only the config dir would under-report every plugin you have on
+    rows = [{"name": f"{p['name']}:{c['name']}",
+             "tokens": _tok(c["name"]) + _tok(c.get("description", ""))}
+            for p in plugins_state()["plugins"] if p["enabled"]
+            for c in p["components"] if c["kind"] in PLUGIN_TYPES]
+    rows.sort(key=lambda r: -r["tokens"])
+    per_type["plugins"] = {"tokens": sum(r["tokens"] for r in rows), "items": rows}
     return {"claude_md": md_tok, "types": per_type,
             "total": md_tok + sum(v["tokens"] for v in per_type.values())}
 
