@@ -24,6 +24,7 @@ Shipped in the design-system pass; listed so the backlog stays honest.
 | Docs deep-link per setting | `SETTING_DOCS` maps key prefixes to the right docs page; the link appears on row hover. |
 | Serve `static/` from a list | `_STATIC_NAMES` in `server.py` — adding a frontend file no longer needs a routing edit. |
 | 53 more settings keys | See the settings coverage note at the bottom. |
+| **#23** Import/export a config bundle | Now the **Backup** tab. `backup.py` zips a ticked subset (items, config files, statusline, `mcpServers`, the plugin list, transcripts) into `$XDG_DATA_HOME/claude-ui/backups` — outside the config dir, because `~/.claude/backups` is Claude Code's own and dies with an uninstall. Restore inspects first: sha256 per entry gives *new* / *identical* / *differs* with a `difflib` diff, and only ticked rows are written. Transcripts go in whole, so cost history comes back exact with no change to `insight.py`. |
 | Plugins tab, with Split | Was idea 13. `plugins.py` inventories `<config>/plugins/`, the tab splits a plugin into your own items, `doctor` and `insight_budget()` now both see plugin components. |
 
 Shipped in the editor pass. The editor moved out of `app.js` into `static/editor.js`.
@@ -243,10 +244,14 @@ exactly one entry. Candidates following the same derived-state contract: a
 session-start git-identity hook, a stop-hook desktop notifier, a safe-defaults
 permissions preset, shell completions.
 
-### 23. Import/export a config bundle — L
-`zipfile` is stdlib. Export a selected subset with a manifest; import via a
-per-file dry-run diff (new / would-overwrite / identical). The two real jobs are
-"set up my new laptop" and "share these three skills with a colleague".
+### 23. Import/export a config bundle — *(shipped; see Done)*
+What is left of it: **sharing**. The Backup tab does "set up my new laptop"; it
+does not do "send these three skills to a colleague" — every group is
+all-or-nothing, there is no per-item pick, and the archive carries absolute
+paths and a machine name in its manifest. A "share" mode over the same zip
+writer, limited to items and with the machine details dropped, is a small
+follow-up. Plugin *trees* are also deliberately excluded, so an archive from a
+machine whose marketplace has since vanished cannot rebuild them.
 
 ### 24. Keybindings editor UI — L
 `keybindings.json` is in `CONFIG_FILES` but only reachable as a raw textarea.

@@ -10,6 +10,8 @@ import sys
 import urllib.parse
 import webbrowser
 
+from .backup import (backup_create, backup_delete, backup_inspect, backup_list,
+                     backup_plan, backup_restore, set_backup_dir)
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
 from .items import (Conflict, config_files_state, item_read, item_save,
                     item_set_model, path_read, path_save, scan_items,
@@ -153,6 +155,15 @@ class Handler(BaseHTTPRequestHandler):
             # Split actually left in your config — and only the doctor could
             # see them before
             self.send(200, {**plugins_state(), "adopted": adopted_items()})
+        elif self.path == "/api/backup":
+            self.send(200, {**backup_list(), "plan": backup_plan()})
+        elif self.path.startswith("/api/backup-inspect?"):
+            # the dry run: every file in the archive against what's on disk now
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                self.send(200, backup_inspect((q.get("name") or [""])[0]))
+            except (ValueError, OSError) as e:
+                self.send(400, {"error": str(e)})
         elif self.path.startswith("/api/plugin-detail?"):
             # the env vars a plugin reads, found by walking its tree — too
             # expensive for /api/plugins, which the doctor and insight also hit
@@ -238,6 +249,17 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "skill-override":
                 skill_override_set(req.get("name", ""), req.get("value"))
                 self.send(200, {"ok": True})
+            elif action == "backup-dir":
+                set_backup_dir((req.get("path") or "").strip())
+                self.send(200, {"ok": True})
+            elif action == "backup-create":
+                self.send(200, {"ok": True, **backup_create(
+                    req.get("picks") or [], req.get("note") or "")})
+            elif action == "backup-restore":
+                self.send(200, {"ok": True, **backup_restore(
+                    req.get("name", ""), req.get("paths") or [])})
+            elif action == "backup-delete":
+                self.send(200, {"ok": True, **backup_delete(req.get("name", ""))})
             elif action == "assist":
                 self.send(200, assist(req.get("mode", ""), req.get("custom", ""),
                                       req.get("content", ""), req.get("path", "")))

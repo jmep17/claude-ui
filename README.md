@@ -38,6 +38,8 @@ owns, links, tracks, or syncs anything:
   are removable.
 - **Doctor** for machine health: broken symlinks, leftover backups, hooks or
   statusline entries pointing at missing executables, and more.
+- **Backup** — a zip of the parts of your config that took work to build, kept
+  outside the config dir, and restored file by file after a dry run. See below.
 
 ## Interface
 
@@ -104,6 +106,42 @@ The Claude Code config dir is resolved in this order:
 before `app.js`.
 
 Tests are stdlib `unittest`: `python3 -m unittest discover tests`.
+
+## Backup and restore
+
+The Backup tab writes a zip you can reinstall Claude Code around. Tick what goes
+in:
+
+| Group | What it holds |
+| :--- | :--- |
+| Skills, commands, agents, output styles | Every file of every item, enabled and in `disabled/` |
+| CLAUDE.md, settings.json, keybindings.json | Your memory file, all settings, key bindings |
+| Statusline | `statusline.json` and the generated `statusline.sh`, executable bit kept |
+| MCP servers | The `mcpServers` map from `~/.claude.json` |
+| Plugin list and marketplaces | Which plugins and marketplaces you had — not their installed trees |
+| Transcripts | `projects/**.jsonl`, which is where cost history comes from |
+
+Three things are worth knowing:
+
+- **Archives are kept outside the config dir**, defaulting to
+  `$XDG_DATA_HOME/claude-ui/backups` (`~/.local/share/…`) and settable from the
+  tab. Not `~/.claude/backups`: that is Claude Code's own, is pruned by
+  `cleanupPeriodDays`, and is inside the directory an uninstall removes.
+- **MCP configs are copied verbatim, credentials included.** A redacted copy
+  would not restore. The tab says so before you create one, and any archive
+  holding them is badged. Only the `mcpServers` map is taken — never the whole
+  `~/.claude.json`, which also holds your project history and account.
+- **Restore is a dry run first.** Every file is reported as *new*, *identical*
+  or *differs* with a diff, and only the rows you leave ticked are written.
+  Nothing is ever deleted, and MCP servers are merged into `~/.claude.json` one
+  at a time so the rest of that file is untouched. A member that would land
+  outside the config dir — including one whose target is a symlink pointing out
+  of it — is refused rather than followed.
+
+Reinstalling: restore the archive, restart Claude Code, and reinstall plugins
+from their marketplaces (`claude plugin install`). Costs come back with the
+transcripts — the Costs tab rescans them on next open, and its per-message
+de-duplication means the totals match what they were.
 
 ## Settings help
 

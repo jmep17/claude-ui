@@ -10,7 +10,7 @@
 let DATA = { items: {}, config_files: [], config_dir: "", settings: {}, mcp: {}, statusline: {} };
 
 const ITEM_TABS = ["skills", "commands", "agents", "output-styles"];
-const TABS = [...ITEM_TABS, "mcp", "statusline", "setup", "settings", "insight", "costs", "doctor", "plugins"];
+const TABS = [...ITEM_TABS, "mcp", "statusline", "setup", "settings", "insight", "costs", "doctor", "plugins", "backup"];
 
 const TAB_META = {
   "skills": { icon: "sparkles", label: "Skills" },
@@ -25,6 +25,7 @@ const TAB_META = {
   "costs": { icon: "dollar", label: "Costs" },
   "doctor": { icon: "pulse", label: "Doctor" },
   "plugins": { icon: "plug", label: "Plugins" },
+  "backup": { icon: "archive", label: "Backup" },
 };
 
 let TAB = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "skills";
@@ -2617,6 +2618,396 @@ function renderInventory() {
     view.append(emptyState("No matches", "Nothing here matches “" + IQ + "”.", "filter"));
 }
 
+/* ------------------------------------------------------------------ backup --
+   The reinstall story. Everything else in this app edits config in place; this
+   is the one view whose output lives outside the config dir, because the whole
+   point is to survive that directory being deleted.
+
+   Restore is never one click: /api/backup-inspect answers new / same / differs
+   for every file first, and only the rows you leave ticked are written. That
+   report is an inline panel rather than a modal — a full backup is thousands
+   of transcripts, and a diff you can expand does not belong in a dialog. */
+
+let BACKUP = null;      // /api/backup payload
+let BPICKS = null;      // Set of ticked group ids; null until first render
+let BREPORT = null;     // the open dry-run report, or null
+let BSHOWSAME = false;  // identical files are collapsed by default
+
+const fbytes = (n) => {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (n >= 10 || i === 0 ? Math.round(n) : n.toFixed(1)) + " " + u[i];
+};
+
+const fwhen = (iso) => {
+  const d = new Date(iso || "");
+  return isNaN(d) ? (iso || "") : d.toLocaleString();
+};
+
+async function renderBackup(reload) {
+  const view = document.getElementById("backupview");
+  if (!BACKUP || reload) {
+    if (!BACKUP) { view.innerHTML = ""; view.append(skeletonList(3)); }
+    try { BACKUP = await api("/api/backup"); }
+    catch (e) {
+      view.innerHTML = "";
+      view.append(el("div.alert.alert-destructive", {},
+        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
+      return;
+    }
+    if (TAB !== "backup") return;
+  }
+  if (!BPICKS) BPICKS = new Set(BACKUP.plan.filter((g) => g.files).map((g) => g.id));
+
+  view.innerHTML = "";
+  view.append(el("div.view-head", {
+    html: "Copy the parts of your config that took work to build into a zip, so a "
+      + "reinstall costs you nothing. Restoring puts them back <b>file by file</b>, "
+      + "after showing you what would change. Transcripts are included because your "
+      + "cost history is computed from them — without them the Costs tab starts at zero.",
+  }));
+
+  view.append(backupDestCard());
+  if (BREPORT) { view.append(restorePanel()); return; }
+  view.append(backupCreateCard());
+  view.append(backupArchivesCard());
+}
+
+function backupDestCard() {
+  const card = el("div.card", { style: { marginBottom: "1.25rem" } });
+  card.append(el("div.card-header", {},
+    el("div", {},
+      el("div.card-title", { text: "Where archives are kept" }),
+      el("div.card-description", {
+        text: "Outside the config directory on purpose — an uninstall that removes "
+          + "~/.claude must not take your backups with it." }))));
+  const actions = el("div.dactions", {},
+    mkbtn("btn-sm", "Change…", changeBackupDir),
+    mkbtn("btn-sm btn-ghost", "Copy path", () => copyText(BACKUP.dir, "path")));
+  if (!BACKUP.default_dir)
+    actions.append(mkbtn("btn-sm btn-ghost", "Reset", async () => {
+      try {
+        await api("/api/backup-dir", { path: "" });
+        toast("Backup directory reset to the default");
+        renderBackup(true);
+      } catch (e) { toast(e.message, true); }
+    }, "Back to the default location"));
+  card.append(el("div.card-content.flush", {},
+    el("div.drow", {}, icon("folder"),
+      el("span.dmsg.dmono", { text: BACKUP.dir }),
+      BACKUP.exists ? null : badge("not created yet", "outline"),
+      BACKUP.default_dir ? null : badge("custom", "info"),
+      actions)));
+  return card;
+}
+
+async function changeBackupDir() {
+  const r = await modal({
+    title: "Backup directory",
+    text: "Absolute path (or ~/…) where archives are written. Must be outside the "
+        + "config directory. Stored machine-locally in .claude-ui.json.",
+    fields: [{ id: "p", label: "Path", value: BACKUP.dir, mono: true }],
+    ok: "Save",
+  });
+  if (!r) return;
+  try {
+    await api("/api/backup-dir", { path: r.p });
+    toast("Backup directory updated");
+    renderBackup(true);
+  } catch (e) { toast(e.message, true); }
+}
+
+function backupCreateCard() {
+  const card = el("div.card", { style: { marginBottom: "1.25rem" } });
+  card.append(el("div.card-header", {},
+    el("div", {},
+      el("div.card-title", { text: "Create a backup" }),
+      el("div.card-description", { text: "Pick what goes in. Nothing is moved or changed — this only reads." }))));
+
+  const body = el("div.card-content.flush");
+  const totals = el("span.muted", { style: { fontSize: ".72rem" } });
+  const warn = el("div", {});
+
+  const sync = () => {
+    const picked = BACKUP.plan.filter((g) => BPICKS.has(g.id));
+    totals.textContent = picked.reduce((n, g) => n + g.files, 0) + " files · "
+      + fbytes(picked.reduce((n, g) => n + g.bytes, 0)) + " before compression";
+    warn.innerHTML = "";
+    if (picked.some((g) => g.secrets && g.files))
+      warn.append(el("div.alert.alert-warning", { style: { margin: "0 1.125rem 1rem" } },
+        el("span.alert-icon", {}, icon("key")),
+        el("div.alert-body", {},
+          el("div.alert-title", { text: "This archive will contain credentials" }),
+          el("div", { text: "MCP server configs are copied exactly as they are, API keys "
+            + "and tokens included — a redacted copy would not restore. Treat the zip "
+            + "like the secrets inside it." }))));
+  };
+
+  for (const g of BACKUP.plan) {
+    const box = el("input", {
+      type: "checkbox", checked: BPICKS.has(g.id), disabled: !g.files,
+      onchange: (e) => {
+        if (e.currentTarget.checked) BPICKS.add(g.id); else BPICKS.delete(g.id);
+        sync();
+      },
+    });
+    body.append(el("label.drow", { style: { cursor: g.files ? "pointer" : "default" } },
+      box,
+      el("span.dmsg", {},
+        el("div", {}, el("b", { text: g.label }),
+          g.secrets ? el("span", { style: { marginLeft: ".4rem" } }, badge("secrets", "warning")) : null),
+        el("div.muted", { style: { fontSize: ".72rem" }, text: g.note })),
+      el("span.muted", { style: { fontSize: ".72rem", whiteSpace: "nowrap" },
+        text: g.files ? g.files + " files · " + fbytes(g.bytes) : "nothing here" })));
+  }
+  sync();
+  card.append(body, warn);
+
+  const note = el("input", { type: "text", placeholder: "Optional note — “before wiping the laptop”" });
+  const make = mkbtn("btn btn-primary", "Create backup", async () => {
+    const picks = [...BPICKS];
+    if (!picks.length) { toast("Nothing selected", true); return; }
+    make.disabled = true;
+    make.textContent = "Writing…";
+    try {
+      const r = await api("/api/backup-create", { picks, note: note.value });
+      toast(r.name + " — " + r.files + " files, " + fbytes(r.zip_bytes));
+      renderBackup(true);
+    } catch (e) {
+      toast(e.message, true);
+      make.disabled = false;
+      make.textContent = "Create backup";
+    }
+  });
+  make.prepend(icon("download"));
+  card.append(el("div.card-content", { style: { display: "flex", gap: ".5rem", alignItems: "center" } },
+    note, totals, el("span.spring", { style: { flex: "1" } }), make));
+  return card;
+}
+
+function backupArchivesCard() {
+  const card = el("div.card");
+  card.append(el("div.card-header", {},
+    el("div", {},
+      el("div.card-title", { text: "Archives" }),
+      el("div.card-description", { text: "Restore shows you every file it would touch before it writes anything." }))));
+  const body = el("div.card-content.flush");
+  if (!BACKUP.archives.length) {
+    card.append(el("div.card-content", {},
+      emptyState("No backups yet", "Pick what you want above and create one.", "archive")));
+    return card;
+  }
+  for (const a of BACKUP.archives) body.append(archiveRow(a));
+  card.append(body);
+  return card;
+}
+
+function archiveRow(a) {
+  const actions = el("div.dactions", {});
+  if (!a.error) {
+    const b = mkbtn("btn-sm btn-primary", "Restore…", () => openRestore(a.name),
+      "See what it would change, then pick");
+    b.prepend(icon("upload"));
+    actions.append(b);
+  }
+  const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
+    { label: "Copy path", icon: "copy", fn: () => copyText(a.path, "path") },
+    { label: "Delete backup", icon: "trash", danger: true, fn: () => deleteArchive(a) },
+  ]), "More actions");
+  more.append(icon("chevronDown"));
+  actions.append(more);
+
+  const badges = (a.groups || []).map((g) => badge(g, "outline"));
+  if (a.contains_secrets) {
+    const b = badge("secrets", "warning");
+    b.title = "Contains MCP server configs, credentials included";
+    badges.push(b);
+  }
+  if (a.error) badges.push(badge("unreadable", "destructive"));
+
+  const desc = a.error ? a.error
+    : fwhen(a.created_at) + " · " + a.files + " files · " + fbytes(a.zip_bytes) + " on disk"
+      + (a.bytes ? " (" + fbytes(a.bytes) + " uncompressed)" : "")
+      + (a.note ? " · " + a.note : "");
+
+  return el("div.drow", {}, icon("archive"),
+    el("span.dmsg", {},
+      el("div", {}, el("b", { class: "dmono", text: a.name }),
+        ...badges.map((b) => el("span", { style: { marginLeft: ".4rem" } }, b))),
+      el("div.muted", { style: { fontSize: ".72rem" }, text: desc })),
+    actions);
+}
+
+async function deleteArchive(a) {
+  const ok = await mconfirm("Delete " + a.name + "?",
+    "The archive file is removed from " + BACKUP.dir + ". Your live config is untouched, "
+    + "but this copy of it is gone for good.", "Delete");
+  if (!ok) return;
+  try {
+    await api("/api/backup-delete", { name: a.name });
+    toast(a.name + " deleted");
+    renderBackup(true);
+  } catch (e) { toast(e.message, true); }
+}
+
+/* ---------------------------------------------------------------- restore --
+   The dry run. Every row already knows its verdict; the ticks decide what gets
+   written. `differs` rows start ticked (you asked to restore), `same` rows are
+   hidden behind a toggle since writing identical bytes is a no-op. */
+
+async function openRestore(name) {
+  try {
+    const rep = await api("/api/backup-inspect?name=" + encodeURIComponent(name));
+    BREPORT = { ...rep, picked: new Set(rep.entries
+      .filter((e) => e.status === "new" || e.status === "differs")
+      .map((e) => e.path)) };
+    BSHOWSAME = false;
+    renderBackup();
+  } catch (e) { toast(e.message, true); }
+}
+
+function restorePanel() {
+  const wrap = el("div", {});
+  const rep = BREPORT;
+  const c = rep.counts || {};
+
+  wrap.append(el("div.toolbar", {},
+    mkbtn("btn-sm", "← Back to archives", () => { BREPORT = null; renderBackup(); }),
+    el("div.toolbar-end", {},
+      el("span.muted", { style: { fontSize: ".72rem" },
+        text: "restoring into " + rep.config_dir }))));
+
+  wrap.append(el("div.stat-grid", { style: { marginBottom: "1rem" } },
+    statCard(String(c.new || 0), "new", { accent: true, hint: "not on disk here" }),
+    statCard(String(c.differs || 0), "differs", { hint: "on disk but not identical" }),
+    statCard(String(c.same || 0), "identical", { hint: "writing them changes nothing" }),
+    statCard(String((c.refused || 0) + (c.missing || 0)), "unusable",
+      { hint: "listed but unreadable or unsafe" })));
+
+  if (rep.manifest && rep.manifest.config_dir
+      && rep.manifest.config_dir !== rep.config_dir_abs)
+    wrap.append(el("div.alert.alert-warning", { style: { marginBottom: "1rem" } },
+      el("span.alert-icon", {}, icon("warn")),
+      el("div.alert-body", {},
+        el("div.alert-title", { text: "Made on a different config directory" }),
+        el("div", { text: "This archive was taken from " + rep.manifest.config_dir
+          + ". Restoring writes into " + rep.config_dir + " instead." }))));
+
+  const card = el("div.card");
+  const head = el("div.card-header", {},
+    el("div", {},
+      el("div.card-title", { text: rep.name }),
+      el("div.card-description", {
+        text: "Tick what to write. Nothing is deleted, and files you untick are left alone." })));
+  card.append(head);
+
+  const body = el("div.card-content.flush");
+  const rows = rep.entries.filter((e) => BSHOWSAME || e.status !== "same");
+  const count = el("span.muted", { style: { fontSize: ".72rem" } });
+  const sync = () => { count.textContent = BREPORT.picked.size + " selected"; };
+
+  const setAll = (v) => {
+    for (const e of rows) {
+      if (e.status === "refused" || e.status === "missing") continue;
+      if (v) BREPORT.picked.add(e.path); else BREPORT.picked.delete(e.path);
+    }
+    renderBackup();
+  };
+
+  card.append(el("div.card-content", { style: { display: "flex", gap: ".5rem", alignItems: "center" } },
+    count,
+    el("span.spring", { style: { flex: "1" } }),
+    switchToggle("Show identical", BSHOWSAME, (v) => { BSHOWSAME = v; renderBackup(); }),
+    mkbtn("btn-sm btn-ghost", "All", () => setAll(true)),
+    mkbtn("btn-sm btn-ghost", "None", () => setAll(false))));
+
+  for (const e of rows) body.append(restoreRow(e, sync));
+  card.append(body);
+
+  const apply = mkbtn("btn btn-primary", "Restore selected", () => applyRestore());
+  apply.prepend(icon("upload"));
+  card.append(el("div.card-content", { style: { display: "flex", justifyContent: "flex-end" } }, apply));
+  sync();
+  wrap.append(card);
+  return wrap;
+}
+
+const BSTATUS = { new: ["new", "success"], differs: ["differs", "warning"],
+  same: ["identical", "secondary"], refused: ["refused", "destructive"],
+  missing: ["missing", "destructive"] };
+
+function restoreRow(e, sync) {
+  const [label, variant] = BSTATUS[e.status] || [e.status, "secondary"];
+  const usable = e.status !== "refused" && e.status !== "missing";
+  const row = el("div.drow", {});
+  if (usable) {
+    row.append(el("input", {
+      type: "checkbox", checked: BREPORT.picked.has(e.path),
+      onchange: (ev) => {
+        if (ev.currentTarget.checked) BREPORT.picked.add(e.path);
+        else BREPORT.picked.delete(e.path);
+        sync();
+      },
+    }));
+  } else {
+    row.append(icon("warn"));
+  }
+  row.append(el("span.dmsg", {},
+    el("div.dmono", { text: e.target || e.path }),
+    el("div.muted", { style: { fontSize: ".72rem" },
+      text: (e.error || "") || (e.group + " · " + fbytes(e.size)) })));
+  row.append(badge(label, variant));
+
+  const actions = el("div.dactions", {});
+  if (e.diff) {
+    const pre = el("pre.diffbox", { hidden: true });
+    for (const line of e.diff.split("\n"))
+      pre.append(el("span", {
+        // the ---/+++ file headers lead with the same characters as a removed
+        // and an added line, and are neither
+        class: /^(---|\+\+\+|@@)/.test(line) ? "hunk"
+             : line.startsWith("+") ? "add"
+             : line.startsWith("-") ? "del" : "",
+        text: line + "\n" }));
+    const b = mkbtn("btn-sm btn-ghost", "Diff", () => { pre.hidden = !pre.hidden; },
+      "What would change in this file");
+    b.prepend(icon("columns"));
+    actions.append(b);
+    row.append(actions);
+    return el("div", {}, row, pre);
+  }
+  row.append(actions);
+  return row;
+}
+
+async function applyRestore() {
+  const paths = [...BREPORT.picked];
+  if (!paths.length) { toast("Nothing selected", true); return; }
+  const rows = BREPORT.entries.filter((e) => BREPORT.picked.has(e.path));
+  const over = rows.filter((e) => e.status === "differs").length;
+  const mcp = rows.some((e) => e.group === "mcp");
+  const ok = await mconfirm("Restore " + paths.length + " file(s)?",
+    (over ? over + " file(s) on disk will be overwritten with the backup's version, and "
+          + "that cannot be undone from here. " : "")
+    + (mcp ? "MCP servers are merged into ~/.claude.json one at a time; the rest of that "
+           + "file is left alone. " : "")
+    + "Nothing is deleted.",
+    over ? "Overwrite and restore" : "Restore");
+  if (!ok) return;
+  try {
+    const r = await api("/api/backup-restore", { name: BREPORT.name, paths });
+    if (r.failed_count)
+      toast(r.count + " restored, " + r.failed_count + " failed: " + r.failed[0].error, true);
+    else
+      toast(r.count + " file(s) restored");
+    BREPORT = null;
+    await refresh();          // items, settings and MCP all just changed
+    renderBackup(true);
+  } catch (e) { toast(e.message, true); }
+}
+
 // ------------------------------------------------------------------ render
 
 function render() {
@@ -2625,7 +3016,7 @@ function render() {
   renderTabs();
   const views = { settings: "settingsview", mcp: "mcpview", statusline: "stlview",
     setup: "setupview", insight: "insightview", costs: "costsview", doctor: "doctorview",
-    plugins: "pluginsview" };
+    plugins: "pluginsview", backup: "backupview" };
   const isEditor = !!EDITING;
   document.getElementById("editorview").hidden = !isEditor;
   document.getElementById("itemsview").hidden = isEditor || !ITEM_TABS.includes(TAB);
@@ -2645,6 +3036,7 @@ function render() {
   if (TAB === "costs") { renderCosts(); return; }
   if (TAB === "doctor") { renderDoctor(); return; }
   if (TAB === "plugins") { renderPlugins(); return; }
+  if (TAB === "backup") { renderBackup(); return; }
 }
 
 async function refresh() {

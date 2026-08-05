@@ -198,9 +198,17 @@ def _read_json_object(path):
 
 def atomic_write(path, content, mode=None):
     """Write text via temp file + rename so readers never see partial content."""
+    _atomic(path, mode, lambda tmp: tmp.write_text(content))
+
+def atomic_write_bytes(path, data, mode=None):
+    """The bytes form of atomic_write, for content that isn't text (a skill's
+    image, a compiled helper) or that carries a mode worth keeping."""
+    _atomic(path, mode, lambda tmp: tmp.write_bytes(data))
+
+def _atomic(path, mode, put):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.claude-ui-tmp")
-    tmp.write_text(content)
+    put(tmp)
     if mode is not None:
         tmp.chmod(mode)
     tmp.replace(path)

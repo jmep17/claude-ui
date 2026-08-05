@@ -228,6 +228,24 @@ main {
 .drow .dmono { font-family: var(--font-mono); font-size: 0.75rem; }
 .drow .dactions { display: flex; gap: 0.375rem; margin-left: auto; }
 
+/* ================================================================= backup === */
+/* A restore preview diff. Coloured by the leading +/- the way a terminal does,
+   because that is the only place most people have read one. */
+.diffbox {
+  margin: 0;
+  padding: 0.625rem 0.875rem 0.75rem 2.25rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 65%, transparent);
+  background: color-mix(in oklab, var(--accent) 35%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.71875rem;
+  line-height: 1.55;
+  white-space: pre;
+  overflow-x: auto;
+}
+.diffbox .add { color: var(--success); }
+.diffbox .del { color: var(--destructive); }
+.diffbox .hunk { color: var(--muted-foreground); }
+
 /* =============================================================== settings === */
 .setgroup { margin-bottom: 1rem; }
 .setgroup > summary {
