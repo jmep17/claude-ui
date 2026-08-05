@@ -43,8 +43,49 @@ async function api(path, body) {
 
 function goTab(t) {
   if (!TABS.includes(t) || (EDITING && !confirmDiscard())) return;
+  EDITING = null;   // leaving for a tab closes the editor
   TAB = t;
   location.hash = t;
+  render();
+}
+
+/* ---------------------------------------------------------------- routing --
+   The hash carries the open file, not just the tab: #skills/pdf/SKILL.md and
+   #file/<path>, both with an optional ?line=. That is what makes "click a
+   doctor finding" survive a back button and a reload. */
+
+const currentHash = () => {
+  if (!EDITING) return TAB;
+  const enc = encodeURIComponent;
+  return EDITING.item
+    ? EDITING.type + "/" + enc(EDITING.name) + "/" + enc(EDITING.file || "")
+    : "file/" + enc(EDITING.abs || EDITING.path);
+};
+
+function edSyncHash() {
+  const want = currentHash();
+  if (location.hash.slice(1) !== want) location.hash = want;
+}
+
+function routeFromHash() {
+  const [head, query] = location.hash.slice(1).split("?");
+  const segs = head.split("/").filter(Boolean).map((s) => {
+    try { return decodeURIComponent(s); } catch (e) { return s; }
+  });
+  const line = +new URLSearchParams(query || "").get("line") || 0;
+  const locate = line ? { line } : null;
+
+  if (segs[0] === "file" && segs[1]) return openPath(segs[1], locate);
+  if (ITEM_TABS.includes(segs[0]) && segs.length >= 2) {
+    const it = ((DATA.items || {})[segs[0]] || []).find((i) => i.name === segs[1]);
+    return openItemEditor(segs[0], segs[1], segs[2] || null,
+      it ? it.enabled : true, locate);
+  }
+  if (EDITING) {
+    if (!confirmDiscard()) { edSyncHash(); return; }
+    EDITING = null;
+  }
+  TAB = TABS.includes(segs[0]) ? segs[0] : "skills";
   render();
 }
 
@@ -117,6 +158,54 @@ async function copyText(text, what) {
     await navigator.clipboard.writeText(text);
     toast("Copied " + (what || "to clipboard"));
   } catch (e) { toast("Could not copy: " + e.message, true); }
+}
+
+// ---------------------------------------------------- open-in-editor bridge
+// Anywhere the UI names a file it should also be able to open it. These three
+// are the shared affordance; the editor itself lives in editor.js.
+
+const cfgPath = (name) => (DATA.config_dir || "~/.claude") + "/" + name;
+
+/* Pull a line number back out of a JSONDecodeError string ("… line 12 column
+   3"). The parse position is the one piece of a syntax error worth acting on
+   and it is only ever delivered inside prose. */
+function jsonErrLineFromText(msg) {
+  const m = /line (\d+)/i.exec(msg || "");
+  return m ? +m[1] : 0;
+}
+
+function openFileBtn(path, label, locate, title) {
+  const b = mkbtn("btn-sm", label || "Open", () => openPath(path, locate),
+    title || ("Open " + path + " in the editor"));
+  b.prepend(icon("pencil"));
+  return b;
+}
+
+/* The config files card. items.config_files_state() has always been in
+   /api/state and nothing rendered it, so CLAUDE.md and keybindings.json were
+   reachable only through the command palette. */
+function configFilesCard() {
+  const files = DATA.config_files || [];
+  if (!files.length) return null;
+  const card = el("div.card", { style: { marginBottom: "1.25rem" } });
+  card.append(el("div.card-header", {},
+    el("div", {},
+      el("div.card-title", { text: "Config files" }),
+      el("div.card-description", {
+        text: "The single files in your config directory, edited in place." }))));
+  const body = el("div.card-content.flush");
+  for (const f of files) {
+    body.append(el("div.drow", {},
+      icon("file"),
+      el("span.dmsg.dmono", { text: f.path }),
+      f.symlink ? badge("symlink", "outline") : null,
+      f.broken ? badge("broken", "destructive") : null,
+      el("div.dactions", {},
+        f.broken ? mkbtn("btn-sm btn-ghost", "Copy path", () => copyText(f.path, "path"))
+                 : openFileBtn(cfgPath(f.name), "Edit"))));
+  }
+  card.append(body);
+  return card;
 }
 
 // --------------------------------------------------------------------- tabs
@@ -650,7 +739,11 @@ function renderSettings() {
       el("span.alert-icon", {}, icon("error")),
       el("div.alert-body", {},
         el("div.alert-title", { text: "settings.json has invalid JSON" }),
-        el("div", { text: "Form editing is disabled until the file parses. " + st.error }))));
+        el("div", { text: "Form editing is disabled until the file parses. " + st.error }),
+        el("div", { style: { marginTop: ".5rem" } },
+          openFileBtn(cfgPath("settings.json"), "Fix it in the editor",
+            { line: jsonErrLineFromText(st.error) })))));
+    add(view, [configFilesCard()]);  // add() drops a null; append() would print it
     return;
   }
 
@@ -686,6 +779,8 @@ function renderSettings() {
         row.timeout ? badge(row.timeout + "s", "secondary") : null,
         el("div.dactions", {},
           (() => { const b = mkbtn("btn-sm", "Test", () => hookFire(row), "Pipe a sample event into this command"); b.prepend(icon("play")); return b; })(),
+          openFileBtn(cfgPath("settings.json"), "Edit", { find: row.command },
+            "Open settings.json at this hook"),
           mkbtn("btn-sm danger", "Delete", () => hookDelete(row)))));
     }
     hookCard.append(body);
@@ -695,6 +790,7 @@ function renderSettings() {
         text: "No hooks configured." })));
   }
   view.append(hookCard);
+  add(view, [configFilesCard()]);  // add() drops a null; append() would print it
 
   // ---- schema-driven settings
   const setCount = Object.keys(st.data || {}).length;
@@ -892,7 +988,10 @@ function renderMcp() {
       el("span.alert-icon", {}, icon("error")),
       el("div.alert-body", {},
         el("div.alert-title", { text: "~/.claude.json has invalid JSON" }),
-        el("div", { text: "Editing is disabled; fix the file by hand. " + st.machine_error }))));
+        el("div", { text: "Server editing is disabled until it parses. " + st.machine_error }),
+        el("div", { style: { marginTop: ".5rem" } },
+          openFileBtn("~/.claude.json", "Fix it in the editor",
+            { line: jsonErrLineFromText(st.machine_error) })))));
   }
 
   if (machineOk) {
@@ -1442,6 +1541,11 @@ function renderStatusline() {
       + "below to also update while the session sits idle.",
   }));
 
+  if (st.script_exists)
+    view.append(el("div.toolbar", {},
+      openFileBtn(cfgPath("statusline.sh"), "Open statusline.sh", null,
+        "Read the generated script — note that Save & apply overwrites it")));
+
   // ---- terminal preview
   const wsel = el("span.wsel");
   for (const w of [null, 120, 80]) {
@@ -1678,6 +1782,9 @@ async function renderInsight(rescan) {
   if (u.available) stats.append(statCard(String(u.sessions), "sessions scanned"));
   if (u.available && u.sessions) stats.append(statCard(String(unused.length), "unused 90d+"));
   view.append(stats);
+  view.append(el("div.toolbar", {},
+    openFileBtn(cfgPath("CLAUDE.md"), "Edit CLAUDE.md", null,
+      "The single biggest fixed cost above — open it")));
 
   const segs = [["CLAUDE.md", b.claude_md],
     ...Object.entries(b.types).map(([t, v]) => [t, v.tokens])];
@@ -1927,9 +2034,38 @@ async function renderDoctor(rerun) {
     list.append(el("div.drow", {},
       f.level === "warn" ? badge("warn", "destructive") : badge("note", "outline"),
       badge(f.area, "secondary"),
-      el("span.dmsg", { text: f.msg })));
+      el("span.dmsg", { text: f.msg }),
+      el("div.dactions", {}, findingAction(f))));
   }
   view.append(list);
+}
+
+/* A finding is only worth reading if you can act on it. `target` says where
+   the problem lives (doctor.py fills it in); without one we fall back to the
+   path embedded in the message, so at least the path is one click away. */
+function findingAction(f) {
+  const t = f.target;
+  if (t && (t.kind === "item" || t.kind === "path")) {
+    const b = mkbtn("btn-sm", "Open",
+      () => openTarget(t),
+      "Open " + (t.kind === "path" ? t.path : t.name) + " in the editor"
+        + (t.line ? " at line " + t.line : ""));
+    b.prepend(icon("pencil"));
+    return b;
+  }
+  if (t && t.kind === "tab") {
+    const b = mkbtn("btn-sm btn-ghost", "Show", () => openTarget(t),
+      "Show this in the " + t.tab + " tab");
+    b.prepend(icon("chevronRight"));
+    return b;
+  }
+  const m = f.msg.match(/(^|\s)(~?\/[^\s,:]+)/);   // e.g. a broken symlink
+  if (m) {
+    const b = mkbtn("btn-sm btn-ghost", "Copy path", () => copyText(m[2], "path"));
+    b.prepend(icon("copy"));
+    return b;
+  }
+  return null;
 }
 
 // --------------------------------------------------------- command palette
@@ -2058,211 +2194,7 @@ function openPalette() {
   inp.focus();
 }
 
-// ------------------------------------------------------------------ editor
-
-let EDITING = null;
-
-const confirmDiscard = () =>
-  !EDITING || !EDITING.dirty
-  || confirm("You have unsaved changes in " + EDITING.path + ". Discard them?");
-
-async function openEditor(id) {
-  if (EDITING && !confirmDiscard()) return;
-  try {
-    EDITING = await api("/api/file?id=" + encodeURIComponent(id));
-    render();
-  } catch (e) { toast(e.message, true); }
-}
-
-async function openItemEditor(type, name, file, enabled) {
-  if (EDITING && !EDITING.item && !confirmDiscard()) return;
-  try {
-    const q = "type=" + encodeURIComponent(type) + "&name=" + encodeURIComponent(name)
-      + "&enabled=" + (enabled ? "1" : "0")
-      + (file ? "&file=" + encodeURIComponent(file) : "");
-    EDITING = { item: true, ...(await api("/api/item?" + q)) };
-    render();
-  } catch (e) { toast(e.message, true); }
-}
-
-// Minimal markdown renderer for the editor preview (headings, lists, code
-// fences, inline code/bold/italic/links, blockquotes) — enough to sanity-check
-// a SKILL.md without any dependency.
-function md2html(src) {
-  const inline = (s) => esc(s)
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
-    .replace(/\*([^*]+)\*/g, "<i>$1</i>")
-    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
-  let html = "";
-  let inCode = false, inList = null, para = [];
-  const flushPara = () => {
-    if (para.length) { html += "<p>" + para.map(inline).join(" ") + "</p>"; para = []; }
-  };
-  const closeList = () => {
-    if (inList) { html += "</" + inList + ">"; inList = null; }
-  };
-  for (const line of src.split("\n")) {
-    if (line.trim().startsWith("```")) {
-      flushPara(); closeList();
-      html += inCode ? "</code></pre>" : "<pre><code>";
-      inCode = !inCode;
-      continue;
-    }
-    if (inCode) { html += esc(line) + "\n"; continue; }
-    let m;
-    if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
-      flushPara(); closeList();
-      const n = m[1].length;
-      html += `<h${n}>${inline(m[2])}</h${n}>`;
-    } else if (/^\s*(---+|\*\*\*+)\s*$/.test(line)) {
-      flushPara(); closeList();
-      html += "<hr>";
-    } else if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
-      flushPara();
-      if (inList !== "ul") { closeList(); html += "<ul>"; inList = "ul"; }
-      html += "<li>" + inline(m[1]) + "</li>";
-    } else if ((m = line.match(/^\s*\d+\.\s+(.*)$/))) {
-      flushPara();
-      if (inList !== "ol") { closeList(); html += "<ol>"; inList = "ol"; }
-      html += "<li>" + inline(m[1]) + "</li>";
-    } else if ((m = line.match(/^>\s?(.*)$/))) {
-      flushPara(); closeList();
-      html += "<blockquote>" + inline(m[1]) + "</blockquote>";
-    } else if (!line.trim()) {
-      flushPara(); closeList();
-    } else {
-      para.push(line);
-    }
-  }
-  flushPara(); closeList();
-  if (inCode) html += "</code></pre>";
-  return html;
-}
-
-function edSync() {
-  const ta = document.getElementById("fileeditor");
-  if (ta) EDITING.content = ta.value;
-}
-
-async function edAssist() {
-  edSync();
-  const r = await modal({ title: "Ask Claude",
-    text: "Runs `claude -p` locally with this file (uses your own Claude Code auth; can take a minute).",
-    fields: [
-      { id: "m", label: "Task", type: "select", options: [
-        { value: "improve", label: "Improve — tighten description & triggers, return revised file" },
-        { value: "review", label: "Review — list concrete problems, no changes" },
-        { value: "custom", label: "Custom instruction…" }] },
-      { id: "c", label: "Custom instruction (for custom)",
-        placeholder: "e.g. add a 'Use when' trigger list for CI debugging" }],
-    ok: "Run" });
-  if (!r) return;
-  const t = toast({ title: "Asking Claude… this can take a while", variant: "loading", duration: 0 });
-  try {
-    const res = await api("/api/assist", { mode: r.m, custom: r.c,
-      content: EDITING.content, path: EDITING.path });
-    t.close();
-    EDITING.assist = { text: res.result, replaces: res.replaces };
-    render();
-  } catch (e) { t.close(); toast(e.message, true); }
-}
-
-function renderEditor() {
-  const view = document.getElementById("editorview");
-  const f = EDITING;
-  view.innerHTML = "";
-
-  view.append(el("div.view-head", {
-    html: "Editing <b>" + esc(f.path) + "</b>"
-      + (f.exists ? "" : " (new file — created on save)")
-      + (f.item && !f.enabled ? " · this item is disabled" : "")
-      + (f.dirty ? ' · <span class="warn">unsaved changes</span>' : "")
-      + (f.id === "CLAUDE.md" || f.id === "settings.json" || f.item ? " · applies to new sessions" : ""),
-  }));
-
-  const shell = el("div.editor-shell");
-
-  if (f.item && f.files && f.files.length > 1) {
-    const tabs = el("div.ftabs");
-    for (const name of f.files)
-      tabs.append(mkbtn("btn-sm" + (name === f.file ? " on" : ""), name, () => {
-        edSync();
-        openItemEditor(f.type, f.name, name, f.enabled);
-      }));
-    shell.append(tabs);
-  }
-
-  const isMd = (f.item ? f.file : f.path || "").endsWith(".md");
-  if (f.preview && isMd) {
-    shell.append(el("div.mdprev", { html: md2html(f.content || "") }));
-  } else {
-    const ta = el("textarea.fedit", {
-      id: "fileeditor", rows: 24, spellcheck: false, value: f.content,
-      oninput: () => { f.content = ta.value; if (!f.dirty) { f.dirty = true; renderEditor(); ta.focus(); } },
-    });
-    shell.append(ta);
-  }
-
-  if (f.assist) {
-    shell.append(el("div.code-pane.assistout", { text: f.assist.text }));
-    const abar = el("div.toolbar", { style: { marginBottom: 0 } });
-    if (f.assist.replaces)
-      abar.append(mkbtn("btn-sm btn-primary", "Use result", () => {
-        f.content = f.assist.text;
-        f.dirty = true;
-        delete f.assist;
-        render();
-      }));
-    abar.append(mkbtn("btn-sm", "Dismiss", () => { edSync(); delete f.assist; render(); }));
-    shell.append(abar);
-  }
-
-  const bar = el("div.toolbar", { style: { marginBottom: 0 } });
-  const save = mkbtn("btn-primary", "Save", saveFile);
-  save.prepend(icon("save"));
-  bar.append(save);
-  if (isMd) {
-    const pv = mkbtn("btn-sm" + (f.preview ? " on" : ""), f.preview ? "Edit" : "Preview", () => {
-      edSync();
-      f.preview = !f.preview;
-      render();
-    });
-    pv.prepend(icon(f.preview ? "pencil" : "eye"));
-    bar.append(pv);
-  }
-  const assist = mkbtn("btn-sm", "Assist", edAssist,
-    "Ask Claude (via the claude CLI) to improve or review this file");
-  assist.prepend(icon("sparkles"));
-  bar.append(assist);
-  bar.append(el("div.toolbar-end", {}, mkbtn("btn-ghost", "Close", closeEditor)));
-  shell.append(bar);
-  view.append(shell);
-}
-
-async function saveFile() {
-  edSync();
-  try {
-    if (EDITING.item) {
-      await api("/api/item-save", { type: EDITING.type, name: EDITING.name,
-        file: EDITING.file, content: EDITING.content, enabled: EDITING.enabled });
-      if (EDITING.files && !EDITING.files.includes(EDITING.file))
-        EDITING.files.push(EDITING.file);
-    } else {
-      await api("/api/file-save", { id: EDITING.id, content: EDITING.content });
-    }
-    toast(EDITING.path + " saved");
-    EDITING.exists = true;
-    EDITING.dirty = false;
-    renderEditor();
-  } catch (e) { toast(e.message, true); }
-}
-
-function closeEditor() {
-  if (!confirmDiscard()) return;
-  EDITING = null;
-  refresh();
-}
+// The editor lives in editor.js (loaded before this file).
 
 // --------------------------------------------------------------- inventory
 
@@ -2351,6 +2283,10 @@ function renderInventory() {
         enabled ? "Disable" : "Enable", () => toggleItem(TAB, s.name, !enabled)));
       const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
         { label: "Copy path", icon: "copy", fn: () => copyText(s.path || s.name, "path") },
+        // Broken items have no Edit button (item_read can't follow the dangling
+        // link) but the file itself is still openable by path.
+        ...(s.broken && s.path
+          ? [{ label: "Open by path", icon: "file", fn: () => openPath(s.path) }] : []),
         { label: enabled ? "Disable" : "Enable", icon: "power",
           fn: () => toggleItem(TAB, s.name, !enabled), danger: enabled },
       ]), "More actions");
@@ -2419,8 +2355,10 @@ document.getElementById("palettebtn").onclick = openPalette;
 document.getElementById("cfgchip").onclick = (e) => openCfgMenu(e.currentTarget);
 
 addEventListener("hashchange", () => {
-  const t = location.hash.slice(1);
-  if (TABS.includes(t) && t !== TAB) { TAB = t; render(); }
+  // No lock needed: if the hash already describes what's on screen, we put it
+  // there ourselves and there is nothing to do.
+  if (location.hash.slice(1) === currentHash()) return;
+  routeFromHash();
 });
 
 addEventListener("beforeunload", (e) => {
@@ -2465,4 +2403,8 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-refresh();
+// Load the inventory first, then honour whatever the hash asked for — a deep
+// link into a file needs DATA.items to know whether that item is enabled.
+refresh().then(() => {
+  if (location.hash.slice(1) !== currentHash()) routeFromHash();
+});

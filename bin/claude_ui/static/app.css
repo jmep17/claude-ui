@@ -632,6 +632,215 @@ main {
 
 /* ================================================================= editor === */
 .editor-shell { display: flex; flex-direction: column; gap: 0.625rem; }
+
+/* --- the pane -------------------------------------------------------------
+   .ed-hl and .ed-input are the same text drawn twice: the <pre> underneath
+   carries the colour, the <textarea> on top carries the caret and is
+   transparent. Every metric that affects where a glyph lands is declared once
+   here and inherited by both — change one and the caret drifts off its
+   letters. scrollbar-gutter keeps the two content widths equal even when only
+   the textarea shows a scrollbar, which is what keeps soft wrapping in sync. */
+.ed-body { display: grid; gap: 0.625rem; min-width: 0; }
+.ed-body-split { grid-template-columns: 1fr 1fr; }
+@media (max-width: 900px) { .ed-body-split { grid-template-columns: 1fr; } }
+
+.ed-pane {
+  --ed-pad-y: 0.875rem;
+  --ed-pad-x: 1rem;
+  --ed-gutter: 3.25rem;
+  --ed-font: 0.78125rem;
+  --ed-lh: 1.65;
+
+  position: relative;
+  height: clamp(24rem, 58vh, 52rem);
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--term);
+  overflow: hidden;
+  resize: vertical;
+}
+
+.ed-hl,
+.ed-input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  border: 0;
+  padding: var(--ed-pad-y) var(--ed-pad-x);
+  font-family: var(--font-mono);
+  font-size: var(--ed-font);
+  line-height: var(--ed-lh);
+  letter-spacing: normal;
+  tab-size: 2;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  scrollbar-gutter: stable;
+}
+
+.ed-hl {
+  color: var(--term-foreground);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ed-input {
+  z-index: 1;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--term-foreground);
+  resize: none;
+  overflow-y: auto;
+  outline: 0;
+}
+.ed-input::selection { background: color-mix(in oklch, var(--primary) 40%, transparent); }
+.ed-pane:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 25%, transparent);
+}
+
+/* Line numbers ride along inside each line box, so they stay correct through
+   soft wrapping with nothing to measure or scroll-sync. */
+.ed-line {
+  position: relative;
+  padding-left: var(--ed-gutter);
+  min-height: calc(var(--ed-font) * var(--ed-lh));
+}
+.ed-line::before {
+  content: attr(data-n);
+  position: absolute;
+  left: 0;
+  width: calc(var(--ed-gutter) - 1rem);
+  text-align: right;
+  color: var(--muted-foreground);
+  opacity: 0.5;
+  user-select: none;
+}
+.ed-input { padding-left: calc(var(--ed-pad-x) + var(--ed-gutter)); }
+
+.ed-mark { background: color-mix(in oklch, var(--warning) 12%, transparent); }
+.ed-mark-warn { background: color-mix(in oklch, var(--destructive) 13%, transparent); }
+.ed-mark::before { opacity: 1; font-weight: 600; }
+.ed-mark-warn::before { color: var(--destructive); }
+.ed-mark-info::before { color: var(--chart-4); }
+
+/* Highlighting off (very large file): drop the transparency so the textarea
+   is legible on its own. */
+.ed-plain .ed-input { color: var(--term-foreground); }
+.ed-plain .ed-hl { display: none; }
+.ed-plain .ed-input { padding-left: var(--ed-pad-x); }
+.ed-note { font-size: 0.75rem; }
+
+/* --- syntax tokens ---------------------------------------------------------
+   Chart tokens only, so all four families x light/dark stay coherent. */
+.t-key { color: var(--chart-1); }
+.t-str { color: var(--chart-2); }
+.t-num { color: var(--chart-3); }
+.t-lit { color: var(--chart-4); }
+.t-punc { color: var(--muted-foreground); }
+.t-cmt { color: var(--muted-foreground); font-style: italic; }
+.t-var { color: var(--chart-5); }
+.t-head { color: var(--chart-1); font-weight: 600; }
+.t-bold { color: var(--term-foreground); font-weight: 600; }
+.t-em { font-style: italic; }
+.t-code { color: var(--chart-2); }
+.t-link { color: var(--chart-5); text-decoration: underline; }
+.t-mark { color: var(--chart-3); }
+.t-quote { color: var(--muted-foreground); }
+.t-fence { color: var(--chart-4); }
+
+/* --- toolbar --------------------------------------------------------------- */
+.ed-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+}
+.ed-fmtgroup, .ed-seg {
+  display: flex;
+  align-items: center;
+  gap: 0.125rem;
+  padding: 0.125rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+.ed-seg { margin-left: auto; }
+.ed-fmtgroup .separator-v { height: 1.25rem; background: var(--border); }
+
+/* --- findings strip -------------------------------------------------------- */
+.ed-findings { display: flex; flex-direction: column; gap: 0.125rem; }
+.ed-find {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.375rem 0.625rem;
+  border: 0;
+  border-left: 2px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.8125rem;
+  text-align: left;
+  cursor: pointer;
+}
+.ed-find:hover:not(:disabled) { background: var(--accent); }
+.ed-find-flat { cursor: default; opacity: 0.75; }
+.ed-find-warn { border-left-color: var(--destructive); }
+.ed-find-info { border-left-color: var(--chart-4); }
+.ed-find-dot {
+  flex: none;
+  width: 0.4375rem;
+  height: 0.4375rem;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+}
+.ed-find-warn .ed-find-dot { background: var(--destructive); opacity: 1; }
+.ed-find-info .ed-find-dot { background: var(--chart-4); opacity: 1; }
+.ed-find-msg { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ed-find-line { flex: none; color: var(--muted-foreground); font-family: var(--font-mono); font-size: 0.75rem; }
+.ed-find-src { flex: none; }
+
+/* --- preview --------------------------------------------------------------- */
+.ed-prev {
+  height: clamp(24rem, 58vh, 52rem);
+  margin: 0;
+  overflow-y: auto;
+}
+.ed-body:not(.ed-body-split) > .ed-prev { height: auto; min-height: 24rem; }
+
+.fm-card {
+  margin-bottom: 1.25rem;
+  padding: 0.875rem 1rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius-lg);
+  background: var(--muted);
+}
+.fm-name { font-family: var(--font-mono); font-size: 0.875rem; font-weight: 600; }
+.fm-desc { margin-top: 0.375rem; font-size: 0.8125rem; line-height: 1.5; }
+.fm-count { margin-top: 0.375rem; color: var(--muted-foreground); font-size: 0.6875rem; }
+.fm-count.over { color: var(--destructive); }
+.fm-row { display: flex; gap: 0.5rem; margin-top: 0.25rem; font-size: 0.75rem; }
+.fm-key { flex: none; min-width: 6rem; color: var(--muted-foreground); font-family: var(--font-mono); }
+.fm-val { overflow-wrap: anywhere; font-family: var(--font-mono); }
+
+.mdprev pre[data-lang]:not([data-lang=""])::before {
+  content: attr(data-lang);
+  display: block;
+  margin-bottom: 0.375rem;
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.mdprev input[type="checkbox"] { margin-right: 0.25rem; vertical-align: middle; }
+.mdprev thead th { background: var(--muted); font-weight: 600; }
+
 .fedit {
   width: 100%;
   min-height: 24rem;

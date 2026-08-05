@@ -97,6 +97,17 @@ const ICONS = {
   copy: '<rect width="13" height="13" x="8" y="8" rx="2"/><path d="M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2"/>',
   plug: '<path d="M12 22v-5M9 8V2M15 8V2"/><path d="M18 8v4a6 6 0 0 1-12 0V8Z"/>',
   split: '<path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M21 3 3 21"/><path d="m15 15 6 6v-5"/>',
+  // editor toolbar
+  bold: '<path d="M6 4h7a4 4 0 0 1 0 8H6ZM6 12h8a4 4 0 0 1 0 8H6Z"/>',
+  italic: '<path d="M19 4h-9M14 20H5M15 4 9 20"/>',
+  code: '<path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/>',
+  heading: '<path d="M6 4v16M18 4v16M6 12h12"/>',
+  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  listOrdered: '<path d="M10 6h11M10 12h11M10 18h11M4 4h1v4M4 8h2"/><path d="M6 14H4v1.5h1.5V17H4v1h2"/>',
+  quote: '<path d="M3 21c3 0 7-1 7-8V5a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h3"/><path d="M14 21c3 0 7-1 7-8V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h3"/>',
+  wand: '<path d="m3 21 9-9M12.2 6.2 17.8 11.8"/><path d="m15 5 4 4 2-2-4-4Z"/><path d="M9 3v2M5 7h2M19 15v2M15 19h2"/>',
+  columns: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M12 3v18"/>',
+  crosshair: '<circle cx="12" cy="12" r="8"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>',
 };
 
 function icon(name, cls) {

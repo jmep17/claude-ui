@@ -4,10 +4,17 @@ from pathlib import Path
 import json
 
 from .core import (CONFIG_FILES, ITEM_TYPES, atomic_write, config_dir,
-                   disabled_dir, item_rel, parse_frontmatter, tilde)
+                   disabled_dir, item_rel, parse_frontmatter, resolve_editable,
+                   tilde)
 
 
 MAX_EDIT = 2 * 1024 * 1024
+
+def _todo_line(text):
+    """1-based line of the first TODO, or 0. The doctor turns this into a
+    click that lands on the placeholder instead of just naming the file."""
+    i = text.find("TODO")
+    return text.count("\n", 0, i) + 1 if i >= 0 else 0
 
 def item_root(type_, enabled=True):
     """Directory holding a type's items: live, or the disabled parking area."""
@@ -42,6 +49,7 @@ def _dir_item(entry, enabled):
                        if broken else meta.get("description", ""),
         "path": tilde(entry), "mtime": mtime,
         "todo": "TODO" in text,
+        "todo_line": _todo_line(text),
         "name_mismatch": bool(meta.get("name")) and meta["name"] != entry.name,
         "long_desc": len(meta.get("description", "")) > 1024,
     }
@@ -80,6 +88,7 @@ def _scan_md_type(root, enabled):
                            if broken else meta.get("description", ""),
             "path": tilde(p), "mtime": mtime,
             "todo": "TODO" in text,
+            "todo_line": _todo_line(text),
             "name_mismatch": False,
             "long_desc": len(meta.get("description", "")) > 1024,
         })
@@ -149,6 +158,28 @@ def _skill_files(root):
         and not any(part.startswith(".") for part in p.relative_to(root).parts)
     )[:200]
 
+def _stamp(path):
+    """Identity of the bytes we just read, so a later save can tell whether
+    someone else (a Claude Code session, your $EDITOR) moved them."""
+    try:
+        st = path.stat()
+        return {"mtime": st.st_mtime, "size": st.st_size}
+    except OSError:
+        return {"mtime": 0, "size": 0}
+
+class Conflict(ValueError):
+    """The file changed underneath the editor — surfaced as a 409, not a 400."""
+
+def _check_base(path, base):
+    """Refuse a write whose starting point is no longer what's on disk."""
+    if base is None:
+        return
+    now = _stamp(path)["mtime"]
+    if now != base:
+        # Deliberately just the fact: the caller owns the wording of the
+        # choice, and the two run together badly if both editorialise.
+        raise Conflict(f"{path.name} changed on disk since you opened it.")
+
 def item_read(type_, name, fname=None, enabled=True):
     root = resolve_item(type_, name, enabled)
     if ITEM_TYPES[type_]["kind"] == "md":
@@ -156,7 +187,8 @@ def item_read(type_, name, fname=None, enabled=True):
             raise ValueError(f"{name}: not found")
         return {"type": type_, "name": name, "enabled": enabled,
                 "files": [root.name], "file": root.name, "exists": True,
-                "content": root.read_text(errors="replace"), "path": tilde(root)}
+                "content": root.read_text(errors="replace"), "path": tilde(root),
+                **_stamp(root)}
     if not root.is_dir():  # follows symlinks
         raise ValueError(f"{name}: not found")
     files = _skill_files(root)
@@ -165,29 +197,55 @@ def item_read(type_, name, fname=None, enabled=True):
     return {"type": type_, "name": name, "enabled": enabled,
             "files": files, "file": f, "exists": target.is_file(),
             "content": target.read_text(errors="replace") if target.is_file() else "",
-            "path": tilde(target)}
+            "path": tilde(target), **_stamp(target)}
 
 def _reject_bad_json(path, content):
     """A .json file must parse before we overwrite it, so a bad save can't
-    corrupt config Claude Code reads. Mirrors settings.file_save."""
+    corrupt config Claude Code reads. The one gate for every file write."""
     if path.suffix == ".json" and content.strip():
         try:
             json.loads(content)
         except json.JSONDecodeError as e:
             raise ValueError(f"invalid JSON: {e}") from None
 
-def item_save(type_, name, fname, content, enabled=True):
+def item_save(type_, name, fname, content, enabled=True, base=None):
     if not isinstance(content, str) or len(content) > MAX_EDIT:
         raise ValueError("bad content")
     root = resolve_item(type_, name, enabled)
     if ITEM_TYPES[type_]["kind"] == "md":
         if not root.is_file():
             raise ValueError(f"{name}: not found")
+        _check_base(root, base)
         atomic_write(root, content)
-        return {"path": tilde(root)}
+        return {"path": tilde(root), **_stamp(root)}
     if not root.is_dir():
         raise ValueError(f"{name}: not found")
     target = root / _item_file_rel(fname or "SKILL.md")
     _reject_bad_json(target, content)
+    _check_base(target, base)
     atomic_write(target, content)
-    return {"path": tilde(target)}
+    return {"path": tilde(target), **_stamp(target)}
+
+def path_read(raw):
+    """Read any file we're willing to open by absolute path — the config dir,
+    ~/.claude.json, or (read-only) an installed plugin."""
+    p, readonly = resolve_editable(raw)
+    if p.is_file() and p.stat().st_size > MAX_EDIT:
+        raise ValueError(f"{p.name}: too large to edit here "
+                         f"({p.stat().st_size // 1024} KB)")
+    return {"path": str(p), "tilde": tilde(p), "name": p.name,
+            "exists": p.is_file(), "readonly": readonly,
+            "content": p.read_text(errors="replace") if p.is_file() else "",
+            **_stamp(p)}
+
+def path_save(raw, content, base=None):
+    p, readonly = resolve_editable(raw)
+    if readonly:
+        raise ValueError(f"{p.name} is read-only here — it belongs to an "
+                         "installed plugin")
+    if not isinstance(content, str) or len(content) > MAX_EDIT:
+        raise ValueError("bad content")
+    _reject_bad_json(p, content)
+    _check_base(p, base)
+    atomic_write(p, content)
+    return {"path": str(p), "tilde": tilde(p), **_stamp(p)}

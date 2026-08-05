@@ -53,6 +53,10 @@ defines the look, not the runtime.
 - `static/ui.js` — the behavioural half: theme controller, a small inlined
   [lucide](https://lucide.dev) icon set, toasts, focus-trapped dialogs, dropdown
   menus, and the filterable combobox.
+- `static/editor.js` — the file editor: a textarea over a tokenized `<pre>` for
+  syntax highlighting and line numbers, a markdown toolbar, a formatter, a live
+  split preview, and the findings strip that puts doctor warnings on the line
+  they refer to.
 
 Four themes — **clay** (default), **slate**, **gruvbox**, **nord** — each in
 light and dark, plus a *system* mode that follows `prefers-color-scheme`. The
@@ -88,8 +92,8 @@ The Claude Code config dir is resolved in this order:
 `bin/claude-ui` is a thin launcher; the code lives in `bin/claude_ui/*.py`
 (core → schema → settings → items/mcp/plugins → statusline/insight/assist/setup
 → doctor → server, a clean DAG). The frontend is plain files in `bin/claude_ui/static/`
-(no build step), layered theme → components → app, with `ui.js` before
-`app.js`.
+(no build step), layered theme → components → app, with `ui.js` and `editor.js`
+before `app.js`.
 
 Tests are stdlib `unittest`: `python3 -m unittest discover tests`.
 

@@ -9,7 +9,7 @@ import threading
 import urllib.request
 
 from . import schema
-from .core import CONFIG_FILES, atomic_write, config_dir, tilde
+from .core import atomic_write, config_dir, tilde
 
 
 # User-scope settings.json keys. The entries below are hand-written and carry
@@ -743,25 +743,6 @@ def settings_state():
         except json.JSONDecodeError as e:
             st["error"] = str(e)
     return st
-
-def file_read(mid):
-    if mid not in CONFIG_FILES:
-        raise ValueError("not an editable config file")
-    path = config_dir() / mid
-    return {"id": mid, "path": tilde(path), "exists": path.is_file(),
-            "content": path.read_text(errors="replace") if path.is_file() else ""}
-
-def file_save(mid, content):
-    if mid not in CONFIG_FILES:
-        raise ValueError("not an editable config file")
-    if not isinstance(content, str) or len(content) > 2 * 1024 * 1024:
-        raise ValueError("bad content")
-    if mid.endswith(".json") and content.strip():
-        try:
-            json.loads(content)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"invalid JSON: {e}") from None
-    atomic_write(config_dir() / mid, content)
 
 def settings_set(key, value):
     if not SETTINGS_KEY_RE.match(key or ""):

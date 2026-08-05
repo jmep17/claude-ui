@@ -11,14 +11,14 @@ import urllib.parse
 import webbrowser
 
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
-from .items import config_files_state, item_read, item_save, scan_items, set_enabled
+from .items import (Conflict, config_files_state, item_read, item_save,
+                    path_read, path_save, scan_items, set_enabled)
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
 from . import schema
 from .plugins import (plugin_resync, plugin_set_enabled, plugins_split,
                       plugins_state, skill_override_set)
-from .settings import (file_read, file_save, hook_test, settings_schema,
-                       settings_set, settings_state, start_docs_fetch,
-                       suggest_state)
+from .settings import (hook_test, settings_schema, settings_set, settings_state,
+                       start_docs_fetch, suggest_state)
 from .statusline import statusline_save, statusline_state
 from .setup import setup_apply, setup_remove, setup_state
 from .insight import cost_stats, insight_budget, usage_stats
@@ -29,7 +29,8 @@ from .doctor import doctor
 STATIC = Path(__file__).resolve().parent / "static"
 # Explicit allowlist rather than path joining — nothing user-supplied ever
 # reaches the filesystem here.
-_STATIC_NAMES = ("theme.css", "components.css", "app.css", "ui.js", "app.js")
+_STATIC_NAMES = ("theme.css", "components.css", "app.css", "ui.js", "editor.js",
+                 "app.js")
 STATIC_FILES = {
     "/" + n: (n, ("text/css" if n.endswith(".css") else "text/javascript")
               + "; charset=utf-8")
@@ -83,11 +84,11 @@ class Handler(BaseHTTPRequestHandler):
             # after start-up is picked up on the next page render
             self.send(200, page.replace("__SCHEMA__", json.dumps(settings_schema()))
                               .replace("__TOKEN__", TOKEN),
-                      "text/html; charset=utf-8", {"cache-control": "no-cache"})
+                      "text/html; charset=utf-8", {"cache-control": "no-store"})
         elif self.path in STATIC_FILES:
             fname, ctype = STATIC_FILES[self.path]
             self.send(200, (STATIC / fname).read_text(), ctype,
-                      {"cache-control": "no-cache"})
+                      {"cache-control": "no-store"})
         elif self.path in ("/favicon.ico", "/icon.svg"):
             self.send(200, ICON_SVG, "image/svg+xml")
         elif self.path == "/manifest.webmanifest":
@@ -118,11 +119,11 @@ class Handler(BaseHTTPRequestHandler):
                 "generation": schema.generation(),
                 "keys": schema.help_payload(s["key"] for s in settings_schema()),
             }, extra={"cache-control": "no-cache"})
-        elif self.path.startswith("/api/file?"):
+        elif self.path.startswith("/api/path?"):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
-                self.send(200, file_read((q.get("id") or [""])[0]))
-            except ValueError as e:
+                self.send(200, path_read((q.get("path") or [""])[0]))
+            except (ValueError, OSError) as e:
                 self.send(400, {"error": str(e)})
         elif self.path.startswith("/api/item?"):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -169,13 +170,15 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "settings-set":
                 settings_set(req.get("key", ""), req.get("value"))
                 self.send(200, {"ok": True})
-            elif action == "file-save":
-                file_save(req.get("id", ""), req.get("content", ""))
-                self.send(200, {"ok": True})
+            elif action == "path-save":
+                self.send(200, {"ok": True, **path_save(
+                    req.get("path", ""), req.get("content", ""),
+                    req.get("base"))})
             elif action == "item-save":
                 self.send(200, {"ok": True, **item_save(
                     req.get("type", ""), req.get("name", ""), req.get("file"),
-                    req.get("content", ""), bool(req.get("enabled", True)))})
+                    req.get("content", ""), bool(req.get("enabled", True)),
+                    req.get("base"))})
             elif action == "hook-test":
                 self.send(200, hook_test(req.get("command", ""), req.get("event", "")))
             elif action == "statusline-save":
@@ -218,6 +221,8 @@ class Handler(BaseHTTPRequestHandler):
                                       req.get("content", ""), req.get("path", "")))
             else:
                 self.send(404, {"error": "not found"})
+        except Conflict as e:  # a ValueError — must be caught first
+            self.send(409, {"error": str(e), "conflict": True})
         except (ValueError, OSError, json.JSONDecodeError) as e:
             self.send(400, {"error": str(e)})
 

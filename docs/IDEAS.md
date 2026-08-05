@@ -26,25 +26,35 @@ Shipped in the design-system pass; listed so the backlog stays honest.
 | 53 more settings keys | See the settings coverage note at the bottom. |
 | Plugins tab, with Split | Was idea 13. `plugins.py` inventories `<config>/plugins/`, the tab splits a plugin into your own items, `doctor` and `insight_budget()` now both see plugin components. |
 
+Shipped in the editor pass. The editor moved out of `app.js` into `static/editor.js`.
+
+| Idea | Notes |
+| :--- | :--- |
+| **#20** Syntax highlighting + JSON format/lint | The `<pre>`-behind-textarea overlay, with line numbers as a `::before` on each line so they survive soft wrapping without measurement. Regex tokenizers for JSON/Markdown/shell; highlighting drops out above 200 KB. A **Format** button reformats JSON and tidies Markdown whitespace; on bad JSON it refuses and jumps to the error line. |
+| **#1** Lost-update protection | `item_read`/`path_read` return `mtime`+`size`; the matching saves take a `base` and raise `items.Conflict` → **409**. The editor offers overwrite-or-reload and copies your version to the clipboard first. Not yet paired with a background poll of `/api/state`. |
+| **#11** Doctor findings you can act on | Findings carry an optional `target` (`item` / `path` / `tab`) and every row gets an **Open** button. Still report-only — no `POST /api/doctor-fix`. |
+| **#16** Deep-link hash routing | `#skills/pdf/SKILL.md` and `#file/<path>`, with `?line=` honoured on load. Back works between a finding and the file. `#settings?q=` and `#costs/<day>` are still open. |
+| General file access | `core.resolve_editable()` + `/api/path` replace the three-name `CONFIG_FILES` allowlist: anything inside the config dir, plus `~/.claude.json`, plus read-only access to installed plugins. `settings.file_read`/`file_save` are gone. |
+| Markdown preview worth reading | Split view; frontmatter rendered as a card with a live counter against the 1024-char description limit; tables, nested lists, task lists, fenced-code language labels. |
+| Config files are reachable | `DATA.config_files` was computed by `/api/state` and read by nothing; a **Config files** card on the settings tab now spends it. |
+
 ---
 
 ## High value
 
-### 1. Lost-update protection and external-change detection — S
+### 1. External-change detection — S *(partly done)*
 
-`file_save` / `item_save` / `settings_set` / `mcp_machine_set` all call
-`atomic_write()` unconditionally. If a Claude Code session or your editor
-changed the file after `/api/file` returned it, your save silently destroys
-theirs.
+`item_save` and `path_save` now take a `base` mtime and answer **409** through
+`items.Conflict`, so an editor save can no longer silently destroy a Claude Code
+session's write. Three gaps remain:
 
-Return `mtime` + `size` from `file_read()` / `item_read()` / `settings_state()`,
-accept an optional `base` in the POST bodies, and reject the write with a 409
-and a diff when the file moved underneath. Pair it with a lightweight poll of
-`/api/state` that flags "changed on disk" in the header.
-
-The app's core promise is that the filesystem is the state — but it currently
-treats its own in-memory `DATA` snapshot as authoritative for the length of an
-edit.
+- `settings_set` and `mcp_machine_set` still call `atomic_write()`
+  unconditionally — the settings form and the MCP panel have no `base`.
+- The 409 carries a message, not a **diff**. `difflib` is stdlib; showing what
+  changed underneath would beat asking people to choose blind.
+- Nothing detects a change you aren't currently saving over. A lightweight poll
+  of `/api/state` flagging "changed on disk" in the header would close the loop
+  the app's filesystem-is-the-state promise implies.
 
 ### 2. Item lifecycle: create, duplicate, rename, delete — M
 
@@ -137,13 +147,17 @@ a unified diff instead of writing. `statusline-save` regenerates a 450-line
 script and `mcp-save` rewrites the entirety of `~/.claude.json` — a file that
 also holds your project history and OAuth account — both with no preview.
 
-### 11. Doctor quick-fixes — M
+### 11. Doctor quick-fixes — M *(half done)*
 
-Every finding is report-only, which trains people to ignore the list. Give
-findings an optional `{action, args}` and add `POST /api/doctor-fix` with a
-small allowlist: delete a leftover `*.bak*`, unlink a broken symlink, clear a
-`statusLine`/hook key pointing at a missing executable, `chmod +x` a
-non-executable statusline. Every one of those is unambiguous.
+Findings now carry a `target` and every row has an **Open** button, so the list
+is no longer a dead end. But opening the file still leaves the fix to you.
+
+Add an optional `{action, args}` beside `target` and a `POST /api/doctor-fix`
+with a small allowlist: delete a leftover `*.bak*`, unlink a broken symlink,
+clear a `statusLine`/hook key pointing at a missing executable, `chmod +x` a
+non-executable statusline. Every one of those is unambiguous — and the broken
+symlink finding is the case that most wants it, since it is the one finding with
+no `target` at all (there is nothing to open).
 
 ### 12. Statusline preview that runs the real script — S
 
@@ -184,10 +198,10 @@ projection from the current burn rate, and CSV export. The number it computes is
 more careful than most tools' — the de-dup, the cache-TTL multipliers, the
 fast-mode and US-inference premiums — and it's presented as five tiles.
 
-### 16. Deep-link hash routing — S
-`location.hash` carries only the tab. Extend to `#skills/pdf/SKILL.md`,
-`#settings?q=permission`, `#costs/2026-07-30`, restore state on load, and make
-the back button work between editor and inventory.
+### 16. Deep-link hash routing — S *(partly done)*
+Files are addressable — `#skills/pdf/SKILL.md`, `#file/<path>`, `?line=` honoured
+on load — and the back button works between a finding and the file it names.
+Still tab-only: `#settings?q=permission` and `#costs/2026-07-30`.
 
 ### 17. Undo journal with a history view — M
 Have `atomic_write()` snapshot the pre-write content into
@@ -208,11 +222,13 @@ dirties tracked files with no visibility.
 recursively to show the real assembled token cost, list the auto-memory
 directory, and flag imports that don't resolve.
 
-### 20. Syntax highlighting + JSON format/lint — M
-The standard no-library technique: a `<pre>` behind a transparent-text textarea
-with synchronized scroll, plus a regex tokenizer for JSON, YAML frontmatter and
-Markdown. Add a format button and turn `Expecting ',' delimiter: line 12` into a
-cursor jump.
+### 20. Syntax highlighting in the *other* textareas — S *(the editor is done)*
+The file editor got the `<pre>`-behind-textarea treatment, tokenizers, Format
+and jump-to-error. Two raw-JSON textareas were left on the old plain `.fedit`:
+`mcpEditPanel()` (a whole server config blob) and `jsonForm()` (raw-JSON
+settings keys). Both validate with `JSON.parse` on submit and both would benefit
+from the same highlighting and Format button — the pane in `editor.js` needs
+factoring into something callable with a value and an onchange first.
 
 ### 21. Reference map across items — M
 Parse each item body for skill names, `/command` invocations, `subagent_type`

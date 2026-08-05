@@ -76,6 +76,36 @@ def disabled_dir():
     """Parked home for disabled things — outside every dir Claude Code scans."""
     return config_dir() / "disabled"
 
+def plugins_dir():
+    """Where Claude Code installs plugins: readable here, never written.
+
+    The same path as plugins.plugins_root(); duplicated rather than imported
+    because plugins.py imports this module, and resolve_editable() below has to
+    know about plugins to mark them read-only."""
+    return config_dir() / "plugins"
+
+def _within(path, root):
+    return path == root or root in path.parents
+
+def resolve_editable(raw):
+    """Expand a user-supplied path and decide whether we'll open it at all.
+
+    Returns (resolved Path, readonly bool); raises ValueError otherwise. The
+    check runs against the *resolved* path, so a symlink sitting in the config
+    dir is judged by where it points, not by where it lives."""
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("no path given")
+    p = Path(raw.strip()).expanduser()
+    if not p.is_absolute():
+        raise ValueError("path must be absolute (or start with ~)")
+    # strict=False so a not-yet-created file still resolves to a real target
+    p = p.resolve()
+    if _within(p, plugins_dir().resolve()):
+        return p, True  # installed plugins are someone else's copy — look only
+    if _within(p, config_dir().resolve()) or p == CLAUDE_JSON.resolve():
+        return p, False
+    raise ValueError("path is outside the config dir")
+
 def tilde(p):
     return str(p).replace(str(Path.home()), "~", 1)
 
