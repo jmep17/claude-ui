@@ -9,6 +9,7 @@ core.config_dir() consults .claude-ui.json before $CLAUDE_CONFIG_DIR and so
 can't be redirected by the environment alone.
 """
 
+import datetime
 import json
 import os
 import pathlib
@@ -19,10 +20,11 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "bin"))
 
-from claude_ui import settings  # noqa: E402
+from claude_ui import schema, settings  # noqa: E402
 
 SCHEMA = settings.SETTINGS_SCHEMA
 BY_KEY = {s["key"]: s for s in SCHEMA}
+RAW_BY_KEY = {s["key"]: s for s in settings.SETTINGS_RAW}
 
 VALUE_LISTS = ("values", "item_values", "key_values")
 CONTROL_TYPES = {"bool", "number", "string", "enum", "combo", "list", "kv",
@@ -125,6 +127,324 @@ class TestModelKeys(unittest.TestCase):
                 self.assertEqual(BY_KEY[base]["type"], "kv", entry)
             else:
                 self.assertIn(entry, BY_KEY, entry)
+
+
+class TestSnapshot(unittest.TestCase):
+    """The vendored copy of the official JSON Schema."""
+
+    SNAP = schema.vendored()
+
+    def test_snapshot_loads(self):
+        for field in ("source", "resolved", "fetched", "keys"):
+            self.assertIn(field, self.SNAP)
+        self.assertGreaterEqual(len(self.SNAP["keys"]), 120)
+
+    def test_entry_shapes(self):
+        for key, e in self.SNAP["keys"].items():
+            self.assertTrue(e.get("description", "").strip(), key)
+            self.assertIsInstance(e.get("managed"), bool, key)
+            if "enum" in e:
+                self.assertTrue(e["enum"], key)
+                for v in e["enum"]:
+                    self.assertIsInstance(v, (str, int, float, bool), key)
+            if "doc" in e:
+                self.assertRegex(e["doc"], r"^https://\w+\.claude\.com/docs/", key)
+
+    def test_snapshot_is_deterministic(self):
+        """Catches a hand-edited snapshot: it must be exactly what the tool writes."""
+        self.assertEqual(schema.OFFICIAL_PATH.read_text(),
+                         schema.serialize(self.SNAP))
+
+    def test_snapshot_is_not_ancient(self):
+        """The only offline staleness signal there is — a repo with no CI gets one
+        deliberate failure a year rather than silent rot."""
+        age = (datetime.date.today()
+               - datetime.date.fromisoformat(self.SNAP["fetched"])).days
+        self.assertLess(age, 365,
+                        "snapshot is over a year old — run: "
+                        "python3 tools/sync_settings_schema.py")
+
+    def test_missing_snapshot_degrades(self):
+        """No snapshot on disk must mean stale help, never a crash."""
+        real = schema.OFFICIAL_PATH
+        try:
+            schema.OFFICIAL_PATH = pathlib.Path("/nonexistent/settings_schema.json")
+            schema.vendored.cache_clear()
+            self.assertEqual(schema.vendored(), {})
+            merged = schema.merge(settings.SETTINGS_RAW)
+            self.assertEqual(len(merged), len(settings.SETTINGS_RAW))
+            self.assertTrue(all(s.get("doc") for s in merged))
+        finally:
+            schema.OFFICIAL_PATH = real
+            schema.vendored.cache_clear()
+
+
+class TestMerge(unittest.TestCase):
+    """Official facts land on the rows without displacing hand curation."""
+
+    # what merge() must never touch
+    CURATED = ("type", "cat", "aka", "fields", "templates", "item_values",
+               "key_values", "value_type")
+
+    def test_hand_curation_survives(self):
+        for key, raw in RAW_BY_KEY.items():
+            merged = BY_KEY[key]
+            for f in self.CURATED:
+                self.assertEqual(merged.get(f), raw.get(f), key + "." + f)
+            if raw.get("desc"):
+                self.assertEqual(merged["desc"], raw["desc"], key)
+
+    def test_generated_descs_fill_the_gaps(self):
+        """Every row shows something under its key, curated or derived."""
+        for s in SCHEMA:
+            self.assertTrue(s["desc"].strip(), s["key"] + " has no desc")
+
+    def test_values_are_a_superset(self):
+        for key, raw in RAW_BY_KEY.items():
+            before = raw.get("values")
+            if not before:
+                continue
+            after = BY_KEY[key].get("values") or []
+            self.assertEqual(after[:len(before)], before,
+                             key + ": curated order must stay the prefix")
+
+    def test_official_enum_values_are_all_offered(self):
+        """The live drift catcher: a value upstream adds must reach the dropdown."""
+        off = schema.official()
+        for s in SCHEMA:
+            allowed = (off.get(s["key"]) or {}).get("enum")
+            if not allowed:
+                continue
+            offered = s.get("values") or []
+            for v in allowed:
+                self.assertIn(v, offered, s["key"])
+
+    def test_delegate_reached_default_mode(self):
+        """The concrete drift that motivated all of this."""
+        self.assertIn("delegate", BY_KEY["permissions.defaultMode"]["values"])
+
+    def test_official_defaults_win(self):
+        self.assertEqual(BY_KEY["workflowSizeGuideline"]["default"], "unrestricted")
+        self.assertIs(BY_KEY["includeCoAuthoredBy"]["default"], True)
+        self.assertIs(BY_KEY["fastMode"]["default"], False)
+
+    def test_control_type_not_contradicted(self):
+        """A hand control type must be able to hold the official JSON type.
+
+        This is the check that would have caught modelling disableAutoMode
+        (string with one allowed value) as a bool.
+        """
+        ok = {
+            "bool": {"boolean"},
+            "number": {"number", "integer"},
+            "string": {"string"}, "combo": {"string"}, "enum": {"string", "number"},
+            "list": {"array"},
+            "kv": {"object"}, "object": {"object"},
+            "json": {"object", "array", "string", "boolean", "number", "integer"},
+        }
+        off = schema.official()
+        for s in SCHEMA:
+            t = (off.get(s["key"]) or {}).get("type")
+            if t is None:
+                continue
+            got = set(t) if isinstance(t, list) else {t}
+            got.discard("null")
+            if not got:
+                continue
+            self.assertTrue(got & ok[s["type"]],
+                            f"{s['key']}: control {s['type']} vs official {sorted(got)}")
+
+    def test_every_entry_resolves_a_doc_url(self):
+        for s in SCHEMA:
+            self.assertRegex(s.get("doc", ""), r"^https://\w+\.claude\.com/docs/",
+                             s["key"])
+
+    def test_unverified_set_is_frozen(self):
+        """Not listed in the official schema. additionalProperties is true, so
+        absence is not disproof — but the set should only change deliberately."""
+        expected = {
+            "gitAttributionEmail", "gitAttributionName", "interactiveEditingEnabled",
+            "interfaceLanguage", "invalidSSLWarning", "keyBindings",
+            "llmConnectionTimeout", "llmRequestTimeout", "maxCompactMessages",
+            "mcpServerTimeouts", "proxy", "remote.defaultEnvironmentId",
+            "restartOnConfigChange", "sessionHistorySize", "showHiddenFiles",
+            "skipFirstRunQuestions", "strikethrough", "switchModelsOnFlag",
+            "telemetryEnabled", "thinkingBudgetTokens", "warningOnSandboxEscape",
+            "workspaceInitScript",
+        }
+        self.assertEqual({s["key"] for s in SCHEMA if s.get("unverified")}, expected)
+
+    def test_managed_category_is_explicit(self):
+        """The (Managed settings) prose convention also tags disableAgentView and
+        sshConfigs, which ship as ordinary rows. It may badge; it must not place."""
+        in_cat = {s["key"] for s in SCHEMA if s["cat"] == schema.MANAGED_CAT}
+        self.assertEqual(in_cat, {k for k, _ in settings.MANAGED_KEYS})
+        self.assertTrue(all(BY_KEY[k].get("managed") for k in in_cat))
+        for key in ("disableAgentView", "sshConfigs"):
+            self.assertEqual(BY_KEY[key]["cat"], "system", key)
+
+    def test_managed_group_renders_last(self):
+        """renderSettings buckets in SCHEMA order, so position is the ordering."""
+        cats = list(dict.fromkeys(s["cat"] for s in SCHEMA))
+        self.assertEqual(cats[-1], schema.MANAGED_CAT)
+
+    def test_global_config_keys_are_not_rows(self):
+        """The official schema lists them; the docs say settings.json ignores them."""
+        for key in schema.GLOBAL_CONFIG_KEYS:
+            self.assertNotIn(key, BY_KEY, key + " belongs to ~/.claude.json")
+
+    def test_dangerous_mode_key_moved_to_top_level(self):
+        self.assertIn("skipDangerousModePermissionPrompt", BY_KEY)
+        self.assertNotIn("permissions.skipDangerousModePermissionPrompt", BY_KEY)
+
+    def test_env_vars_derive_from_the_snapshot(self):
+        self.assertTrue(set(settings.ENV_VARS) - set(settings.ENV_EXTRA)
+                        <= schema.env_var_names())
+        self.assertFalse(set(settings.ENV_VARS) & settings.ENV_READONLY)
+        for name in settings.ENV_EXTRA:
+            self.assertIn(name, settings.ENV_VARS)
+
+    def test_hook_events_cover_the_documented_set(self):
+        self.assertTrue(set(schema.hook_events()) <= set(settings.HOOK_EVENTS))
+        self.assertEqual(settings.HOOK_EVENTS[:len(settings.HOOK_EVENTS_COMMON)],
+                         settings.HOOK_EVENTS_COMMON)
+
+    def test_help_payload_stays_small(self):
+        """Guards the eager/lazy split — nobody folds 340 env descriptions in here."""
+        payload = schema.help_payload(s["key"] for s in SCHEMA)
+        self.assertLess(len(json.dumps(payload)), 120_000)
+        self.assertIn("effortLevel", payload)
+
+
+class TestSchemaBuild(unittest.TestCase):
+    """flatten/validate/doc_url, against hand-built documents."""
+
+    def doc(self, props, **kw):
+        return {"$schema": "http://json-schema.org/draft-07/schema#",
+                "properties": props, **kw}
+
+    def test_flatten_handles_composition(self):
+        flat = schema.flatten(self.doc({
+            "theme": {"description": "d", "anyOf": [{"type": "string",
+                                                     "enum": ["dark", "light"]},
+                                                    {"type": "string"}]},
+            "maybe": {"description": "d", "type": ["string", "null"]},
+            "untyped": {"description": "d"},
+            "nest": {"description": "d", "type": "object",
+                     "properties": {"leaf": {"description": "d", "type": "boolean"}}},
+        }))
+        self.assertEqual(flat["theme"]["enum"], ["dark", "light"])
+        self.assertEqual(flat["maybe"]["type"], ["string", "null"])
+        self.assertNotIn("type", flat["untyped"])
+        self.assertIn("nest.leaf", flat)
+
+    def test_doc_url_prefers_the_anchored_one(self):
+        # the three-URL `permissions` shape: only one carries an anchor
+        self.assertEqual(
+            schema.doc_url("See https://code.claude.com/docs/en/permissions and "
+                           "https://code.claude.com/docs/en/settings#permission-settings "
+                           "and https://code.claude.com/docs/en/tools-reference"),
+            "https://code.claude.com/docs/en/settings#permission-settings")
+
+    def test_doc_url_strips_trailing_punctuation(self):
+        self.assertEqual(schema.doc_url("See https://code.claude.com/docs/en/hooks."),
+                         "https://code.claude.com/docs/en/hooks")
+
+    def test_doc_url_absent(self):
+        self.assertIsNone(schema.doc_url("no link here"))
+
+    def test_resolve_doc_falls_back(self):
+        self.assertEqual(schema.resolve_doc("statusLine.command", ""),
+                         schema.DOC_BASE + "statusline")
+        self.assertEqual(schema.resolve_doc("someBrandNewKey", ""),
+                         schema.DOC_BASE + "settings")
+
+    def test_validate_rejects_a_truncated_document(self):
+        with self.assertRaises(ValueError):
+            schema.validate(self.doc({"a": {"description": "d", "type": "string"}}))
+
+    def test_validate_rejects_a_wrong_draft(self):
+        bad = self.doc({}, **{})
+        bad["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+        with self.assertRaises(ValueError):
+            schema.validate(bad)
+
+    def test_validate_rejects_undescribed_keys(self):
+        with self.assertRaises(ValueError):
+            schema.validate(self.doc(
+                {f"k{i}": {"type": "string"} for i in range(130)}))
+
+
+class TestLiveOverlay(unittest.TestCase):
+    def setUp(self):
+        self._get, self._live = schema._get, schema._live
+        self._gen = schema._generation
+
+    def tearDown(self):
+        schema._get = self._get
+        schema._live = self._live
+        schema._generation = self._gen
+
+    def fake_doc(self, extra=None):
+        props = {f"k{i}": {"type": "string", "description": f"desc {i}"}
+                 for i in range(130)}
+        props.update(extra or {})
+        return json.dumps({"$schema": "http://json-schema.org/draft-07/schema#",
+                           "properties": props})
+
+    def test_live_overlay_wins_and_bumps_generation(self):
+        schema._get = lambda url: self.fake_doc({
+            "model": {"type": "string", "description": "a fresher description"}})
+        schema._fetch_official()
+        self.assertEqual(schema._generation, self._gen + 1)
+        self.assertEqual(schema.official()["model"]["description"],
+                         "a fresher description")
+        self.assertEqual(schema.merge(settings.SETTINGS_RAW)[0]["key"], "model")
+
+    def test_live_never_deletes_vendored_keys(self):
+        """The vendored snapshot is the floor: a thin live doc must not blank the UI."""
+        schema._get = lambda url: self.fake_doc()
+        schema._fetch_official()
+        self.assertIn("effortLevel", schema.official())
+
+    def test_fetch_failure_leaves_the_vendored_snapshot(self):
+        def boom(url):
+            raise OSError("offline")
+
+        schema._get = boom
+        schema._live = {}
+        schema._fetch_official()       # must not raise
+        self.assertEqual(schema._live, {})
+        self.assertIn("effortLevel", schema.official())
+
+    def test_fetch_rejects_a_truncated_document(self):
+        schema._get = lambda url: json.dumps({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "properties": {"model": {"type": "string", "description": "d"}}})
+        schema._live = {}
+        schema._fetch_official()
+        self.assertEqual(schema._live, {})
+
+    def test_settings_schema_tracks_generation(self):
+        schema._get = lambda url: self.fake_doc({
+            "model": {"type": "string", "description": "d", "default": "haiku"}})
+        schema._fetch_official()
+        by_key = {s["key"]: s for s in settings.settings_schema()}
+        self.assertEqual(by_key["model"]["default"], "haiku")
+
+
+@unittest.skipUnless(os.environ.get("CLAUDE_UI_NET_TESTS"),
+                     "network test — set CLAUDE_UI_NET_TESTS=1 to run")
+class TestSnapshotDrift(unittest.TestCase):
+    """Opt-in rather than skip-on-failure: offline is indistinguishable from
+    'the URL moved', and a test that silently skips stops running exactly when
+    it matters most."""
+
+    def test_vendored_matches_live(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "..", "tools"))
+        import sync_settings_schema as sync
+        self.assertEqual(sync.main(["--check"]), 0)
 
 
 class TestDocsFetch(unittest.TestCase):

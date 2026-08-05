@@ -13,9 +13,10 @@ import webbrowser
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
 from .items import config_files_state, item_read, item_save, scan_items, set_enabled
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
+from . import schema
 from .plugins import (plugin_resync, plugin_set_enabled, plugins_split,
                       plugins_state, skill_override_set)
-from .settings import (SETTINGS_SCHEMA, file_read, file_save, hook_test,
+from .settings import (file_read, file_save, hook_test, settings_schema,
                        settings_set, settings_state, start_docs_fetch,
                        suggest_state)
 from .statusline import statusline_save, statusline_state
@@ -78,7 +79,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/":
             page = (STATIC / "index.html").read_text()
-            self.send(200, page.replace("__SCHEMA__", json.dumps(SETTINGS_SCHEMA))
+            # a call, not the module constant: a live schema fetch that landed
+            # after start-up is picked up on the next page render
+            self.send(200, page.replace("__SCHEMA__", json.dumps(settings_schema()))
                               .replace("__TOKEN__", TOKEN),
                       "text/html; charset=utf-8", {"cache-control": "no-cache"})
         elif self.path in STATIC_FILES:
@@ -107,6 +110,14 @@ class Handler(BaseHTTPRequestHandler):
                 "default_dir": "config_dir" not in read_cfg()
                                and not os.environ.get("CLAUDE_CONFIG_DIR"),
             })
+        elif self.path == "/api/schema-help":
+            # long-form help for the settings popovers, fetched once on the
+            # first open. Kept out of the inlined page schema: it is bigger than
+            # everything a row needs to render, and most rows never open one.
+            self.send(200, {
+                "generation": schema.generation(),
+                "keys": schema.help_payload(s["key"] for s in settings_schema()),
+            }, extra={"cache-control": "no-cache"})
         elif self.path.startswith("/api/file?"):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
@@ -231,7 +242,9 @@ def main():
         print(f"claude-ui: port {args.port} in use, using {port}")
     url = f"http://127.0.0.1:{port}"
     print(f"claude-ui: {url}  (config dir: {config_dir()})")
+    # two threads, not one: a failure in either must not skip the other
     start_docs_fetch()
+    schema.start_schema_fetch()
     if not args.no_open:
         webbrowser.open(url)
     try:

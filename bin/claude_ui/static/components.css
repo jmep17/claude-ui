@@ -735,6 +735,54 @@ kbd,
   flex-direction: column;
   gap: 1px;
 }
+
+/* A panel of prose. Fixed and body-anchored like the menus, because these hang
+   off rows inside `.setgroup`, which clips its overflow. */
+.popover {
+  position: fixed;
+  z-index: 50;
+  width: max-content;
+  max-width: min(26rem, 92vw);
+  white-space: normal;
+}
+.pop-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--muted) 40%, transparent);
+}
+.pop-head .skey { font-size: 0.75rem; }
+.pop-body {
+  padding: 0.625rem 0.75rem;
+  max-height: min(22rem, 55vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-size: 0.75rem;
+  line-height: 1.55;
+  color: var(--popover-foreground);
+}
+.pop-enum {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0 0.75rem 0.625rem;
+}
+.pop-enum .pop-enum-label {
+  width: 100%;
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.pop-foot {
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid var(--border);
+}
+.pop-foot .btn { max-width: 100%; }
+.pop-foot .btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dropdown-item {
   justify-content: flex-start;
   height: 1.875rem;
@@ -933,33 +981,6 @@ kbd,
   overflow: hidden;
 }
 .progress-bar { height: 100%; border-radius: 99px; background: var(--primary); }
-
-/* --------------------------------------------------------------- tooltip ---
-   CSS-only: any element with data-tip renders one on hover/focus. */
-[data-tip] { position: relative; }
-[data-tip]::after {
-  content: attr(data-tip);
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 50%;
-  z-index: 70;
-  translate: -50% 0;
-  padding: 0.25rem 0.5rem;
-  border-radius: var(--radius-sm);
-  background: var(--foreground);
-  color: var(--background);
-  font-family: var(--font-sans);
-  font-size: 0.6875rem;
-  font-weight: 500;
-  line-height: 1.35;
-  white-space: nowrap;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--dur) var(--ease);
-}
-[data-tip]:hover::after,
-[data-tip]:focus-visible::after { opacity: 1; }
-[data-tip=""]::after { content: none; }
 
 /* ----------------------------------------------------------- empty state --- */
 .empty-state {

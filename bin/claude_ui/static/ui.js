@@ -218,9 +218,14 @@ function openThemeMenu(anchor) {
    leave the viewport. Escape and any outside click close it. */
 
 let DROPDOWN = null;
+// When Escape closes a dropdown it restores focus to the anchor, which fires a
+// focus event on it. Anything that opens on focus (see infoTrigger) has to
+// ignore that one, or Escape closes and immediately reopens.
+let DROPDOWN_CLOSED_AT = 0;
 
 function closeDropdown() {
   if (!DROPDOWN) return;
+  DROPDOWN_CLOSED_AT = performance.now();
   DROPDOWN.node.remove();
   removeEventListener("keydown", DROPDOWN.onkey, true);
   removeEventListener("mousedown", DROPDOWN.onout, true);
@@ -233,24 +238,39 @@ function closeDropdown() {
 
 const scrollingElement = () => document.scrollingElement || document.documentElement;
 
-function openDropdown(anchor, node) {
+function placeDropdown(anchor, node) {
+  const r = anchor.getBoundingClientRect();
+  const w = node.offsetWidth;
+  const h = node.offsetHeight;
+  node.style.left = Math.max(8, Math.min(r.right - w, innerWidth - w - 8)) + "px";
+  // clamped at 8 so a panel taller than the space either side still starts
+  // on-screen rather than being pushed off the top
+  node.style.top = Math.max(8, r.bottom + 4 + h > innerHeight - 8 && r.top - 4 - h > 8
+    ? r.top - 4 - h
+    : Math.min(r.bottom + 4, innerHeight - h - 8)) + "px";
+}
+
+/* Re-place the open dropdown. Needed when a panel's content arrives after it
+   opened: it was measured while still short, so without this it grows off the
+   bottom of the screen. */
+function repositionDropdown() {
+  if (DROPDOWN) placeDropdown(DROPDOWN.anchor, DROPDOWN.node);
+}
+
+function openDropdown(anchor, node, opts = {}) {
   const reopening = DROPDOWN && DROPDOWN.anchor === anchor;
   closeDropdown();
   if (reopening) return;
 
   document.body.appendChild(node);
-  const r = anchor.getBoundingClientRect();
-  const w = node.offsetWidth;
-  const h = node.offsetHeight;
-  node.style.left = Math.max(8, Math.min(r.right - w, innerWidth - w - 8)) + "px";
-  node.style.top = (r.bottom + 4 + h > innerHeight - 8 && r.top - 4 - h > 8
-    ? r.top - 4 - h
-    : Math.min(r.bottom + 4, innerHeight - h - 8)) + "px";
+  placeDropdown(anchor, node);
 
   const onkey = (e) => {
     if (e.key === "Escape") { e.stopPropagation(); closeDropdown(); anchor.focus(); return; }
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Tab") return;
-    const items = [...node.querySelectorAll("button:not(:disabled)")];
+    // links join the cycle so a popover's Docs link is keyboard-reachable; no
+    // existing dropdown holds an <a>, so this is a no-op for the menus
+    const items = [...node.querySelectorAll("button:not(:disabled), a[href]")];
     if (!items.length) return;
     e.preventDefault();
     const i = items.indexOf(document.activeElement);
@@ -265,6 +285,76 @@ function openDropdown(anchor, node) {
   scrollingElement()?.addEventListener("scroll", closeDropdown, { passive: true });
   anchor.setAttribute("aria-expanded", "true");
   DROPDOWN = { node, anchor, onkey, onout };
+  if (opts.focusFirst) {
+    node.querySelector("button:not(:disabled), a[href]")?.focus();
+  }
+}
+
+/* ---------------------------------------------------------------- popover --
+   A panel of prose, where dropdown-menu is a list of actions. Hover or focus
+   opens it; click, Enter or Space pins it and moves focus inside so the panel's
+   own links are reachable.
+
+   Built on openDropdown rather than the absolutely-positioned filterPopup
+   because these hang off rows inside `.setgroup`, which clips its overflow —
+   only a body-anchored fixed panel escapes that. Flipping, Escape-with-focus-
+   restore and outside-click dismissal all come along for free.
+
+   `build()` runs on every open, so a panel can show help text that arrived
+   since the last time it was opened. */
+
+function infoTrigger(label, build) {
+  let openTimer = null, closeTimer = null, pinned = false;
+
+  const btn = el("button.btn.btn-icon.btn-ghost.info-trigger", {
+    type: "button",
+    "aria-haspopup": "dialog",
+    "aria-expanded": "false",
+    "aria-label": "About " + label,
+  }, icon("info"));
+
+  const isOpen = () => DROPDOWN && DROPDOWN.anchor === btn;
+
+  const open = (pin) => {
+    clearTimeout(closeTimer);
+    if (isOpen()) { pinned = pinned || pin; return; }
+    const panel = build();
+    if (!panel) return;
+    panel.addEventListener("pointerenter", () => clearTimeout(closeTimer));
+    panel.addEventListener("pointerleave", () => scheduleClose());
+    pinned = !!pin;
+    openDropdown(btn, panel, { focusFirst: pin });
+  };
+
+  const scheduleClose = () => {
+    clearTimeout(closeTimer);
+    if (pinned) return;
+    closeTimer = setTimeout(() => { if (isOpen()) closeDropdown(); }, 100);
+  };
+
+  btn.addEventListener("pointerenter", () => {
+    clearTimeout(closeTimer);
+    openTimer = setTimeout(() => open(false), 120);
+  });
+  btn.addEventListener("pointerleave", () => {
+    clearTimeout(openTimer);
+    scheduleClose();
+  });
+  btn.addEventListener("focus", () => {
+    // not the focus that Escape just handed back to us
+    if (performance.now() - DROPDOWN_CLOSED_AT < 50) return;
+    if (btn.matches(":focus-visible")) open(false);
+  });
+  btn.addEventListener("blur", () => { if (!pinned) scheduleClose(); });
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    clearTimeout(openTimer);
+    if (isOpen() && pinned) { closeDropdown(); pinned = false; return; }
+    if (isOpen()) closeDropdown();       // reopen pinned, with focus moved in
+    open(true);
+  });
+
+  return btn;
 }
 
 /* a plain action menu, the shape the row overflow buttons want */

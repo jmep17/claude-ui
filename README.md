@@ -86,12 +86,35 @@ The Claude Code config dir is resolved in this order:
 ## Layout
 
 `bin/claude-ui` is a thin launcher; the code lives in `bin/claude_ui/*.py`
-(core → settings → items/mcp/plugins → statusline/insight/assist/setup →
-doctor → server, a clean DAG). The frontend is plain files in `bin/claude_ui/static/`
+(core → schema → settings → items/mcp/plugins → statusline/insight/assist/setup
+→ doctor → server, a clean DAG). The frontend is plain files in `bin/claude_ui/static/`
 (no build step), layered theme → components → app, with `ui.js` before
 `app.js`.
 
 Tests are stdlib `unittest`: `python3 -m unittest discover tests`.
+
+## Settings help
+
+Every settings row carries an ⓘ that opens the official description of the key,
+its type, default and allowed values, and a link to the exact docs anchor. That
+text comes from Claude Code's published JSON Schema, vendored at
+`bin/claude_ui/data/settings_schema.json` so the app works offline, and
+re-fetched in the background at start-up so it stays current.
+
+To refresh the vendored copy:
+
+```sh
+python3 tools/sync_settings_schema.py           # fetch and write
+python3 tools/sync_settings_schema.py --check   # diff only, exit 1 if stale
+```
+
+Read the diff before committing: a reworded description is upstream telling you
+a setting changed meaning. `CLAUDE_UI_NET_TESTS=1 python3 -m unittest discover
+tests` runs the same check as a test.
+
+The hand-written entries in `settings.py` are never regenerated — they supply
+the control to draw and the category to file each key under, and the schema
+supplies the facts.
 
 [`docs/IDEAS.md`](docs/IDEAS.md) is the ranked backlog — what is worth building
 next and why, written against the code that exists.

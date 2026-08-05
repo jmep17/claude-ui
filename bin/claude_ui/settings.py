@@ -8,11 +8,20 @@ import subprocess
 import threading
 import urllib.request
 
+from . import schema
 from .core import CONFIG_FILES, atomic_write, config_dir, tilde
 
 
-# User-scope settings.json keys, from https://code.claude.com/docs/en/settings
-# and .scratch/claude-code-config-research/ (docs snapshot 2026-07-22).
+# User-scope settings.json keys. The entries below are hand-written and carry
+# what the official JSON Schema cannot: which *control* to render, which
+# category to file the key under, and a one-line description short enough to sit
+# under the key name. Everything the official schema is authoritative about —
+# allowed values, defaults, the long description, the exact docs URL — is merged
+# in over the top at import time by schema.merge(). See schema.py.
+#
+# So: add a key here to make it appear in the UI, and let the merge supply its
+# facts. Never paste a default or an enum list in by hand when the official
+# schema has one; it will be overwritten, and the merge tests will say so.
 #
 # Control types the frontend understands:
 #   bool             true/false dropdown (three-state with unset)
@@ -73,185 +82,33 @@ LANGS = ["en", "ja", "fr", "es", "de", "zh", "ko", "pt", "it", "ru"]
 LANG_NAMES = ["english", "japanese", "spanish", "french", "german", "chinese",
               "korean", "portuguese", "italian", "russian"]
 
-# Documented env vars, suggested as keys in the `env` editor. Extracted from
-# .scratch/claude-code-config-research/claude-code-configuration.md (docs
-# snapshot 2026-07-22), with documented family patterns expanded. Excludes
-# auto-set read-only signals (CLAUDECODE, CLAUDE_PID, CLAUDE_CODE_SESSION_ID,
-# ...) and removed/no-op vars. Suggestions only — any key can still be typed.
-ENV_VARS = [
-    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AWS_API_KEY",
-    "ANTHROPIC_AWS_BASE_URL", "ANTHROPIC_AWS_WORKSPACE_ID",
-    "ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL",
-    "ANTHROPIC_BEDROCK_MANTLE_BASE_URL", "ANTHROPIC_BEDROCK_SERVICE_TIER",
-    "ANTHROPIC_BETAS", "ANTHROPIC_CUSTOM_HEADERS",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES",
-    "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
-    "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_FOUNDRY_RESOURCE",
-    "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
-    "ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION", "ANTHROPIC_VERTEX_BASE_URL",
-    "ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_WORKSPACE_ID",
-    "API_FORCE_IDLE_TIMEOUT", "API_TIMEOUT_MS", "AWS_BEARER_TOKEN_BEDROCK",
-    "AWS_CONFIG_FILE", "AWS_DEFAULT_REGION", "AWS_PROFILE", "AWS_REGION",
-    "AWS_SHARED_CREDENTIALS_FILE", "BASH_DEFAULT_TIMEOUT_MS",
-    "BASH_MAX_OUTPUT_LENGTH", "BASH_MAX_TIMEOUT_MS", "CCR_FORCE_BUNDLE",
-    "CLAUDE_AFK_COUNTDOWN_MS", "CLAUDE_AFK_TIMEOUT_MS",
-    "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS",
-    "CLAUDE_AGENT_SDK_MCP_NO_PREFIX", "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS",
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "CLAUDE_AUTO_BACKGROUND_TASKS",
-    "CLAUDE_AX_SCREEN_READER", "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR",
-    "CLAUDE_CLIENT_PRESENCE_FILE", "CLAUDE_CODE_ACCESSIBILITY",
-    "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD",
-    "CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT", "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
-    "CLAUDE_CODE_API_KEY_HELPER_TTL_MS", "CLAUDE_CODE_ARTIFACT_AUTO_OPEN",
-    "CLAUDE_CODE_ATTRIBUTION_HEADER", "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
-    "CLAUDE_CODE_AUTO_CONNECT_IDE", "CLAUDE_CODE_AWS_CHAIN_RESOLVE_TIMEOUT_MS",
-    "CLAUDE_CODE_CERT_STORE", "CLAUDE_CODE_CLIENT_CERT",
-    "CLAUDE_CODE_CLIENT_KEY", "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
-    "CLAUDE_CODE_DEBUG_LOGS_DIR", "CLAUDE_CODE_DEBUG_LOG_LEVEL",
-    "CLAUDE_CODE_DISABLE_1M_CONTEXT", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
-    "CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "CLAUDE_CODE_DISABLE_AGENT_VIEW",
-    "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "CLAUDE_CODE_DISABLE_ARTIFACT",
-    "CLAUDE_CODE_DISABLE_ATTACHMENTS", "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
-    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
-    "CLAUDE_CODE_DISABLE_BEDROCK_CONTENT_TYPE_GUARD",
-    "CLAUDE_CODE_DISABLE_BG_EXIT_HANDOFF",
-    "CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP",
-    "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS", "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
-    "CLAUDE_CODE_DISABLE_CRON", "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
-    "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS", "CLAUDE_CODE_DISABLE_FAST_MODE",
-    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
-    "CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING",
-    "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS",
-    "CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP", "CLAUDE_CODE_DISABLE_MOUSE",
-    "CLAUDE_CODE_DISABLE_MOUSE_CLICKS",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-    "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK",
-    "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK",
-    "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL",
-    "CLAUDE_CODE_DISABLE_POLICY_SKILLS", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
-    "CLAUDE_CODE_DISABLE_THINKING", "CLAUDE_CODE_DISABLE_VIRTUAL_SCROLL",
-    "CLAUDE_CODE_DISABLE_WORKFLOWS", "CLAUDE_CODE_EFFORT_LEVEL",
-    "CLAUDE_CODE_ENABLE_APPEND_SUBAGENT_PROMPT",
-    "CLAUDE_CODE_ENABLE_AWAY_SUMMARY",
-    "CLAUDE_CODE_ENABLE_BACKGROUND_PLUGIN_REFRESH",
-    "CLAUDE_CODE_ENABLE_FEEDBACK_SURVEY_FOR_OTEL",
-    "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING",
-    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "CLAUDE_CODE_ENABLE_TASKS",
-    "CLAUDE_CODE_ENABLE_TELEMETRY", "CLAUDE_CODE_EXIT_AFTER_STOP_DELAY",
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "CLAUDE_CODE_EXTRA_BODY",
-    "CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS",
-    "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", "CLAUDE_CODE_FORCE_STRIKETHROUGH",
-    "CLAUDE_CODE_FORCE_SYNC_OUTPUT", "CLAUDE_CODE_FORK_SUBAGENT",
-    "CLAUDE_CODE_FORWARD_SUBAGENT_TEXT", "CLAUDE_CODE_GIT_BASH_PATH",
-    "CLAUDE_CODE_GLOB_HIDDEN", "CLAUDE_CODE_GLOB_NO_IGNORE",
-    "CLAUDE_CODE_GLOB_TIMEOUT_SECONDS", "CLAUDE_CODE_HIDE_CWD",
-    "CLAUDE_CODE_IDE_HOST_OVERRIDE", "CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL",
-    "CLAUDE_CODE_IDE_SKIP_VALID_CHECK", "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
-    "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_CODE_MAX_RETRIES",
-    "CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION",
-    "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", "CLAUDE_CODE_MAX_TURNS",
-    "CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION",
-    "CLAUDE_CODE_MCP_ALLOWLIST_ENV", "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS",
-    "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "CLAUDE_CODE_NATIVE_CURSOR",
-    "CLAUDE_CODE_NEW_INIT", "CLAUDE_CODE_NO_FLICKER",
-    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_SCOPES",
-    "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH",
-    "CLAUDE_CODE_OTEL_DIAG_STDERR", "CLAUDE_CODE_OTEL_FLUSH_TIMEOUT_MS",
-    "CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS",
-    "CLAUDE_CODE_OTEL_SHUTDOWN_TIMEOUT_MS",
-    "CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE", "CLAUDE_CODE_PERFORCE_MODE",
-    "CLAUDE_CODE_PLUGIN_CACHE_DIR", "CLAUDE_CODE_PLUGIN_GIT_TIMEOUT_MS",
-    "CLAUDE_CODE_PLUGIN_KEEP_MARKETPLACE_ON_FAILURE",
-    "CLAUDE_CODE_PLUGIN_PREFER_HTTPS", "CLAUDE_CODE_PLUGIN_SEED_DIR",
-    "CLAUDE_CODE_POWERSHELL_RESPECT_EXECUTION_POLICY",
-    "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "CLAUDE_CODE_PROCESS_WRAPPER",
-    "CLAUDE_CODE_PROPAGATE_TRACEPARENT",
-    "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "CLAUDE_CODE_PROXY_RESOLVES_HOSTS",
-    "CLAUDE_CODE_RESUME_INTERRUPTED_TURN", "CLAUDE_CODE_RESUME_PROMPT",
-    "CLAUDE_CODE_RETRY_WATCHDOG", "CLAUDE_CODE_SAFE_MODE",
-    "CLAUDE_CODE_SCRIPT_CAPS", "CLAUDE_CODE_SCROLL_SPEED",
-    "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS", "CLAUDE_CODE_SHELL",
-    "CLAUDE_CODE_SHELL_PREFIX", "CLAUDE_CODE_SIMPLE",
-    "CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH",
-    "CLAUDE_CODE_SKIP_AWS_CRED_CACHE", "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
-    "CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS",
-    "CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
-    "CLAUDE_CODE_SKIP_MANTLE_AUTH", "CLAUDE_CODE_SKIP_PROMPT_HISTORY",
-    "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP",
-    "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
-    "CLAUDE_CODE_SYNC_PLUGIN_INSTALL", "CLAUDE_CODE_SYNC_SKILLS",
-    "CLAUDE_CODE_SYNTAX_HIGHLIGHT", "CLAUDE_CODE_TASK_LIST_ID",
-    "CLAUDE_CODE_TEAM_TEARDOWN_PARK_TIMEOUT_MS", "CLAUDE_CODE_TMPDIR",
-    "CLAUDE_CODE_TMUX_TRUECOLOR", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_FOUNDRY",
-    "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_NATIVE_FILE_SEARCH",
-    "CLAUDE_CODE_USE_POWERSHELL_TOOL", "CLAUDE_CODE_USE_VERTEX",
-    "CLAUDE_CONFIG_DIR", "CLAUDE_DISABLE_ADOPT", "CLAUDE_ENABLE_BYTE_WATCHDOG",
-    "CLAUDE_ENABLE_BYTE_WATCHDOG_BEDROCK", "CLAUDE_ENABLE_STREAM_WATCHDOG",
-    "CLAUDE_ENV_FILE", "CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX",
-    "CLAUDE_STREAM_IDLE_TIMEOUT_MS", "CLOUD_ML_REGION", "DEBUG",
-    "DISABLE_AUTOUPDATER", "DISABLE_AUTO_COMPACT", "DISABLE_BUG_COMMAND",
-    "DISABLE_COMPACT", "DISABLE_COST_WARNINGS", "DISABLE_DOCTOR_COMMAND",
-    "DISABLE_ERROR_REPORTING", "DISABLE_EXTRA_USAGE_COMMAND",
-    "DISABLE_FEEDBACK_COMMAND", "DISABLE_GROWTHBOOK",
-    "DISABLE_INSTALLATION_CHECKS", "DISABLE_INSTALL_GITHUB_APP_COMMAND",
-    "DISABLE_INTERLEAVED_THINKING", "DISABLE_LOGIN_COMMAND",
-    "DISABLE_LOGOUT_COMMAND", "DISABLE_PROMPT_CACHING",
-    "DISABLE_PROMPT_CACHING_FABLE", "DISABLE_PROMPT_CACHING_HAIKU",
-    "DISABLE_PROMPT_CACHING_OPUS", "DISABLE_PROMPT_CACHING_SONNET",
-    "DISABLE_TELEMETRY", "DISABLE_UPDATES", "DISABLE_UPGRADE_COMMAND",
-    "DO_NOT_TRACK", "ENABLE_CLAUDEAI_MCP_SERVERS", "ENABLE_PROMPT_CACHING_1H",
-    "ENABLE_PROMPT_CACHING_1H_BEDROCK", "ENABLE_TOOL_SEARCH",
-    "FALLBACK_FOR_ALL_PRIMARY_MODELS", "FORCE_AUTOUPDATE_PLUGINS",
-    "FORCE_COLOR", "FORCE_HYPERLINK", "FORCE_PROMPT_CACHING_5M",
-    "GCLOUD_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT",
-    "HTTPS_PROXY", "HTTP_PROXY", "IS_DEMO", "MAX_MCP_OUTPUT_TOKENS",
-    "MAX_STRUCTURED_OUTPUT_RETRIES", "MAX_THINKING_TOKENS",
-    "MCP_CLIENT_SECRET", "MCP_CONNECTION_NONBLOCKING",
-    "MCP_CONNECT_TIMEOUT_MS", "MCP_OAUTH_CALLBACK_PORT",
-    "MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE",
-    "MCP_SERVER_CONNECTION_BATCH_SIZE", "MCP_TIMEOUT", "MCP_TOOL_TIMEOUT",
-    "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "NO_COLOR",
-    "NO_PROXY", "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT",
-    "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_LOGS_EXPORTER",
-    "OTEL_LOG_ASSISTANT_RESPONSES", "OTEL_LOG_RAW_API_BODIES",
-    "OTEL_LOG_TOOL_CONTENT", "OTEL_LOG_TOOL_DETAILS", "OTEL_LOG_USER_PROMPTS",
-    "OTEL_METRICS_EXPORTER", "OTEL_METRICS_INCLUDE_ACCOUNT_UUID",
-    "OTEL_METRICS_INCLUDE_ENTRYPOINT",
-    "OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES",
-    "OTEL_METRICS_INCLUDE_SESSION_ID", "OTEL_METRICS_INCLUDE_VERSION",
-    "OTEL_METRIC_EXPORT_INTERVAL", "OTEL_RESOURCE_ATTRIBUTES",
-    "SLASH_COMMAND_TOOL_CHAR_BUDGET", "TASK_MAX_OUTPUT_LENGTH",
-    "USE_BUILTIN_RIPGREP", "VERTEX_REGION_CLAUDE_3_5_HAIKU",
-    "VERTEX_REGION_CLAUDE_3_5_SONNET", "VERTEX_REGION_CLAUDE_3_7_SONNET",
-    "VERTEX_REGION_CLAUDE_4_0_OPUS", "VERTEX_REGION_CLAUDE_4_0_SONNET",
-    "VERTEX_REGION_CLAUDE_4_1_OPUS", "VERTEX_REGION_CLAUDE_4_5_OPUS",
-    "VERTEX_REGION_CLAUDE_4_5_SONNET", "VERTEX_REGION_CLAUDE_4_6_OPUS",
-    "VERTEX_REGION_CLAUDE_4_6_SONNET", "VERTEX_REGION_CLAUDE_4_7_OPUS",
-    "VERTEX_REGION_CLAUDE_4_8_OPUS", "VERTEX_REGION_CLAUDE_5_SONNET",
-    "VERTEX_REGION_CLAUDE_FABLE_5", "VERTEX_REGION_CLAUDE_HAIKU_4_5",
+# Env var names suggested as keys in the `env` editor. Derived from the official
+# schema's env.* properties (340 of them) rather than kept by hand — the
+# hand-maintained list had drifted in both directions. Suggestions only: any key
+# can still be typed.
+
+# Real vars the official schema omits: third-party (AWS/gcloud) credentials
+# Claude Code reads through its SDKs, and the ubiquitous colour conventions.
+ENV_EXTRA = [
+    "AWS_CONFIG_FILE", "AWS_DEFAULT_REGION", "AWS_PROFILE",
+    "AWS_SHARED_CREDENTIALS_FILE", "DISABLE_BUG_COMMAND",
+    "ENABLE_PROMPT_CACHING_1H_BEDROCK", "FORCE_COLOR", "GCLOUD_PROJECT",
+    "GOOGLE_CLOUD_PROJECT", "NODE_TLS_REJECT_UNAUTHORIZED", "NO_COLOR",
 ]
 
-SETTINGS_SCHEMA = [
+# Documented, but Claude Code *sets* these in the subprocesses it spawns — they
+# are signals to read from a hook, not settings to write. Suggesting them would
+# invite writing a value that gets overwritten anyway.
+ENV_READONLY = frozenset({
+    "CLAUDECODE", "CLAUDE_PID", "CLAUDE_PROJECT_DIR", "CLAUDE_EFFORT",
+    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_REMOTE",
+    "CLAUDE_CODE_REMOTE_SESSION_ID", "CLAUDE_CODE_TEAM_NAME",
+})
+
+ENV_VARS = sorted((set(ENV_EXTRA) | schema.env_var_names()) - ENV_READONLY)
+
+SETTINGS_RAW = [
     {"key": "model", "type": "combo", "values": MODEL_ALIASES, "cat": "model",
      "aka": ["main", "session"],
      "desc": "Model for the main session — alias (opus, sonnet, haiku…) or full model ID; read at startup"},
@@ -328,8 +185,6 @@ SETTINGS_SCHEMA = [
      "desc": "Extra directories Claude may access (like --add-dir)"},
     {"key": "permissions.disableBypassPermissionsMode", "type": "enum", "values": ["disable"], "cat": "permissions",
      "desc": "Set to 'disable' to prevent bypassPermissions mode"},
-    {"key": "permissions.skipDangerousModePermissionPrompt", "type": "bool", "cat": "permissions",
-     "desc": "Skip the confirmation shown before entering bypassPermissions mode (ignored in project settings)"},
     {"key": "disableAutoMode", "type": "enum", "values": ["disable"], "cat": "permissions",
      "desc": "Set to 'disable' to keep auto mode off and drop it from the mode picker"},
     {"key": "useAutoModeDuringPlan", "type": "bool", "default": True, "cat": "permissions",
@@ -717,11 +572,73 @@ SETTINGS_SCHEMA = [
      "desc": "Directories checked out in each worktree via git sparse-checkout"},
 ]
 
+# Keys that only do something in managed/enterprise scope. They are listed so
+# the settings tab can answer "what is allowManagedHooksOnly", not because you
+# would set one here — the UI files them in their own collapsed group, marked as
+# no-ops in user scope.
+#
+# This list is explicit rather than derived from schema.is_managed(). The
+# "(Managed settings)" prefix is a prose convention, and it also tags
+# disableAgentView and sshConfigs, which the app has always shipped as ordinary
+# user-facing rows under "system". Deriving placement from it would silently
+# relocate two working rows; the flag badges, this list places.
+MANAGED_KEYS = [
+    ("allowManagedHooksOnly", "bool"), ("allowManagedMcpServersOnly", "bool"),
+    ("allowManagedPermissionRulesOnly", "bool"), ("allowAllClaudeAiMcps", "bool"),
+    ("allowedChannelPlugins", "list"), ("allowedMcpServers", "json"),
+    ("deniedMcpServers", "json"), ("managedMcpServers", "json"),
+    ("blockedMarketplaces", "list"), ("strictKnownMarketplaces", "list"),
+    ("pluginSuggestionMarketplaces", "list"), ("pluginTrustMessage", "string"),
+    ("strictPluginOnlyCustomization", "json"), ("disableSideloadFlags", "bool"),
+    ("policyHelper", "json"), ("parentSettingsBehavior", "enum"),
+    ("forceRemoteSettingsRefresh", "bool"), ("forceLoginGatewayUrl", "string"),
+    ("enforceAvailableModels", "bool"), ("claudeMd", "string"),
+    ("channelsEnabled", "bool"), ("browserExternalPageTools", "enum"),
+    ("disableBrowserExternalNavigation", "bool"),
+    ("disableMobileSimulatorTools", "bool"), ("requireCoworkFullVmSandbox", "bool"),
+    ("sshHostAllowlist", "list"), ("wslInheritsWindowsSettings", "bool"),
+    ("requiredMinimumVersion", "string"), ("requiredMaximumVersion", "string"),
+]
+
+# Keys the official schema documents that the hand-written list above missed.
+# Their descriptions, allowed values and defaults all come from the merge, so
+# each entry only says which control to draw and where to file it.
+SETTINGS_RAW += [
+    {"key": "skipDangerousModePermissionPrompt", "type": "bool", "cat": "permissions",
+     "desc": "Record that you've accepted the bypassPermissions dialog, so it stops "
+             "appearing. Normally written by the CLI, not by hand"},
+    {"key": "permissions.disableAutoMode", "type": "enum", "values": ["disable"],
+     "cat": "permissions",
+     "desc": "Set to 'disable' to keep auto mode off. Note the top-level "
+             "disableAutoMode above does the same thing; both are documented"},
+    {"key": "skippedPlugins", "type": "list", "cat": "mcp & plugins",
+     "desc": "Plugins (plugin@marketplace) you declined when prompted, so you "
+             "aren't asked again"},
+    {"key": "skippedMarketplaces", "type": "list", "cat": "mcp & plugins",
+     "desc": "Marketplaces you declined to install when prompted"},
+] + [{"key": k, "type": t, "cat": schema.MANAGED_CAT, "desc": ""}
+     for k, t in MANAGED_KEYS]
+
 # dedupe (keep first occurrence)
 _seen = set()
 
-SETTINGS_SCHEMA = [s for s in SETTINGS_SCHEMA
-                   if not (s["key"] in _seen or _seen.add(s["key"]))]
+SETTINGS_RAW = [s for s in SETTINGS_RAW
+                if not (s["key"] in _seen or _seen.add(s["key"]))]
+
+# Official facts (allowed values, defaults, docs URL, managed/unverified flags)
+# applied over the hand-written entries. Recomputed by settings_schema() once a
+# live fetch lands; this is the boot-time value everything else imports.
+SETTINGS_SCHEMA = schema.merge(SETTINGS_RAW)
+
+_schema_cache = (-1, SETTINGS_SCHEMA)
+
+def settings_schema():
+    """The merged schema, refreshed when a live schema fetch has landed."""
+    global _schema_cache
+    gen = schema.generation()
+    if _schema_cache[0] != gen:
+        _schema_cache = (gen, schema.merge(SETTINGS_RAW))
+    return _schema_cache[1]
 
 SETTINGS_KEY_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_.$-]*$")
 
@@ -882,8 +799,15 @@ def settings_set(key, value):
         node[parts[-1]] = value
     atomic_write(path, json.dumps(data, indent=2) + "\n")
 
-HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
-               "Notification", "Stop", "SubagentStop", "PreCompact", "SessionEnd"]
+# The nine events the hooks builder used to know, kept as the head of the list
+# so the common ones stay at the top of the event picker. The rest — 22 more —
+# come from the official schema's hooks.* properties.
+HOOK_EVENTS_COMMON = ["SessionStart", "UserPromptSubmit", "PreToolUse",
+                      "PostToolUse", "Notification", "Stop", "SubagentStop",
+                      "PreCompact", "SessionEnd"]
+
+HOOK_EVENTS = HOOK_EVENTS_COMMON + [e for e in schema.hook_events()
+                                    if e not in HOOK_EVENTS_COMMON]
 
 def hook_sample(event):
     """Representative stdin payload for test-firing a hook command."""

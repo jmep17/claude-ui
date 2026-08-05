@@ -421,27 +421,74 @@ function jsonForm(ctrl, s, cur, isSet) {
   };
 }
 
-// Where to read more about a key. Most live on the settings reference; the
-// handful with a page of their own get sent there instead.
-const DOC_BASE = "https://code.claude.com/docs/en/";
-const SETTING_DOCS = [
-  [/^hooks|^disableAllHooks/, "hooks"],
-  [/^statusLine/, "statusline"],
-  [/^sandbox|^autoMode|^warningOnSandboxEscape/, "sandboxing"],
-  [/^permissions/, "iam"],
-  [/Mcp|^mcpServer/, "mcp"],
-  [/^plugin/, "plugins"],
-  [/^outputStyle/, "output-styles"],
-  [/^autoMemory|^claudeMdExcludes|^autoCompact/, "memory"],
-  [/^env$/, "settings#environment-variables"],
-  // the env.* alternative is anchored and uppercase-only so it can't collide;
-  // adding /i to `Model$` would start matching unrelated future keys
-  [/^model$|^fallbackModel|Model$|^env\.[A-Z_]*MODEL$/, "model-config"],
-  [/^keyBindings|^editorMode/, "terminal-config"],
-  [/^fileCheckpointing/, "checkpointing"],
-];
-const docUrlFor = (key) =>
-  DOC_BASE + ((SETTING_DOCS.find(([re]) => re.test(key)) || [null, "settings"])[1]);
+// Must match schema.MANAGED_CAT — the category settings.py files the
+// managed/enterprise-only keys under.
+const MANAGED_CAT = "managed & enterprise";
+
+// ------------------------------------------------------------ setting help
+// Every row already carries what it needs to render — desc, type, default,
+// allowed values, and the exact docs URL for the key (resolved server-side from
+// the official schema, so it lands on the right anchor rather than a page).
+// Only the long official description is fetched, once, on the first popover.
+
+let HELP = null, HELP_PROMISE = null;
+const loadHelp = () => HELP_PROMISE ||= api("/api/schema-help")
+  .then((r) => (HELP = r.keys || {}))
+  .catch(() => (HELP = {}));
+
+// "https://…/docs/en/model-config#adjust-effort-level" → "model-config#adjust-effort-level"
+const docLabel = (url) => (url || "").split("/docs/en/")[1] || "the docs";
+
+// Official descriptions end with "See <url>" — sometimes several. The panel
+// renders that link as a button right underneath, so the bare URLs are noise.
+const prose = (text) => (text || "")
+  .replace(/\s*See (https:\/\/\S+(?:\s+and\s+https:\/\/\S+)*)\.?\s*$/, "")
+  .trim() || text || "";
+
+function settingHelpPanel(s) {
+  const help = (HELP || {})[s.key] || {};
+  const body = el("div.pop-body", {
+    text: prose(help.description) || s.desc || "No description available.",
+  });
+
+  const head = el("div.pop-head", {}, el("code.skey", { text: s.key }));
+  if (help.type) head.append(badge(String(help.type), "outline"));
+  if (s.default !== undefined) {
+    head.append(badge("default: " + JSON.stringify(s.default), "outline"));
+  }
+  if (s.managed) head.append(badge("managed only", "outline"));
+  if (s.unverified) head.append(badge("unverified", "outline"));
+
+  const panel = el("div.popover", { role: "dialog", "aria-label": s.key }, head, body);
+
+  const allowed = help.enum || (s.type === "enum" ? s.values : null);
+  if (allowed && allowed.length) {
+    panel.append(el("div.pop-enum", {},
+      el("span.pop-enum-label", { text: "allowed values" }),
+      ...allowed.map((v) => badge(String(v), "default"))));
+  }
+
+  panel.append(el("div.pop-foot", {},
+    el("a.btn.btn-sm", {
+      href: s.doc, target: "_blank", rel: "noreferrer",
+    }, icon("link"), el("span", { text: "Docs · " + docLabel(s.doc) }))));
+
+  // if the long text hasn't arrived yet, swap it in when it does — the panel is
+  // already useful without it, so there is never a spinner-only state. The
+  // panel was measured while short, so it has to be re-placed after it grows.
+  if (!help.description) {
+    loadHelp().then(() => {
+      const fresh = (HELP || {})[s.key];
+      if (fresh && fresh.description && body.isConnected) {
+        body.textContent = prose(fresh.description);
+        if (fresh.type) head.insertBefore(badge(String(fresh.type), "outline"),
+                                          head.children[1] || null);
+        repositionDropdown();
+      }
+    });
+  }
+  return panel;
+}
 
 function settingRow(s) {
   const cur = settingsGet(s.key);
@@ -452,8 +499,14 @@ function settingRow(s) {
     el("div.row-flex", { style: { gap: ".375rem" } },
       el("span.skey", { text: s.key }),
       isSet ? badge("set", "default") : null,
+      s.unverified ? el("span", {
+        title: "Not listed in the official JSON Schema. It sets " +
+               "additionalProperties, so absence is not disproof — the key may " +
+               "be real and documented elsewhere.",
+      }, badge("unverified", "outline")) : null,
+      infoTrigger(s.key, () => settingHelpPanel(s)),
       el("a.sdoc", {
-        href: docUrlFor(s.key), target: "_blank", rel: "noreferrer",
+        href: s.doc, target: "_blank", rel: "noreferrer",
         title: "Open the documentation for " + s.key,
       }, icon("link"))),
     s.desc ? el("div.sdesc", { text: s.desc }) : null);
@@ -601,6 +654,10 @@ function renderSettings() {
     return;
   }
 
+  // warm the popover help now rather than on the first hover: one request, and
+  // it means a panel is measured at its full height when it opens
+  loadHelp();
+
   // ---- hooks builder
   const rows = hooksList(st.data || {});
   const hookCard = el("div.card", { style: { marginBottom: "1.25rem" } });
@@ -678,7 +735,8 @@ function renderSettings() {
   const extra = Object.keys(st.data || {})
     .filter((k) => !covered.has(k))
     .map((k) => ({ key: k, type: "json", cat: "other keys in this file",
-      desc: "Not in the documented schema — edited as raw JSON" }))
+      desc: "Not listed in the official schema — edited as raw JSON",
+      doc: "https://code.claude.com/docs/en/settings", unverified: true }))
     .filter(match);
   if (extra.length) cats.set("other keys in this file", extra);
 
@@ -690,12 +748,15 @@ function renderSettings() {
 
   for (const [cat, items] of cats) {
     const nSet = items.filter((s) => settingsGet(s.key) !== undefined).length;
-    // filtering forces everything open so results are never hidden behind a fold
+    const managed = cat === MANAGED_CAT;
+    // filtering forces everything open so results are never hidden behind a
+    // fold. The managed group stays shut unless asked for: setting one of these
+    // in user scope does nothing, so "one is set" is no reason to open it.
     const open = q || SFILTER.set ? true
       : SOPEN.has(cat) ? true
-      : SCLOSED.has(cat) ? false
+      : SCLOSED.has(cat) || managed ? false
       : nSet > 0 || cat === "model";
-    const group = el("details.setgroup", { open });
+    const group = el("details.setgroup", { open, class: managed ? "managed" : "" });
     group.ontoggle = () => {
       if (q || SFILTER.set) return;
       (group.open ? SOPEN : SCLOSED).add(cat);
@@ -705,8 +766,16 @@ function renderSettings() {
       el("span.sg-caret", {}, icon("chevronRight")),
       el("span.sg-name", { text: cat }),
       el("span.sg-meta", {},
+        managed ? badge("no-op in user scope", "outline") : null,
         nSet ? badge(nSet + " set", "default") : null,
         el("span.muted", { style: { fontSize: ".72rem" }, text: items.length + " keys" }))));
+    if (managed) {
+      group.append(el("div.setgroup-note", { text:
+        "These keys are only honored in managed settings — /Library/Application " +
+        "Support/ClaudeCode/managed-settings.json, /etc/claude-code/" +
+        "managed-settings.json, or an MDM policy. Setting one in your user " +
+        "settings.json has no effect; they are listed here so you can look them up." }));
+    }
     for (const s of items) group.append(settingRow(s));
     view.append(group);
   }

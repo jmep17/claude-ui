@@ -9,8 +9,9 @@ import time
 from .core import ITEM_TYPES, _read_json_object, config_dir, tilde
 from .items import scan_items
 from .mcp import mcp_state
+from . import schema
 from .plugins import adopted_items, plugins_state
-from .settings import SETTINGS_SCHEMA, settings_state
+from .settings import settings_schema, settings_state
 from .statusline import STATUSLINE_SCRIPT, statusline_paths
 
 
@@ -67,12 +68,27 @@ def doctor():
         add("warn", "settings",
             f"statusLine.command not found: {_first_cmd_word(sl['command'])}")
 
-    # settings keys outside the documented schema
-    known = {s["key"].split(".")[0] for s in SETTINGS_SCHEMA}
+    # settings keys the UI doesn't cover, and keys in the wrong file entirely
+    covered = {s["key"].split(".")[0] for s in settings_schema()}
+    official = schema.known_top_level()
     for k in sdata if isinstance(sdata, dict) else {}:
-        if k not in known:
-            add("info", "settings", f"settings.json key not in the documented "
-                                    f"schema: {k}")
+        if k in schema.GLOBAL_CONFIG_KEYS:
+            add("warn", "settings",
+                f"{k} is read from ~/.claude.json, not settings.json — "
+                f"Claude Code silently ignores it here")
+        elif k not in covered and k not in official:
+            # stays "info", and says "not listed": the official schema sets
+            # additionalProperties, so absence is not proof the key isn't real
+            add("info", "settings",
+                f"settings.json key not listed in the official schema: {k}")
+
+    # a key this app itself used to write to the wrong place
+    perms = sdata.get("permissions")
+    if isinstance(perms, dict) and "skipDangerousModePermissionPrompt" in perms:
+        add("warn", "settings",
+            "permissions.skipDangerousModePermissionPrompt is not a real key — "
+            "the setting is top-level skipDangerousModePermissionPrompt "
+            "(older claude-ui versions wrote it nested)")
 
     # MCP: stdio commands that don't resolve on this machine
     for s in st["servers"]:

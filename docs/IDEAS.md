@@ -241,42 +241,94 @@ conflicts invisible in a text file.
 
 ## Settings coverage
 
-`SETTINGS_SCHEMA` went from 83 to 136 keys, verified line-by-line against the
-live `code.claude.com/docs/en/settings.md` and `statusline.md` on 2026-07-31.
+Claude Code publishes a **machine-readable JSON Schema** for `settings.json` at
+`https://json.schemastore.org/claude-code-settings.json` (301 → `www.schemastore.org`,
+~230 KB, draft-07). The docs name it as the `$schema` value in their own example
+settings file, so it is the same thing the CLI is validated against.
 
-Three entries were **renamed** to the documented key, because the old names
-appear nowhere in the current docs:
+It carries a `description`, `type`, `enum` and `default` for every documented
+key, and most descriptions embed the exact anchored docs URL for that key. As of
+the current snapshot: 141 real top-level properties, 590 dotted keys when you
+recurse `properties`, **100% of them described**, 340 `env.*` vars, 40 `sandbox.*`
+sub-keys, 31 `hooks.*` events. `additionalProperties` is `true`.
 
-| Was | Now |
-| :--- | :--- |
-| `ignoreGitignore` | `respectGitignore` (inverted sense, default `true`) |
-| `pluginMarketplaces` | `extraKnownMarketplaces` (object, not a list) |
-| `verboseLogging` | `verbose` |
+The schema now drives the settings tab:
 
-Deliberately **excluded**, and worth keeping excluded:
+- `tools/sync_settings_schema.py` fetches it and writes
+  `bin/claude_ui/data/settings_schema.json`, committed. Review the diff — a
+  reworded description is upstream telling you a setting changed meaning, which
+  is the whole reason to vendor it rather than fetch blind.
+- `schema.py` overlays a background re-fetch at server start (`_live`) and merges
+  the result over the hand-written entries. The vendored file is the **floor**:
+  live may add or replace, never delete, so a bad upstream commit degrades to
+  stale rather than empty. `validate()` guards both paths.
+- `SETTINGS_RAW` in `settings.py` stays hand-written and is never regenerated.
+  It supplies the two things the official schema has no concept of — which
+  *control* to draw, and which category to file the key under — plus a one-line
+  `desc` short enough to sit under the key name. Everything else comes from the
+  merge. `tests/test_settings.py::TestMerge` asserts the curation survives.
+- The long descriptions are served lazily from `/api/schema-help` (~58 KB) rather
+  than inlined, and shown in a popover with the type, default, allowed values and
+  a **Docs** link that lands on the key's own anchor.
 
-- Managed/enterprise-only keys (`allowManagedHooksOnly`, `policyHelper`,
-  `strictKnownMarketplaces`, `enforceAvailableModels`, …) — they do nothing in
-  user scope.
-- `~/.claude.json` "global config" keys (`autoConnectIde`, `diffTool`,
-  `teammateDefaultModel`, …) — the docs state Claude Code *silently ignores*
-  these if you put them in `settings.json`.
-- `ultracode` — the docs say outright it isn't read from `settings.json`.
-- Environment variables: the `env` editor already suggests ~300 of them.
+What the first sync corrected: `permissions.defaultMode` was missing `delegate`;
+`workflowSizeGuideline`'s default is `unrestricted`, not `medium`; `fastMode`,
+`fastModePerSessionOptIn` and `prefersReducedMotion` default to `false` and
+`includeCoAuthoredBy` to `true`, none of which were recorded;
+`permissions.skipDangerousModePermissionPrompt` is not a real key (it is
+top-level — doctor now warns if an older version wrote it nested); the hooks
+builder knew 9 of 31 events; and `ENV_VARS` had drifted in both directions.
 
-**Still unaudited:** 18 pre-existing flat keys have no exact match in the two
-docs pages checked — `thinkingBudgetTokens`, `interfaceLanguage`,
-`strikethrough`, `interactiveEditingEnabled`, `showHiddenFiles`, `keyBindings`,
-`maxCompactMessages`, `sessionHistorySize`, `mcpServerTimeouts`,
-`warningOnSandboxEscape`, `invalidSSLWarning`, `proxy`, `restartOnConfigChange`,
-`telemetryEnabled`, `workspaceInitScript`, `skipFirstRunQuestions`,
-`llmConnectionTimeout`, `llmRequestTimeout`. They may be real but documented
-elsewhere, or stale. They were left alone rather than deleted on the strength of
-one page — worth checking against the binary before removing any.
+**Managed and enterprise keys are now included**, in their own collapsed
+`managed & enterprise` group marked as no-ops in user scope, so the tab can
+answer "what is `allowManagedHooksOnly`" without pretending you would set it
+here. Placement comes from the explicit `MANAGED_KEYS` list, *not* from the
+`(Managed settings)` description prefix — that prose convention also tags
+`disableAgentView` and `sshConfigs`, which are ordinary user-facing rows. The
+flag badges; the list places.
 
-If `sandbox` is ever broken out of its raw-JSON blob into a real form, the
-documented sub-key set is: `enabled`, `failIfUnavailable`,
-`autoAllowBashIfSandboxed`, `excludedCommands`, `allowUnsandboxedCommands`,
-`enableWeakerNestedSandbox`, `enableWeakerNetworkIsolation`, `allowAppleEvents`,
-`filesystem.{allowWrite,denyWrite,denyRead,allowRead,allowManagedReadPathsOnly,disabled}`,
-`credentials.{files,envVars,allowPlaintextInject}`, and the `network.*` group.
+**Still excluded on purpose:** the six `~/.claude.json` global-config keys —
+`autoConnectIde`, `autoInstallIdeExtension`, `diffTool`, `externalEditorContext`,
+`permissionExplainerEnabled`, `teammateDefaultModel`. The official schema lists
+all six, but the Global config settings table in `settings.md` says outright that
+`settings.json` silently ignores them, and the docs win. `permissionExplainerEnabled`
+and `externalEditorContext` are the easy mistake here: they read as ordinary user
+preferences. Doctor warns when one turns up in `settings.json`.
+
+**Not listed in the official schema: 22 keys** — `thinkingBudgetTokens`,
+`interfaceLanguage`, `strikethrough`, `interactiveEditingEnabled`,
+`showHiddenFiles`, `keyBindings`, `maxCompactMessages`, `sessionHistorySize`,
+`mcpServerTimeouts`, `warningOnSandboxEscape`, `invalidSSLWarning`, `proxy`,
+`restartOnConfigChange`, `telemetryEnabled`, `workspaceInitScript`,
+`skipFirstRunQuestions`, `llmConnectionTimeout`, `llmRequestTimeout`,
+`gitAttributionName`, `gitAttributionEmail`, `switchModelsOnFlag`,
+`remote.defaultEnvironmentId`. They are badged `unverified` in the UI and the set
+is frozen in a test. Because `additionalProperties` is `true`, absence is not
+disproof — the badge and the doctor message both say "not listed", never "not
+real". Worth checking against the binary before removing any.
+
+---
+
+## Next, on the schema
+
+### 25. Break `sandbox` out of its JSON blob — M
+The highest-value remaining raw-JSON row: security configuration, 40 sub-keys
+three levels deep, each with a type, an enum and a description in the snapshot.
+Needs **no backend work** — `settings_set` already writes dotted paths and prunes
+empty parents, and `SETTINGS_KEY_RE` already permits dots, so
+`sandbox.credentials.allowPlaintextInject` writes correctly today.
+
+Generate the rows from the snapshot with a small hand-curated control-type
+override table; hand-writing 40 literals would re-create exactly the rot the
+schema sync just ended. Costs ~10 KB on the inlined payload. One hazard: if the
+whole-object `sandbox` row stays as an escape hatch, two editors point at one
+subtree and last write wins — label it, or hide it behind the group.
+
+### 26. Env var descriptions in the `env` key picker — M
+The snapshot has a description for all 340, and the `env` editor currently
+suggests bare names. Two costs, which is why it isn't done: ~74 KB on the wire,
+useful only inside the combobox, so it needs its own lazy endpoint; and it
+changes `filterPopup`'s item contract from `{value, text}` to `{value, text, hint}`
+plus a two-line row — a shared primitive behind `filterSelect`, `filterInput`,
+every long enum, the hook event picker and the model pickers. Worth doing
+deliberately, not as a rider on something else.

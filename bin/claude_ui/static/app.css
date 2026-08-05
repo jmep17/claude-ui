@@ -261,6 +261,14 @@ main {
 .setgroup[open] .sg-caret { rotate: 90deg; }
 .setgroup .sg-name { font-size: 0.8125rem; font-weight: 600; letter-spacing: -0.01em; }
 .setgroup .sg-meta { margin-left: auto; display: flex; gap: 0.375rem; align-items: center; }
+.setgroup-note {
+  padding: 0.625rem 0.9375rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+  background: color-mix(in oklab, var(--muted) 45%, transparent);
+  color: var(--muted-foreground);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
 
 .srow {
   display: flex;
@@ -283,6 +291,21 @@ main {
   margin-right: 0.375rem;
 }
 .sdesc { margin-top: 0.125rem; color: var(--muted-foreground); font-size: 0.75rem; line-height: 1.5; }
+/* the primary "what does this do" affordance, so unlike .sdoc it stays visible */
+.srow .info-trigger {
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted-foreground);
+  opacity: 0.65;
+}
+.srow .info-trigger svg { width: 0.875rem; height: 0.875rem; }
+.srow .info-trigger:hover,
+.srow .info-trigger[aria-expanded="true"] { opacity: 1; color: var(--primary); }
+
 .sdoc {
   margin-left: 0.375rem;
   color: var(--muted-foreground);
