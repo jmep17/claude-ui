@@ -5,7 +5,7 @@ import json
 
 from .core import (CONFIG_FILES, ITEM_TYPES, SOURCE_KEY, atomic_write,
                    config_dir, disabled_dir, item_rel, parse_frontmatter,
-                   resolve_editable, tilde)
+                   resolve_editable, set_frontmatter_key, tilde)
 
 
 MAX_EDIT = 2 * 1024 * 1024
@@ -93,6 +93,7 @@ def _scan_md_type(root, enabled):
             "todo": "TODO" in text,
             "todo_line": _todo_line(text),
             "source": meta.get(SOURCE_KEY) or "",
+            "model": meta.get("model", ""),
             "name_mismatch": False,
             "long_desc": len(meta.get("description", "")) > 1024,
         })
@@ -229,6 +230,22 @@ def item_save(type_, name, fname, content, enabled=True, base=None):
     _check_base(target, base)
     atomic_write(target, content)
     return {"path": tilde(target), **_stamp(target)}
+
+def item_set_model(name, model, enabled=True):
+    """Rewrite an agent's `model:` frontmatter line; blank model removes it.
+
+    Only agents: no other item type has a model. Goes through resolve_item, so
+    this can never reach outside the config dir into a plugin's own copy.
+    """
+    p = resolve_item("agents", name, enabled)
+    if not p.is_file():
+        raise ValueError(f"{name}: not found")
+    text = p.read_text(errors="replace")
+    out = set_frontmatter_key(text, "model", model.strip() or None
+                              if isinstance(model, str) else None)
+    if out != text:
+        atomic_write(p, out)
+    return {"path": tilde(p), "model": (model or "").strip(), **_stamp(p)}
 
 def path_read(raw):
     """Read any file we're willing to open by absolute path — the config dir,

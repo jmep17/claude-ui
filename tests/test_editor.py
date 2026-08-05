@@ -193,6 +193,122 @@ class TestItemTodoLine(TempConfig):
         self.assertEqual(it["todo_line"], 0)
 
 
+class TestSetFrontmatterKey(unittest.TestCase):
+    """The writer behind every model change. It rewrites one line and leaves
+    the rest of the file alone, so a hand-formatted agent survives it."""
+
+    AGENT = ("---\n"
+             "name: reviewer\n"
+             "description: >\n"
+             "  A folded description that runs\n"
+             "  across two indented lines.\n"
+             "tools: [Read, Grep]\n"
+             "model: haiku\n"
+             "---\n"
+             "\n"
+             "Body text.\n")
+
+    def set(self, text, key, value):
+        return core.set_frontmatter_key(text, key, value)
+
+    def test_replaces_an_existing_key_in_place(self):
+        out = self.set(self.AGENT, "model", "opus")
+        self.assertIn("model: opus", out)
+        self.assertNotIn("model: haiku", out)
+        self.assertEqual(out.count("model:"), 1)
+
+    def test_leaves_every_other_line_untouched(self):
+        out = self.set(self.AGENT, "model", "opus")
+        for line in ("name: reviewer", "description: >", "tools: [Read, Grep]",
+                     "  across two indented lines.", "Body text."):
+            self.assertIn(line, out)
+
+    def test_appends_a_key_that_is_not_there(self):
+        text = "---\nname: a\n---\nbody\n"
+        out = self.set(text, "model", "sonnet")
+        self.assertEqual(out, "---\nname: a\nmodel: sonnet\n---\nbody\n")
+
+    def test_creates_a_block_when_there_is_none(self):
+        out = self.set("just a body\n", "model", "sonnet")
+        self.assertEqual(out, "---\nmodel: sonnet\n---\njust a body\n")
+
+    def test_no_block_and_no_value_is_a_no_op(self):
+        self.assertEqual(self.set("body\n", "model", None), "body\n")
+
+    def test_removing_a_key_drops_only_that_line(self):
+        out = self.set(self.AGENT, "model", None)
+        self.assertNotIn("model:", out)
+        self.assertIn("tools: [Read, Grep]", out)
+        self.assertIn("Body text.", out)
+
+    def test_removing_a_folded_value_takes_its_continuation_lines(self):
+        out = self.set(self.AGENT, "description", None)
+        self.assertNotIn("description:", out)
+        self.assertNotIn("across two indented lines.", out)
+        self.assertIn("name: reviewer", out)
+        self.assertIn("model: haiku", out)
+
+    def test_rewriting_a_folded_value_replaces_the_whole_block(self):
+        out = self.set(self.AGENT, "description", "one line now")
+        self.assertIn("description: one line now", out)
+        self.assertNotIn("across two indented lines.", out)
+        self.assertEqual(core.parse_frontmatter(out)["description"], "one line now")
+
+    def test_crlf_survives(self):
+        """A Windows-authored agent must not come back with mixed endings."""
+        out = self.set(self.AGENT.replace("\n", "\r\n"), "model", "opus")
+        self.assertIn("model: opus\r\n", out)
+        self.assertNotIn("\n", out.replace("\r\n", ""))  # no bare LF left
+
+    def test_a_file_without_a_trailing_newline_keeps_not_having_one(self):
+        out = self.set("---\nname: a\n---\nbody", "model", "opus")
+        self.assertFalse(out.endswith("\n"))
+
+    def test_round_trips_through_the_parser(self):
+        out = self.set(self.AGENT, "model", "claude-sonnet-5")
+        self.assertEqual(core.parse_frontmatter(out)["model"], "claude-sonnet-5")
+
+    def test_a_provider_specific_id_is_accepted(self):
+        arn = "arn:aws:bedrock:us-east-1:1:inference-profile/x.y-v1:0"
+        out = self.set(self.AGENT, "model", arn)
+        self.assertEqual(core.parse_frontmatter(out)["model"], arn)
+
+    def test_a_newline_in_the_value_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.set(self.AGENT, "model", "opus\nname: pwned")
+
+    def test_a_bad_key_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.set(self.AGENT, "mo del:", "opus")
+
+    def test_an_unterminated_block_is_refused_rather_than_doubled(self):
+        with self.assertRaises(ValueError):
+            self.set("---\nname: a\nbody with no closing fence\n", "model", "opus")
+
+
+class TestItemSetModel(TempConfig):
+    def test_sets_and_clears_an_agent_model(self):
+        self.write("agents/a.md", "---\nname: a\ndescription: d\n---\nbody\n")
+        items.item_set_model("a", "opus")
+        p = self.cfg / "agents" / "a.md"
+        self.assertIn("model: opus", p.read_text())
+        items.item_set_model("a", "")
+        self.assertNotIn("model:", p.read_text())
+
+    def test_reports_the_model_in_the_inventory(self):
+        self.write("agents/a.md", "---\nname: a\nmodel: haiku\n---\nbody\n")
+        it = [i for i in items.scan_items("agents") if i["name"] == "a"][0]
+        self.assertEqual(it["model"], "haiku")
+
+    def test_a_missing_agent_is_refused(self):
+        with self.assertRaises(ValueError):
+            items.item_set_model("nope", "opus")
+
+    def test_it_cannot_be_pointed_outside_the_config_dir(self):
+        with self.assertRaises(ValueError):
+            items.item_set_model("../../escape", "opus")
+
+
 class TestDoctorTargets(TempConfig):
     """Every finding the UI offers an Open button for has to carry a target
     that actually resolves. A target pointing at the wrong line is worse than

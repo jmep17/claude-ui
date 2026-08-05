@@ -24,6 +24,14 @@ owns, links, tracks, or syncs anything:
   than masks, because a marketplace is a tarball extract with no git history and
   an update replaces the tree wholesale. Each copy records where it came from in
   its own frontmatter, so Doctor can flag it when the two diverge.
+  Expanding a plugin shows **what model its agents run on** and why — the
+  agent's own `model:` line, or `CLAUDE_CODE_SUBAGENT_MODEL` overriding all of
+  them — and lets you set it on the copies that are yours, including at split
+  time. Below that are **the environment variables the plugin reads**, found by
+  reading its code: Claude Code has no per-agent model setting, so a plugin that
+  wants one ships its own (caveman's `CAVECREW_REVIEWER_MODEL` and friends,
+  documented in a README table three directories deep). They are ordinary
+  `env` entries in `settings.json` once you know the names.
 - **Statusline** generator — a setup piece that writes a dependency-free
   statusline script into the config dir and points the `statusLine` key at it.
   Setup pieces are idempotent, derive their installed state by inspection, and

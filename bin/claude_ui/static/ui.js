@@ -592,10 +592,11 @@ function switchToggle(label, checked, onchange, title) {
 
 /* ---------------------------------------------------------------- checklist --
    A grouped multi-select field for modal(). Groups are
-   {label, rows: [{value, name, desc, badges, disabled, reason}]}; rows that
-   can't be picked render greyed with their reason in place of a checkbox.
-   Exposes .value as the array of checked values, which modal()'s submit()
-   passes through untouched. */
+   {label, rows: [{value, name, desc, badges, disabled, reason, extra}]}; rows
+   that can't be picked render greyed with their reason in place of a checkbox.
+   `extra` is an optional node placed at the end of the row — a per-row control
+   whose value the caller reads for itself, since .value here stays the array of
+   checked values that modal()'s submit() passes through untouched. */
 function checklist({ groups = [], hint }) {
   const node = el("div.checklist");
   const count = el("span.cl-count");
@@ -629,7 +630,8 @@ function checklist({ groups = [], hint }) {
       row.append(el("div.cl-body", {},
         el("div.cl-line", {},
           el("span.li-name", { text: r.name }),
-          ...(r.badges || [])),
+          ...(r.badges || []),
+          r.extra ? el("span.cl-extra", {}, r.extra) : null),
         el("span.li-desc", { text: r.reason || r.desc || "" })));
       node.append(row);
     }

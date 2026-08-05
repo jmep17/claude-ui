@@ -12,11 +12,13 @@ import webbrowser
 
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
 from .items import (Conflict, config_files_state, item_read, item_save,
-                    path_read, path_save, scan_items, set_enabled)
+                    item_set_model, path_read, path_save, scan_items,
+                    set_enabled)
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
 from . import schema
-from .plugins import (adopted_items, plugin_resync, plugin_set_enabled,
-                      plugins_split, plugins_state, skill_override_set)
+from .plugins import (adopted_items, plugin_env_set, plugin_env_vars,
+                      plugin_resync, plugin_set_enabled, plugins_split,
+                      plugins_state, skill_override_set)
 from .settings import (hook_test, settings_schema, settings_set, settings_state,
                        start_docs_fetch, suggest_state)
 from .statusline import statusline_save, statusline_state
@@ -151,6 +153,15 @@ class Handler(BaseHTTPRequestHandler):
             # Split actually left in your config — and only the doctor could
             # see them before
             self.send(200, {**plugins_state(), "adopted": adopted_items()})
+        elif self.path.startswith("/api/plugin-detail?"):
+            # the env vars a plugin reads, found by walking its tree — too
+            # expensive for /api/plugins, which the doctor and insight also hit
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            pid = (q.get("id") or [""])[0]
+            try:
+                self.send(200, {"id": pid, "env": plugin_env_vars(pid)})
+            except (ValueError, OSError) as e:
+                self.send(400, {"error": str(e)})
         else:
             self.send(404, {"error": "not found"})
 
@@ -212,7 +223,15 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "plugin-split":
                 self.send(200, {"ok": True, **plugins_split(
                     req.get("id", ""), req.get("picks") or [],
-                    bool(req.get("disable", True)))})
+                    bool(req.get("disable", True)),
+                    req.get("models") or {})})
+            elif action == "plugin-env-set":
+                plugin_env_set(req.get("name", ""), req.get("value"))
+                self.send(200, {"ok": True})
+            elif action == "item-model-set":
+                self.send(200, {"ok": True, **item_set_model(
+                    req.get("name", ""), req.get("model", ""),
+                    bool(req.get("enabled", True)))})
             elif action == "plugin-resync":
                 self.send(200, {"ok": True, **plugin_resync(
                     req.get("type", ""), req.get("name", ""))})

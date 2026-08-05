@@ -142,6 +142,50 @@ def parse_frontmatter(text):
         meta[key] = " ".join(buf).strip()
     return meta
 
+def set_frontmatter_key(text, key, value):
+    """Return `text` with `key: value` set in its frontmatter; None removes it.
+
+    The inverse of parse_frontmatter() above, and deliberately as blunt: it
+    rewrites one line and leaves every other byte alone, so a hand-formatted
+    file survives a model change with its comments, ordering and folded blocks
+    intact. A key that is not there is appended to the end of the block; a file
+    with no block at all gets one, unless the value is None (nothing to remove).
+    """
+    if not re.match(r"^[A-Za-z0-9_-]+$", key or ""):
+        raise ValueError("bad frontmatter key")
+    if value is not None:
+        value = str(value)
+        if re.search(r"[\x00-\x1f\x7f]", value):
+            raise ValueError("value contains a control character")
+    lines = text.splitlines()
+    # CRLF in, CRLF out — a Windows-authored agent should not come back mixed
+    nl = "\r\n" if "\r\n" in text else "\n"
+    trailing = text.endswith("\n")
+
+    def join(out):
+        return nl.join(out) + (nl if trailing else "")
+
+    if not lines or lines[0].strip() != "---":
+        if value is None:
+            return text
+        return join(["---", f"{key}: {value}", "---"] + lines)
+    close = next((i for i in range(1, len(lines))
+                  if lines[i].strip() == "---"), None)
+    if close is None:
+        raise ValueError("unterminated frontmatter block")
+    at = next((i for i in range(1, close)
+               if re.match(rf"^{re.escape(key)}:", lines[i])), None)
+    if at is None:
+        return text if value is None else join(
+            lines[:close] + [f"{key}: {value}"] + lines[close:])
+    # a folded value ('key: >') continues into the indented lines below it,
+    # which belong to this key and go with it
+    end = at + 1
+    while end < close and lines[end].startswith((" ", "\t")):
+        end += 1
+    return join(lines[:at] + ([] if value is None else [f"{key}: {value}"])
+                + lines[end:])
+
 def _read_json_object(path):
     """(data, error) — data is {} on missing file; error set on bad JSON."""
     if not path.is_file():

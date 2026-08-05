@@ -1053,6 +1053,7 @@ async function renderPlugins(reload) {
   const view = document.getElementById("pluginsview");
   if (!PLUGINS || reload) {
     if (!PLUGINS) { view.innerHTML = ""; view.append(skeletonList(3)); }
+    PDETAIL = {};
     try { PLUGINS = await api("/api/plugins"); }
     catch (e) {
       view.innerHTML = "";
@@ -1068,6 +1069,8 @@ async function renderPlugins(reload) {
       + "A plugin is enabled as a whole — <b>Split</b> copies the parts you want into your own "
       + "config and turns the plugin off, so they survive the next plugin update.",
   }));
+
+  view.append(subagentModelBar());
 
   if (PLUGINS.error) {
     view.append(el("div.alert.alert-destructive", { style: { marginBottom: "1rem" } },
@@ -1213,7 +1216,18 @@ async function adoptedResync(a) {
 
 function pluginRow(p) {
   const splittable = p.components.some((c) => c.adoptable);
+  const agents = p.components.filter((c) => c.kind === "agents");
   const actions = el("div.li-actions", {});
+
+  const body = el("div.plugin-detail", { hidden: true });
+  if (agents.length || p.state !== "available") {
+    const open = mkbtn("btn-sm btn-icon btn-ghost pd-toggle", "", () => togglePluginDetail(p, open, body),
+      agents.length ? "Models its agents run on, and the settings it reads"
+                    : "The settings this plugin reads");
+    open.append(icon("chevronDown"));
+    actions.append(open);
+    if (POPEN.has(p.id)) { POPEN.delete(p.id); togglePluginDetail(p, open, body); }
+  }
   if (splittable) {
     const b = mkbtn("btn-sm btn-primary", "Split…", () => pluginSplit(p),
       "Keep the components you want, drop the rest");
@@ -1246,13 +1260,187 @@ function pluginRow(p) {
     el("span.li-desc", {
       text: countLine(p) + (p.description ? " — " + p.description : ""),
     }),
-    actions);
+    actions, body);
+}
+
+/* ------------------------------------------------- what a plugin's agents run on
+
+   Claude Code has no per-plugin or per-agent model setting, so there are only
+   three honest answers, and this panel shows which one is in force:
+
+     - env.CLAUDE_CODE_SUBAGENT_MODEL, which the schema describes as overriding
+       the model subagents use, whatever their own frontmatter says;
+     - the agent's own `model:` line — editable once the agent is yours, which
+       is what Split makes it;
+     - nothing, and it inherits the session's model.
+
+   Plus lever four, which belongs to the plugin rather than to Claude Code: a
+   plugin that wants per-agent models ships its own env vars and reads them in
+   a hook. Those are in the second section, found by reading the plugin. */
+
+const SUBAGENT_KEY = "env.CLAUDE_CODE_SUBAGENT_MODEL";
+
+/* One control, at the top, for the blunt answer: every subagent on this
+   machine, plugin or not. It is the same settings.json key the Settings tab
+   edits and writes through the same endpoint — this is a second door, not a
+   second source of truth. */
+function subagentModelBar() {
+  const s = schemaFor(SUBAGENT_KEY);
+  const cur = settingsGet(SUBAGENT_KEY);
+  const sc = scalarControl({ key: SUBAGENT_KEY, type: "combo", values: s.values || [] },
+    cur, "unset · each agent decides");
+  const ctrl = el("div.pd-ctrl", {}, sc.node);
+  if (sc.aux) ctrl.append(sc.aux);
+  ctrl.append(mkbtn("btn-sm btn-primary", "Set", () => trySet(SUBAGENT_KEY, sc.collect)));
+  if (cur !== undefined)
+    ctrl.append(mkbtn("btn-sm danger", "Clear", () => clearSetting(SUBAGENT_KEY)));
+  return el("div.card.subagent-bar", {},
+    el("div.pd-name", {},
+      el("span.skey", { text: SUBAGENT_KEY }),
+      cur !== undefined ? badge("set", "default") : null,
+      infoTrigger(SUBAGENT_KEY, () => settingHelpPanel(s))),
+    el("div.sdesc", { text: s.desc || "" }),
+    ctrl);
+}
+let PDETAIL = {};   // plugin id -> /api/plugin-detail, fetched once per rescan
+// which cards are open: setting a value re-renders the whole list, and having
+// the panel you are working in vanish under you is its own bug
+let POPEN = new Set();
+
+const schemaFor = (key) => SCHEMA.find((s) => s.key === key) || {};
+// the alias/ID list the settings tab offers for this key, minus "inherit",
+// which means "no override" there and would read as a model name here
+const modelValues = () =>
+  (schemaFor(SUBAGENT_KEY).values || []).filter((v) => v !== "inherit");
+
+const subagentModel = () => {
+  const v = settingsGet(SUBAGENT_KEY);
+  return typeof v === "string" && v.trim() && v.trim() !== "inherit" ? v.trim() : "";
+};
+
+/* The model an agent will actually run on, and why — the "why" is the part
+   worth showing, since three different files can be the answer. */
+function effectiveModel(model) {
+  const forced = subagentModel();
+  if (forced) return { text: forced, why: "every subagent, from " + SUBAGENT_KEY,
+                       variant: "info", forced: true };
+  if (model) return { text: model, why: "the agent's own model: line", variant: "default" };
+  return { text: "inherits session", why: "no model set anywhere — it runs on the session's model",
+           variant: "secondary" };
+}
+
+async function togglePluginDetail(p, btn, body) {
+  body.hidden = !body.hidden;
+  btn.classList.toggle("is-open", !body.hidden);
+  body.hidden ? POPEN.delete(p.id) : POPEN.add(p.id);
+  if (body.hidden || body.dataset.built) return;
+  body.dataset.built = "1";
+  body.append(el("div.muted", { style: { fontSize: ".72rem" }, text: "Reading the plugin…" }));
+  try {
+    if (!PDETAIL[p.id]) PDETAIL[p.id] = await api("/api/plugin-detail?id=" + encodeURIComponent(p.id));
+  } catch (e) {
+    body.innerHTML = "";
+    body.append(el("div.muted", { style: { fontSize: ".72rem" }, text: e.message }));
+    return;
+  }
+  body.innerHTML = "";
+  pluginAgentsPanel(p, body);
+  pluginEnvPanel(p, PDETAIL[p.id].env || [], body);
+}
+
+function pluginAgentsPanel(p, body) {
+  const agents = p.components.filter((c) => c.kind === "agents");
+  if (!agents.length) return;
+  body.append(el("div.pd-title", { text: "Agents" }));
+  const forced = subagentModel();
+  for (const c of agents) {
+    // an agent we already split out is our file, so its model: line is ours to
+    // set; one still inside the plugin is not, and Split is the way to own it
+    const mine = (PLUGINS.adopted || []).find(
+      (a) => a.type === "agents" && a.source === p.id + "/agents/" + c.name);
+    const eff = effectiveModel(mine ? mine.model : c.model);
+    const chip = badge(eff.text, eff.variant);
+    chip.title = eff.why;
+
+    const right = el("div.pd-ctrl", {});
+    if (forced) {
+      right.append(el("span.muted", { style: { fontSize: ".72rem" },
+        text: "set by " + SUBAGENT_KEY }));
+    } else if (mine) {
+      const sc = scalarControl({ key: SUBAGENT_KEY, type: "combo", values: modelValues() },
+        mine.model || undefined, "inherits session");
+      right.append(sc.node);
+      if (sc.aux) right.append(sc.aux);
+      right.append(mkbtn("btn-sm btn-primary", "Set",
+        () => setItemModel(mine.name, sc.collect())));
+      if (mine.model)
+        right.append(mkbtn("btn-sm danger", "Clear", () => setItemModel(mine.name, "")));
+    } else {
+      right.append(mkbtn("btn-sm", "Split to set…", () => pluginSplit(p, c.name),
+        "The plugin's own copy is read-only — split this agent into your config first"));
+    }
+    body.append(el("div.pd-row", {},
+      el("div.pd-name", {}, el("span.li-name", { title: c.path, text: c.name }), chip),
+      right));
+  }
+}
+
+function pluginEnvPanel(p, env, body) {
+  body.append(el("div.pd-title", { text: "Settings this plugin reads" }));
+  if (!env.length) {
+    body.append(el("div.pd-note", {
+      text: "Nothing found — this plugin's code does not read any environment "
+        + "variable of its own." }));
+    return;
+  }
+  body.append(el("div.pd-note", {
+    html: "Names found by reading the plugin's own code, not a list it publishes — "
+      + "treat them as a lead. They are written to <b>env</b> in settings.json, "
+      + "where they apply to every session, not just this plugin." }));
+  for (const e of env) {
+    const sc = scalarControl(
+      { key: e.model ? SUBAGENT_KEY : "env." + e.name, type: "combo",
+        values: e.model ? modelValues() : [] },
+      e.value || undefined, "unset");
+    const right = el("div.pd-ctrl", {}, sc.node);
+    if (sc.aux) right.append(sc.aux);
+    right.append(mkbtn("btn-sm btn-primary", "Set",
+      () => setPluginEnv(e.name, sc.collect())));
+    if (e.value) right.append(mkbtn("btn-sm danger", "Clear", () => setPluginEnv(e.name, "")));
+
+    const name = el("div.pd-name", {},
+      el("span.skey", { title: "read in " + e.files.join(", "), text: e.name }),
+      e.model ? badge("model", "outline") : null,
+      e.value ? badge("set", "default") : null);
+    body.append(el("div.pd-row", {}, name, right));
+    if (e.doc)
+      body.append(el("div.pd-doc", { title: e.doc.file, text: e.doc.line }));
+  }
+}
+
+async function setPluginEnv(name, value) {
+  try {
+    await api("/api/plugin-env-set", { name, value: value === undefined ? "" : String(value) });
+    toast(name + (value ? " set to " + value : " cleared") + " · applies to new sessions");
+    await refresh();
+    renderPlugins(true);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function setItemModel(name, model) {
+  try {
+    await api("/api/item-model-set", { name, model: model === undefined ? "" : String(model) });
+    toast(name + (model ? " runs on " + model : " back to inheriting")
+      + " · applies to new sessions");
+    await refresh();
+    renderPlugins(true);
+  } catch (e) { toast(e.message, true); }
 }
 
 /* Components grouped for the Split checklist. Anything that can't be copied
    out — hooks, a ${CLAUDE_PLUGIN_ROOT} MCP server, a name you already use —
    still shows, greyed, with the reason, so the dialog is the whole picture. */
-function splitGroups(p) {
+function splitGroups(p, only, models) {
   const groups = [];
   for (const kind of ["agents", "commands", "skills", "output-styles", "mcp", "hooks"]) {
     const rows = p.components.filter((c) => c.kind === kind).map((c) => {
@@ -1263,9 +1451,20 @@ function splitGroups(p) {
         badges.push(b);
       }
       if (c.conflict) badges.push(badge("name taken", "destructive"));
+      const disabled = !c.adoptable || !!c.conflict;
+      // the copy is ours the moment it lands, so its model is settable here —
+      // the plugin's own file is never touched either way
+      let extra = null;
+      if (kind === "agents" && !disabled && !subagentModel()) {
+        const sc = scalarControl({ key: SUBAGENT_KEY, type: "combo", values: modelValues() },
+          c.model || undefined, "model: inherits");
+        models[c.name] = sc;
+        extra = sc.aux ? el("span", {}, sc.node, sc.aux) : sc.node;
+      }
       return {
         value: kind + "/" + c.name, name: c.name, desc: c.description,
-        badges, disabled: !c.adoptable || !!c.conflict,
+        badges, disabled, extra,
+        checked: only ? c.name === only && kind === "agents" : true,
         reason: c.conflict || c.reason || (c.adoptable ? null : "stays with the plugin"),
       };
     });
@@ -1274,8 +1473,13 @@ function splitGroups(p) {
   return groups;
 }
 
-async function pluginSplit(p) {
-  const groups = splitGroups(p);
+/* `only` pre-ticks a single agent — the entry point from "Split to set…" on the
+   agents panel, where you came to change one model, not to take the plugin
+   apart. The dialog still shows everything, because splitting turns the plugin
+   off and you should see what that costs before agreeing to it. */
+async function pluginSplit(p, only) {
+  const models = {};
+  const groups = splitGroups(p, only, models);
   const keepable = groups.reduce((n, g) => n + g.rows.filter((r) => !r.disabled).length, 0);
   if (!keepable) { toast("Nothing in " + p.name + " can be split out", true); return; }
   const r = await modal({
@@ -1283,7 +1487,9 @@ async function pluginSplit(p) {
     text: "Keep the components you want — they are copied into your config and become "
       + "ordinary items. The rest stay with the plugin"
       + (p.state === "available" ? "." : ", which is turned off.")
-      + " Skills can also be turned off individually without splitting.",
+      + " Skills can also be turned off individually without splitting."
+      + (Object.keys(models).length
+         ? " An agent's model is yours to set once the copy is yours." : ""),
     wide: true,
     fields: [{ id: "keep", type: "checklist", groups }],
     ok: "Split",
@@ -1294,8 +1500,17 @@ async function pluginSplit(p) {
     return { kind: v.slice(0, i), name: v.slice(i + 1) };
   });
   if (!picks.length) { toast("Nothing selected — nothing changed"); return; }
+  const chosen = {};
+  for (const pick of picks) {
+    if (pick.kind !== "agents" || !models[pick.name]) continue;
+    let v;
+    try { v = models[pick.name].collect(); }
+    catch (e) { toast("Invalid model for " + pick.name + ": " + e.message, true); return; }
+    if (v !== undefined) chosen[pick.name] = String(v);
+  }
   try {
-    const res = await api("/api/plugin-split", { id: p.id, picks, disable: p.state !== "available" });
+    const res = await api("/api/plugin-split", {
+      id: p.id, picks, disable: p.state !== "available", models: chosen });
     toast("Kept " + res.kept + " of " + res.total + " from " + p.name
       + (res.disabled ? " · plugin disabled" : "") + " · applies to new sessions",
       false, res.disabled

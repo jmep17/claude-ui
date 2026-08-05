@@ -14,12 +14,15 @@ silently back.
 from pathlib import Path
 import json
 import os
+import re
 import shutil
 
+from . import schema
 from .core import (NAME_RE, SOURCE_KEY, _read_json_object, atomic_write,
-                   config_dir, disabled_dir, item_rel, parse_frontmatter, tilde)
+                   config_dir, disabled_dir, item_rel, parse_frontmatter,
+                   set_frontmatter_key, tilde)
 from .mcp import mcp_machine_set, validate_mcp_config
-from .settings import settings_set, settings_state
+from .settings import ENV_READONLY, settings_set, settings_state
 
 
 # Component kinds that map onto a config-dir item type, and so can be split out.
@@ -63,18 +66,36 @@ def _marketplaces():
     return out, err
 
 def _catalogue(mroot):
-    """name -> description for the plugins a marketplace ships in its own tree.
+    """name -> (description, dir or None) for the plugins a marketplace ships.
 
     Only entries whose `source` is a relative path are on disk here; the rest
     of the catalogue points at git repos that are not fetched until installed.
+    That path is the marketplace's own word on where its plugin lives, and it
+    is not always a `plugins/` subdirectory — `"source": "./"` means the
+    marketplace root *is* the plugin, a layout a directory scan cannot infer.
     """
     data, _ = _read_json_object(mroot / ".claude-plugin" / "marketplace.json")
     entries = data.get("plugins")
     out = {}
     for e in entries if isinstance(entries, list) else []:
         if isinstance(e, dict) and isinstance(e.get("name"), str):
-            out[e["name"]] = e.get("description") or ""
+            out[e["name"]] = (e.get("description") or "",
+                              _catalogue_dir(mroot, e.get("source")))
     return out
+
+def _catalogue_dir(mroot, source):
+    """A catalogue entry's `source` as a directory inside the marketplace, or
+    None when it is a git source, an absolute path, or points outside."""
+    if not isinstance(source, str) or not source or Path(source).is_absolute():
+        return None
+    try:
+        d = (mroot / source).resolve()
+        root = mroot.resolve()
+    except OSError:
+        return None
+    if d != root and root not in d.parents:
+        return None
+    return d if _is_plugin_dir(d) else None
 
 def _manifest(pdir):
     """(name, description) from .claude-plugin/plugin.json, which many plugins
@@ -88,8 +109,15 @@ def _is_plugin_dir(d):
         or any((d / k).is_dir() for k in PLUGIN_TYPES) or (d / "hooks").is_dir())
 
 def _marketplace_plugins(mname, mroot):
+    """Catalogue entries first — they are what Claude Code loads — then any
+    plugin directory the scan turns up that the catalogue did not claim."""
     cat = _catalogue(mroot)
-    out = []
+    out, seen = [], set()
+    for pname, (desc, pdir) in sorted(cat.items()):
+        if pdir is None:
+            continue
+        out.append((pname, mname, pdir, desc or _manifest(pdir)[1]))
+        seen |= {pname, pdir}
     for sub in ("plugins", "external_plugins"):
         d = mroot / sub
         if not d.is_dir():
@@ -97,8 +125,10 @@ def _marketplace_plugins(mname, mroot):
         for pdir in sorted(d.iterdir()):
             if not _is_plugin_dir(pdir):
                 continue
-            _, mdesc = _manifest(pdir)
-            out.append((pdir.name, mname, pdir, cat.get(pdir.name) or mdesc))
+            if pdir.name in seen or pdir.resolve() in seen:
+                continue
+            desc, _ = cat.get(pdir.name, ("", None))
+            out.append((pdir.name, mname, pdir, desc or _manifest(pdir)[1]))
     return out
 
 def _repo_plugins():
@@ -140,9 +170,13 @@ def _md_components(pdir, kind):
         if any(part.startswith(".") for part in rel.parts) or not p.is_file():
             continue
         text = p.read_text(errors="replace")
+        meta = parse_frontmatter(text)
         out.append({
             "kind": kind, "name": str(rel)[:-3],
-            "description": parse_frontmatter(text).get("description", ""),
+            "description": meta.get("description", ""),
+            # an agent's own model: line, the only per-agent model Claude Code
+            # reads. Free here — the frontmatter is already parsed.
+            "model": meta.get("model", "") if kind == "agents" else "",
             "path": tilde(p), "adoptable": True, "reason": None,
             "warn": ("references ${CLAUDE_PLUGIN_ROOT}; those paths will not "
                      "resolve once split") if _references_plugin_root(text) else None,
@@ -167,6 +201,7 @@ def _skill_components(pdir):
         out.append({
             "kind": "skills", "name": entry.name,
             "description": parse_frontmatter(text).get("description", ""),
+            "model": "",
             "path": tilde(entry), "adoptable": True, "reason": None,
             "warn": ("references ${CLAUDE_PLUGIN_ROOT}; those paths will not "
                      "resolve once split") if _references_plugin_root(body) else None,
@@ -178,7 +213,8 @@ def _plugin_mcp(pdir):
     data, err = _read_json_object(pdir / ".mcp.json")
     if err:
         return [{"kind": "mcp", "name": ".mcp.json", "description": "",
-                 "path": tilde(pdir / ".mcp.json"), "adoptable": False,
+                 "model": "", "path": tilde(pdir / ".mcp.json"),
+                 "adoptable": False,
                  "reason": f"invalid JSON: {err}", "warn": None}]
     out = []
     for name, cfg in data.items():
@@ -187,6 +223,7 @@ def _plugin_mcp(pdir):
             "kind": "mcp", "name": name,
             "description": cfg.get("command") or cfg.get("url") or ""
                            if isinstance(cfg, dict) else "",
+            "model": "",
             "path": tilde(pdir / ".mcp.json"),
             "adoptable": not blocked,
             "reason": MCP_ROOT_REASON if blocked else None, "warn": None,
@@ -202,7 +239,7 @@ def _plugin_hooks(pdir):
     return [{
         "kind": "hooks", "name": "hooks",
         "description": ", ".join(sorted(events)) if events else "",
-        "path": tilde(hdir), "adoptable": False,
+        "model": "", "path": tilde(hdir), "adoptable": False,
         "reason": HOOKS_REASON, "warn": None,
     }]
 
@@ -294,6 +331,154 @@ def _plugin(pid):
             return name, market, pdir, desc
     raise ValueError(f"{pid}: unknown plugin")
 
+# ---- the env vars a plugin reads
+#
+# Claude Code has no per-plugin or per-agent model setting, so a plugin that
+# wants one ships its own: caveman's SessionStart hook rewrites each cavecrew
+# agent's `model:` line from CAVECREW_REVIEWER_MODEL and friends. Those names
+# exist only in the plugin's source and, if you are lucky, a README table
+# inside one of its skills. Reading them off disk is the only way anyone is
+# going to find them — and once found they are ordinary settings.json `env`
+# entries, which this app already writes.
+#
+# A guess, and labelled as one in the UI: a name matched here is a name the
+# plugin's code mentions, not a documented contract.
+
+ENV_SCAN_CODE_EXTS = frozenset({".js", ".mjs", ".cjs", ".ts", ".py", ".sh",
+                                ".bash", ".zsh", ".json", ".toml"})
+ENV_SCAN_EXTS = ENV_SCAN_CODE_EXTS | {".md"}
+# node_modules and friends are not this plugin's code; tests and evals mention
+# env vars nobody is meant to set.
+ENV_SCAN_SKIP = frozenset({"node_modules", "dist", "build", "vendor",
+                           "__pycache__", "coverage", "fixtures", "tests",
+                           "test", "evals", "benchmarks", "examples"})
+ENV_SCAN_MAX_FILES = 400
+ENV_SCAN_MAX_BYTES = 256 * 1024  # per file; a bundle is not worth reading
+
+# Reads we can see directly.
+_ENV_PATTERNS = [
+    re.compile(r"process\.env\.([A-Z_][A-Z0-9_]*)"),
+    re.compile(r"""process\.env\[\s*['"]([A-Z_][A-Z0-9_]*)"""),
+    re.compile(r"""os\.environ(?:\.get\(|\[)\s*['"]([A-Z_][A-Z0-9_]*)"""),
+    re.compile(r"""os\.getenv\(\s*['"]([A-Z_][A-Z0-9_]*)"""),
+]
+# Shell has no marker distinguishing "read from the environment" from "read the
+# variable I set four lines up", so names assigned in the same file are dropped.
+_SH_USE = re.compile(r"\$\{?([A-Z_][A-Z0-9_]*)\b")
+_SH_SET = re.compile(r"^\s*(?:export\s+|local\s+|readonly\s+|declare\s+-\w+\s+)?"
+                     r"([A-Z_][A-Z0-9_]*)=", re.M)
+# Reads we can only infer: caveman's model overrides go through a table of
+# {envVar: 'CAVECREW_REVIEWER_MODEL'} literals, which no process.env.X pattern
+# can see. In a file that demonstrably works with the environment, a quoted
+# SCREAMING_SNAKE literal is worth offering. The underscore is the filter that
+# keeps this from matching every quoted constant in the file.
+_ENV_AWARE = re.compile(r"process\.env|os\.environ|os\.getenv|getenv\(")
+_ENV_LITERAL = re.compile(r"""['"]([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)['"]""")
+
+# Names that are somebody else's: the shell's, the OS's, or Claude Code's own
+# (those have dedicated Settings rows — surfacing them per-plugin would imply a
+# scope they do not have).
+ENV_SCAN_GENERIC = frozenset({
+    "PATH", "HOME", "PWD", "OLDPWD", "USER", "LOGNAME", "SHELL", "TERM",
+    "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "EDITOR", "VISUAL", "PAGER",
+    "NO_COLOR", "FORCE_COLOR", "CI", "DEBUG", "NODE_ENV", "NODE_OPTIONS",
+    "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "USERPROFILE", "HOSTNAME",
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
+    "SHLVL", "IFS", "PS1", "RANDOM", "OSTYPE", "BASH_SOURCE",
+})
+
+def _env_scan_files(pdir):
+    """Text files worth grepping, hard-capped."""
+    out = []
+    for p in sorted(pdir.rglob("*")):
+        rel = p.relative_to(pdir)
+        if any(part.startswith(".") or part in ENV_SCAN_SKIP for part in rel.parts):
+            continue
+        if not p.is_file() or p.is_symlink() or p.suffix not in ENV_SCAN_EXTS:
+            continue
+        out.append(p)
+        if len(out) >= ENV_SCAN_MAX_FILES:
+            break
+    return out
+
+def _env_names(text, suffix):
+    """Env var names one source file reads. Markdown never contributes a name —
+    prose is full of `$VARIABLE`-shaped things that nobody can set."""
+    names = set()
+    for pat in _ENV_PATTERNS:
+        names |= set(pat.findall(text))
+    if suffix in (".sh", ".bash", ".zsh"):
+        names |= set(_SH_USE.findall(text)) - set(_SH_SET.findall(text))
+    if _ENV_AWARE.search(text):
+        names |= set(_ENV_LITERAL.findall(text))
+    return names
+
+def _env_doc(name, texts):
+    """The first line of the plugin's own prose that mentions this var — for
+    caveman that is the env-var/agent table in skills/cavecrew/README.md.
+
+    Markdown table rows are the common shape and read badly raw, so pipes and
+    backticks are flattened into something a row can show as a sentence.
+    """
+    for rel, text in texts:
+        for line in text.splitlines():
+            if name not in line or not line.strip():
+                continue
+            line = line.strip()
+            if line.startswith("|"):
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                line = " → ".join(c for c in cells if c)
+            return {"line": line.replace("`", "")[:240], "file": rel}
+    return None
+
+def plugin_env_vars(pid):
+    """[{name, model, files, doc, value}] — env vars this plugin's code reads.
+
+    Kept out of plugins_state(): that runs on every /api/plugins call and again
+    inside insight and doctor, and this walks the whole tree.
+    """
+    _, _, pdir, _ = _plugin(pid)
+    # CLAUDE_PLUGIN_ROOT and friends are handed *to* the plugin by Claude Code
+    official = set(schema.env_var_names()) | set(ENV_READONLY) | set(PLUGIN_ROOT_VARS)
+    hits, docs = {}, []
+    for p in _env_scan_files(pdir):
+        try:
+            if p.stat().st_size > ENV_SCAN_MAX_BYTES:
+                continue
+            text = p.read_text(errors="replace")
+        except OSError:
+            continue
+        rel = str(p.relative_to(pdir))
+        if p.suffix == ".md":
+            docs.append((rel, text))
+            continue
+        for name in _env_names(text, p.suffix):
+            if name in official or name in ENV_SCAN_GENERIC or len(name) < 4:
+                continue
+            hits.setdefault(name, []).append(rel)
+    env = settings_state()["data"].get("env")
+    env = env if isinstance(env, dict) else {}
+    out = []
+    for name in sorted(hits):
+        files = sorted(set(hits[name]))
+        out.append({
+            "name": name,
+            "model": "MODEL" in name,
+            "files": files[:8],
+            "doc": _env_doc(name, docs),
+            "value": env.get(name, ""),
+        })
+    # model knobs first — they are what people come here for
+    out.sort(key=lambda e: (not e["model"], e["name"]))
+    return out
+
+def plugin_env_set(name, value):
+    """Set (or clear, value falsy) one settings.json env entry."""
+    if not re.match(r"^[A-Z_][A-Z0-9_]*$", name or ""):
+        raise ValueError("bad environment variable name")
+    settings_set("env." + name, value if value else None)
+
+
 def plugin_set_enabled(pid, enabled):
     """Flip a plugin in settings.json's enabledPlugins.
 
@@ -378,11 +563,7 @@ def _copy_tree(src, dst, rels, source):
 def _with_source(text, source):
     """Record provenance in the item's own frontmatter, adding a block if the
     file has none."""
-    line = f"{SOURCE_KEY}: {source}"
-    lines = text.splitlines()
-    if lines and lines[0].strip() == "---":
-        return "\n".join([lines[0], line] + lines[1:]) + "\n"
-    return "---\n" + line + "\n---\n" + text
+    return set_frontmatter_key(text, SOURCE_KEY, source)
 
 def _strip_source(text):
     """Drop the provenance line, so an adopted item is not read as drifted from
@@ -390,8 +571,21 @@ def _strip_source(text):
     return "\n".join(ln for ln in text.splitlines()
                      if not ln.startswith(SOURCE_KEY + ":"))
 
-def plugins_split(pid, picks, disable=True):
+def check_model(model):
+    """A model alias or ID, as it will be written to a `model:` line."""
+    model = (model or "").strip()
+    if not model:
+        return ""
+    if re.search(r"[\x00-\x1f\x7f]", model) or len(model) > 200:
+        raise ValueError(f"{model[:40]}: not a usable model name")
+    return model
+
+def plugins_split(pid, picks, disable=True, models=None):
     """Copy the chosen components into the config dir, then turn the plugin off.
+
+    `models` is {agent name: model}, applied to the copy's `model:` line on the
+    way out — the plugin's own file is never touched, so choosing a model here
+    is the same act as splitting, not a second edit against someone else's tree.
 
     Everything that can fail is checked first, so the common refusals (a name
     collision, an oversized skill, unparseable settings) change nothing at all.
@@ -400,6 +594,7 @@ def plugins_split(pid, picks, disable=True):
     plugin with pieces missing.
     """
     name, market, pdir, _ = _plugin(pid)
+    models = {k: check_model(v) for k, v in (models or {}).items()}
     comps = {(c["kind"], c["name"]): c for c in _components(pdir)}
 
     # phase 1: validate, write nothing
@@ -441,8 +636,11 @@ def plugins_split(pid, picks, disable=True):
                 source = f"{pid}/skills/{cname}"
                 staged.append((_copy_tree(src, dst, extra, source), dst))
             else:
-                staged.append((_with_source(src.read_text(errors="replace"), extra),
-                               dst))
+                text = _with_source(src.read_text(errors="replace"), extra)
+                if kind == "agents" and cname in models:
+                    text = set_frontmatter_key(text, "model",
+                                               models[cname] or None)
+                staged.append((text, dst))
 
         # phase 3: commit
         for payload, dst in staged:
@@ -476,12 +674,15 @@ def plugins_split(pid, picks, disable=True):
 
 # ---- provenance and drift
 
-def _source_of(path):
+def _meta_of(path):
+    """An item's frontmatter — a skill's lives in its SKILL.md."""
     if path.is_dir():
         path = path / "SKILL.md"
-    if not path.is_file():
-        return None
-    return parse_frontmatter(path.read_text(errors="replace")).get(SOURCE_KEY)
+    return parse_frontmatter(path.read_text(errors="replace")) \
+        if path.is_file() else {}
+
+def _source_of(path):
+    return _meta_of(path).get(SOURCE_KEY)
 
 def _resolve_source(source):
     """A recorded 'plugin@market/kind/name' back to its path, or None."""
@@ -527,9 +728,10 @@ def adopted_items():
                        if kind == "skills" else sorted(root.rglob("*.md")))
             for p in entries:
                 try:
-                    source = _source_of(p)
+                    meta = _meta_of(p)
                 except OSError:
                     continue
+                source = meta.get(SOURCE_KEY)
                 if not source:
                     continue
                 name = p.name if kind == "skills" else str(
@@ -548,6 +750,8 @@ def adopted_items():
                 out.append({"type": kind, "name": name, "source": source,
                             "path": tilde(p), "enabled": enabled,
                             "missing": missing, "drift": drift,
+                            # ours to set, unlike the plugin's read-only copy
+                            "model": meta.get("model", "") if kind == "agents" else "",
                             "source_path": their_file})
     return out
 

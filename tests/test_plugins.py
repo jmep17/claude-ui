@@ -468,5 +468,214 @@ class TestItemSource(Base):
         self.assertEqual(it["source"], "demo@mkt/skills/helper")
 
 
+class TestCatalogueSource(Base):
+    """A marketplace's catalogue says where its plugins live. Scanning
+    plugins/ finds the common layout; it cannot find "source": "./", where the
+    marketplace root is itself the plugin."""
+
+    def catalogue(self, mroot, entries):
+        write(mroot / ".claude-plugin" / "marketplace.json",
+              json.dumps({"name": mroot.name, "plugins": entries}))
+
+    def test_a_root_source_plugin_is_found(self):
+        mroot = self.tmp / "plugins" / "marketplaces" / "self"
+        write(mroot / "agents" / "solo.md", md("Solo"))
+        self.catalogue(mroot, [{"name": "self", "description": "d", "source": "./"}])
+        p = self.one("self@self")
+        self.assertEqual(p["description"], "d")
+        self.assertEqual(p["counts"], {"agents": 1})
+
+    def test_a_catalogued_subdir_is_not_listed_twice(self):
+        self.catalogue(self.plugin.parent.parent,
+                       [{"name": "demo", "description": "a demo",
+                         "source": "./plugins/demo"}])
+        ids = [p["id"] for p in plugins.plugins_state()["plugins"]]
+        self.assertEqual(ids.count("demo@mkt"), 1)
+
+    def test_the_catalogue_wins_over_a_lookalike_subdir(self):
+        """caveman's repo ships both a root plugin and a plugins/caveman dir
+        from another distribution; only the catalogued one is real."""
+        mroot = self.tmp / "plugins" / "marketplaces" / "two"
+        write(mroot / "agents" / "real.md", md("Real"))
+        write(mroot / "plugins" / "two" / "agents" / "decoy.md", md("Decoy"))
+        self.catalogue(mroot, [{"name": "two", "source": "./"}])
+        p = self.one("two@two")
+        self.assertEqual([c["name"] for c in p["components"]], ["real"])
+
+    def test_a_git_source_is_ignored(self):
+        self.catalogue(self.plugin.parent.parent,
+                       [{"name": "remote", "source": {"source": "github",
+                                                      "repo": "a/b"}}])
+        ids = {p["id"] for p in plugins.plugins_state()["plugins"]}
+        self.assertNotIn("remote@mkt", ids)
+
+    def test_a_source_escaping_the_marketplace_is_ignored(self):
+        mroot = self.tmp / "plugins" / "marketplaces" / "esc"
+        self.catalogue(mroot, [{"name": "esc", "source": "../../../.."}])
+        ids = {p["id"] for p in plugins.plugins_state()["plugins"]}
+        self.assertNotIn("esc@esc", ids)
+
+
+class TestAgentModel(Base):
+    """An agent's model: line — reported everywhere, and settable on the copy
+    that is ours. The plugin's own file is never written."""
+
+    def agent(self, name="alpha"):
+        return next(c for c in self.one()["components"]
+                    if c["kind"] == "agents" and c["name"] == name)
+
+    def test_an_agents_model_is_reported(self):
+        write(self.plugin / "agents" / "alpha.md",
+              "---\ndescription: A\nmodel: haiku\n---\nbody")
+        self.assertEqual(self.agent()["model"], "haiku")
+
+    def test_no_model_line_reports_empty(self):
+        self.assertEqual(self.agent()["model"], "")
+
+    def test_only_agents_carry_a_model(self):
+        self.skill()
+        for c in self.one()["components"]:
+            if c["kind"] != "agents":
+                self.assertEqual(c["model"], "", c["name"])
+
+    def test_split_writes_the_chosen_model(self):
+        plugins.plugins_split("demo@mkt", [{"kind": "agents", "name": "alpha"}],
+                              disable=False, models={"alpha": "opus"})
+        text = (self.tmp / "agents" / "alpha.md").read_text()
+        self.assertIn("model: opus", text)
+        self.assertIn("x-claude-ui-source: demo@mkt/agents/alpha", text)
+
+    def test_split_replaces_the_plugins_model_rather_than_adding_one(self):
+        write(self.plugin / "agents" / "alpha.md",
+              "---\ndescription: A\nmodel: haiku\n---\nbody")
+        plugins.plugins_split("demo@mkt", [{"kind": "agents", "name": "alpha"}],
+                              disable=False, models={"alpha": "opus"})
+        text = (self.tmp / "agents" / "alpha.md").read_text()
+        self.assertEqual(text.count("model:"), 1)
+        self.assertNotIn("haiku", text)
+
+    def test_split_leaves_the_plugins_own_copy_alone(self):
+        src = self.plugin / "agents" / "alpha.md"
+        before = src.read_text()
+        plugins.plugins_split("demo@mkt", [{"kind": "agents", "name": "alpha"}],
+                              disable=False, models={"alpha": "opus"})
+        self.assertEqual(src.read_text(), before)
+
+    def test_an_adopted_agent_reports_its_model(self):
+        plugins.plugins_split("demo@mkt", [{"kind": "agents", "name": "alpha"}],
+                              disable=False, models={"alpha": "opus"})
+        self.assertEqual(self.adopted("alpha")["model"], "opus")
+
+    def test_a_bad_model_is_refused_before_anything_is_copied(self):
+        with self.assertRaises(ValueError):
+            plugins.plugins_split("demo@mkt", [{"kind": "agents", "name": "alpha"}],
+                                  disable=False, models={"alpha": "opus\nname: x"})
+        self.assertEqual(self.names("agents"), [])
+
+
+class TestPluginEnvVars(Base):
+    """The env vars a plugin reads, found by reading it. A guess, so the bar is
+    that the guess is short and includes the ones that matter."""
+
+    def hook(self, text, name="hook.js"):
+        write(self.plugin / "src" / name, text)
+
+    def test_finds_a_direct_read(self):
+        self.hook("const m = process.env.DEMO_MODEL || 'x';")
+        names = [e["name"] for e in plugins.plugin_env_vars("demo@mkt")]
+        self.assertIn("DEMO_MODEL", names)
+
+    def test_finds_a_name_held_in_a_table(self):
+        """cavecrew's model overrides go through a list of literals; no
+        process.env.X pattern can see them."""
+        self.hook("const MAP = [{envVar: 'DEMO_REVIEWER_MODEL'}];\n"
+                  "for (const e of MAP) v = process.env[e.envVar];")
+        names = [e["name"] for e in plugins.plugin_env_vars("demo@mkt")]
+        self.assertIn("DEMO_REVIEWER_MODEL", names)
+
+    def test_a_literal_in_a_file_that_never_touches_the_env_is_ignored(self):
+        self.hook("const HEADERS = ['CONTENT_TYPE_JSON'];")
+        names = [e["name"] for e in plugins.plugin_env_vars("demo@mkt")]
+        self.assertNotIn("CONTENT_TYPE_JSON", names)
+
+    def test_a_python_read_is_found(self):
+        write(self.plugin / "src" / "x.py", "import os\nos.environ.get('DEMO_FLAG')\n")
+        names = [e["name"] for e in plugins.plugin_env_vars("demo@mkt")]
+        self.assertIn("DEMO_FLAG", names)
+
+    def test_a_shell_local_is_not_an_env_var(self):
+        write(self.plugin / "src" / "i.sh",
+              "#!/bin/sh\nDEMO_TMPDIR=/tmp\necho $DEMO_TMPDIR $DEMO_REAL\n")
+        names = [e["name"] for e in plugins.plugin_env_vars("demo@mkt")]
+        self.assertIn("DEMO_REAL", names)
+        self.assertNotIn("DEMO_TMPDIR", names)
+
+    def test_claude_codes_own_vars_are_left_to_the_settings_tab(self):
+        self.hook("process.env.CLAUDE_PLUGIN_ROOT; process.env.CLAUDE_CODE_SUBAGENT_MODEL;")
+        names = [e["name"] for e in plugins.plugin_env_vars("demo@mkt")]
+        self.assertNotIn("CLAUDE_PLUGIN_ROOT", names)
+        self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL", names)
+
+    def test_generic_names_are_dropped(self):
+        self.hook("process.env.PATH; process.env.HOME; process.env.NODE_ENV;")
+        self.assertEqual(plugins.plugin_env_vars("demo@mkt"), [])
+
+    def test_markdown_never_contributes_a_name(self):
+        write(self.plugin / "README.md", "Run with $DEMO_PROSE set to something.")
+        names = [e["name"] for e in plugins.plugin_env_vars("demo@mkt")]
+        self.assertNotIn("DEMO_PROSE", names)
+
+    def test_tests_and_evals_are_skipped(self):
+        write(self.plugin / "tests" / "t.js", "process.env.DEMO_TEST_ONLY;")
+        names = [e["name"] for e in plugins.plugin_env_vars("demo@mkt")]
+        self.assertNotIn("DEMO_TEST_ONLY", names)
+
+    def test_node_modules_is_skipped(self):
+        write(self.plugin / "node_modules" / "dep" / "i.js", "process.env.DEP_SECRET;")
+        names = [e["name"] for e in plugins.plugin_env_vars("demo@mkt")]
+        self.assertNotIn("DEP_SECRET", names)
+
+    def test_model_vars_are_flagged_and_come_first(self):
+        self.hook("process.env.DEMO_FLAG; process.env.DEMO_MODEL;")
+        got = plugins.plugin_env_vars("demo@mkt")
+        self.assertEqual(got[0]["name"], "DEMO_MODEL")
+        self.assertTrue(got[0]["model"])
+        self.assertFalse(got[1]["model"])
+
+    def test_the_current_value_comes_from_settings(self):
+        self.hook("process.env.DEMO_MODEL;")
+        settings.settings_set("env.DEMO_MODEL", "sonnet")
+        got = plugins.plugin_env_vars("demo@mkt")
+        self.assertEqual(got[0]["value"], "sonnet")
+
+    def test_a_doc_line_is_attached_and_a_table_row_is_flattened(self):
+        self.hook("process.env.DEMO_MODEL;")
+        write(self.plugin / "README.md",
+              "| Env var | Agent |\n|---|---|\n| `DEMO_MODEL` | `demo-agent` |\n")
+        doc = plugins.plugin_env_vars("demo@mkt")[0]["doc"]
+        self.assertEqual(doc["line"], "DEMO_MODEL → demo-agent")
+        self.assertEqual(doc["file"], "README.md")
+
+    def test_no_env_vars_is_an_empty_list_not_an_error(self):
+        self.assertEqual(plugins.plugin_env_vars("demo@mkt"), [])
+
+    def test_an_unknown_plugin_is_refused(self):
+        with self.assertRaises(ValueError):
+            plugins.plugin_env_vars("nope@mkt")
+
+
+class TestPluginEnvSet(Base):
+    def test_sets_and_clears_under_env(self):
+        plugins.plugin_env_set("DEMO_MODEL", "sonnet")
+        self.assertEqual(self.settings_json(), {"env": {"DEMO_MODEL": "sonnet"}})
+        plugins.plugin_env_set("DEMO_MODEL", "")
+        self.assertEqual(self.settings_json(), {})
+
+    def test_a_name_that_is_not_an_env_var_is_refused(self):
+        for bad in ("", "lower", "a.b", "X Y", "env.X"):
+            with self.assertRaises(ValueError, msg=bad):
+                plugins.plugin_env_set(bad, "v")
+
+
 if __name__ == "__main__":
     unittest.main()
