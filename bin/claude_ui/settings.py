@@ -249,7 +249,11 @@ SETTINGS_RAW = [
      "desc": "Interface language, e.g. en, ja, fr"},
     {"key": "language", "type": "combo", "values": LANG_NAMES, "cat": "interface",
      "desc": "Preferred language for Claude's responses, as an English name like japanese or spanish"},
-    {"key": "outputStyle", "type": "combo", "values": ["default", "Explanatory", "Learning"], "cat": "interface",
+    # no hand-written values: the official schema lists the built-in styles as
+    # examples, so merge() supplies them in the order upstream states them. The
+    # hand-written list this replaced had gone stale by one (Proactive) and,
+    # because merge appends rather than replaces, showed it out of order.
+    {"key": "outputStyle", "type": "combo", "cat": "interface",
      "desc": "Output rendering style (read at startup); your installed styles are suggested"},
     {"key": "preferredNotifChannel", "type": "enum", "cat": "interface", "default": "auto",
      "values": ["auto", "terminal_bell", "iterm2", "iterm2_with_bell", "kitty", "ghostty", "notifications_disabled"],

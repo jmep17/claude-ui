@@ -17,6 +17,7 @@ from .items import (Conflict, config_files_state, item_create, item_read,
                     item_save, item_set_model, path_read, path_save,
                     scan_items, set_enabled)
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
+from . import output_styles
 from . import schema
 from .plugins import (adopted_items, plugin_env_set, plugin_env_vars,
                       plugin_resync, plugin_set_enabled, plugins_split,
@@ -34,7 +35,7 @@ STATIC = Path(__file__).resolve().parent / "static"
 # Explicit allowlist rather than path joining — nothing user-supplied ever
 # reaches the filesystem here.
 _STATIC_NAMES = ("theme.css", "components.css", "app.css", "ui.js", "editor.js",
-                 "app.js")
+                 "output-styles.js", "app.js")
 STATIC_FILES = {
     "/" + n: (n, ("text/css" if n.endswith(".css") else "text/javascript")
               + "; charset=utf-8")
@@ -123,6 +124,13 @@ class Handler(BaseHTTPRequestHandler):
                 "generation": schema.generation(),
                 "keys": schema.help_payload(s["key"] for s in settings_schema()),
             }, extra={"cache-control": "no-cache"})
+        elif self.path == "/api/output-style-presets":
+            # bundled starting points plus the field reference the create form
+            # renders. Static and several KB, so it is fetched when the form
+            # opens rather than riding along on every /api/state refresh.
+            self.send(200, {"presets": output_styles.presets(),
+                            "fields": output_styles.FIELDS,
+                            "doc": schema.DOC_BASE + output_styles.DOC})
         elif self.path.startswith("/api/path?"):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:

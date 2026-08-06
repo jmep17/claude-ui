@@ -45,6 +45,7 @@ async function api(path, body) {
 function goTab(t) {
   if (!TABS.includes(t) || (EDITING && !confirmDiscard())) return;
   EDITING = null;   // leaving for a tab closes the editor
+  closeNewStyle();  // …and discards a half-filled new-style form
   TAB = t;
   location.hash = t;
   render();
@@ -2548,6 +2549,7 @@ function renderInventory() {
   const off = items.filter((s) => !s.enabled);
 
   view.innerHTML = "";
+  if (TAB === "output-styles" && NEWSTYLE) { renderStyleForm(view); return; }
   view.append(el("div.view-head", {
     html: TAB + " in <b>" + esc(DATA.config_dir) + "/" + TAB + "</b> — everything real on this machine. "
       + "Disabling moves an item to <b>disabled/" + TAB + "/</b>; nothing is deleted. "
@@ -2563,11 +2565,20 @@ function renderInventory() {
       refilter("iq", renderInventory);
     },
   });
-  view.append(el("div.toolbar", {}, inp,
-    el("div.toolbar-end", {},
-      el("span.muted", { style: { fontSize: ".72rem" },
-        text: on.length + " enabled · " + off.length + " disabled"
-          + (items.length !== all.length ? " · " + items.length + " of " + all.length + " shown" : "") }))));
+  // Output styles are the one type you are more likely to want than to have,
+  // and the only one this app can compose from scratch — see output-styles.js.
+  if (TAB === "output-styles") view.append(styleDocsCard());
+
+  const end = el("div.toolbar-end", {},
+    el("span.muted", { style: { fontSize: ".72rem" },
+      text: on.length + " enabled · " + off.length + " disabled"
+        + (items.length !== all.length ? " · " + items.length + " of " + all.length + " shown" : "") }));
+  if (TAB === "output-styles") {
+    const nb = mkbtn("btn-sm btn-primary", "New output style", openNewStyle);
+    nb.prepend(icon("plus"));
+    end.append(nb);
+  }
+  view.append(el("div.toolbar", {}, inp, end));
 
   if (!all.length) {
     view.append(emptyState("No " + TAB + " yet",
