@@ -441,9 +441,13 @@ function toast(msg, isErr, action) {
    whatever was focused before, which the old implementation did not do.
 
    fields: [{id, label, hint, type: "text"|"select"|"textarea", value,
-             placeholder, options, mono}] */
+             placeholder, options, mono}]
 
-function modal({ title, text, fields = [], ok = "OK", cancel = "Cancel", danger = false, wide = false }) {
+   confirmWord holds the OK button shut until the first field is typed to match
+   it exactly — the guard for the handful of actions nothing can put back. */
+
+function modal({ title, text, fields = [], ok = "OK", cancel = "Cancel",
+                 danger = false, wide = false, confirmWord = "" }) {
   return new Promise((resolve) => {
     const host = document.getElementById("modal");
     const restore = document.activeElement;
@@ -507,8 +511,11 @@ function modal({ title, text, fields = [], ok = "OK", cancel = "Cancel", danger 
       if (restore && restore.isConnected && restore.focus) restore.focus();
       resolve(val);
     };
-    const submit = () => done(Object.fromEntries(Object.entries(inputs).map(
-      ([k, i]) => [k, Array.isArray(i.value) ? i.value : String(i.value).trim()])));
+    const submit = () => {
+      if (okBtn.disabled) return;   // Enter must not walk past a confirmWord
+      done(Object.fromEntries(Object.entries(inputs).map(
+        ([k, i]) => [k, Array.isArray(i.value) ? i.value : String(i.value).trim()])));
+    };
 
     const focusables = () => [...content.querySelectorAll(
       'button:not(:disabled), input:not([hidden]):not(:disabled), select:not([hidden]), textarea, [tabindex]:not([tabindex="-1"])')]
@@ -543,6 +550,10 @@ function modal({ title, text, fields = [], ok = "OK", cancel = "Cancel", danger 
 
     host.append(content);
     const first = Object.values(inputs)[0];
+    if (confirmWord && first) {
+      okBtn.disabled = true;
+      first.oninput = () => { okBtn.disabled = first.value.trim() !== confirmWord; };
+    }
     ((first && (first.fselTrigger || first)) || okBtn).focus();
     if (first && first.select) first.select();
   });
@@ -550,6 +561,16 @@ function modal({ title, text, fields = [], ok = "OK", cancel = "Cancel", danger 
 
 const mconfirm = (title, text, ok) =>
   modal({ title, text, ok: ok || "Confirm", danger: true }).then((r) => r !== null);
+
+/* mconfirm for what cannot be put back. mconfirm() is right for anything with
+   an undo, a disabled/ copy or a backup behind it; this is for the rest, and
+   asks you to type the name so the button is never hit by momentum. */
+const mconfirmWord = (title, text, word, ok) =>
+  modal({
+    title, text, danger: true, ok: ok || "Delete", confirmWord: word,
+    fields: [{ id: "w", label: "Type " + word + " to confirm", mono: true,
+               placeholder: word }],
+  }).then((r) => r !== null);
 
 /* --------------------------------------------------------- loading states */
 
@@ -564,9 +585,17 @@ function emptyState(title, hint, iconName) {
     hint ? el("div.es-hint", { text: hint }) : null);
 }
 
+/* every filterable list ends the same way when the query matches nothing */
+const noMatches = (q) =>
+  emptyState("No matches", "Nothing here matches “" + q + "”.", "filter");
+
 /* --------------------------------------------------------------- fragments */
 
 const badge = (text, variant) => el("span.badge", { class: "badge-" + (variant || "secondary"), text });
+
+/* "1 file", "2 files". Counts were written three ways — bare plurals that read
+   "1 files", "file(s)", and hand-written ternaries. */
+const plural = (n, word) => n + " " + word + (n === 1 ? "" : "s");
 
 const statCard = (value, label, opts = {}) =>
   el("div.stat", { class: opts.accent ? "stat-accent" : "", title: opts.title || "" },

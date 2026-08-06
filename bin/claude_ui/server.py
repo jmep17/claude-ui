@@ -13,8 +13,8 @@ import webbrowser
 from .backup import (backup_create, backup_delete, backup_inspect, backup_list,
                      backup_plan, backup_restore, set_backup_dir)
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
-from .items import (Conflict, config_files_state, item_create, item_read,
-                    item_save, item_set_model, path_read, path_save,
+from .items import (Conflict, config_files_state, item_create, item_delete,
+                    item_read, item_save, item_set_model, path_read, path_save,
                     scan_items, set_enabled)
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
 from . import output_styles
@@ -212,6 +212,10 @@ class Handler(BaseHTTPRequestHandler):
                     req.get("type", ""), req.get("name", ""),
                     req.get("content", ""),
                     bool(req.get("enabled", True)))})
+            elif action == "item-delete":
+                self.send(200, {"ok": True, **item_delete(
+                    req.get("type", ""), req.get("name", ""),
+                    bool(req.get("enabled", True)))})
             elif action == "item-save":
                 self.send(200, {"ok": True, **item_save(
                     req.get("type", ""), req.get("name", ""), req.get("file"),
@@ -267,7 +271,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, {"ok": True})
             elif action == "backup-create":
                 self.send(200, {"ok": True, **backup_create(
-                    req.get("picks") or [], req.get("note") or "")})
+                    req.get("picks") or [], req.get("note") or "",
+                    req.get("units"))})
             elif action == "backup-restore":
                 self.send(200, {"ok": True, **backup_restore(
                     req.get("name", ""), req.get("paths") or [])})

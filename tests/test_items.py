@@ -91,6 +91,65 @@ class Create(Base):
         self.assertFalse((self.tmp / "agents" / "a.md").exists())
 
 
+class Delete(Base):
+    """The one call that destroys. Everything here is about what it must not
+    reach: a symlink's target, or a directory Claude Code scans."""
+
+    def test_deletes_a_markdown_item(self):
+        self.write("agents/reviewer.md", AGENT)
+        out = items.item_delete("agents", "reviewer")
+        self.assertFalse((self.tmp / "agents" / "reviewer.md").exists())
+        self.assertEqual(out["files"], 1)
+        self.assertTrue((self.tmp / "agents").is_dir())
+
+    def test_deletes_a_skill_directory_and_everything_in_it(self):
+        self.write("skills/pdf/SKILL.md", "---\nname: pdf\n---\nx\n")
+        self.write("skills/pdf/ref/notes.md", "notes\n")
+        out = items.item_delete("skills", "pdf")
+        self.assertFalse((self.tmp / "skills" / "pdf").exists())
+        self.assertEqual(out["files"], 2)
+
+    def test_deletes_a_disabled_item_from_the_parking_area(self):
+        self.write("disabled/commands/old.md", "parked\n")
+        items.item_delete("commands", "old", enabled=False)
+        self.assertFalse((self.tmp / "disabled" / "commands" / "old.md").exists())
+
+    def test_a_symlinked_skill_loses_the_link_not_the_target(self):
+        real = self.tmp / "elsewhere" / "pdf"
+        (real).mkdir(parents=True)
+        (real / "SKILL.md").write_text("---\nname: pdf\n---\nx\n")
+        (self.tmp / "skills").mkdir()
+        (self.tmp / "skills" / "pdf").symlink_to(real)
+        items.item_delete("skills", "pdf")
+        self.assertFalse((self.tmp / "skills" / "pdf").exists())
+        self.assertTrue((real / "SKILL.md").is_file())
+
+    def test_an_empty_subdirectory_goes_but_the_type_root_stays(self):
+        self.write("commands/git/pr.md", "x\n")
+        items.item_delete("commands", "git/pr")
+        self.assertFalse((self.tmp / "commands" / "git").exists())
+        self.assertTrue((self.tmp / "commands").is_dir())
+
+    def test_a_sibling_keeps_the_subdirectory(self):
+        self.write("commands/git/pr.md", "x\n")
+        self.write("commands/git/log.md", "x\n")
+        items.item_delete("commands", "git/pr")
+        self.assertTrue((self.tmp / "commands" / "git" / "log.md").is_file())
+
+    def test_refuses_a_name_that_is_not_there(self):
+        with self.assertRaises(ValueError):
+            items.item_delete("agents", "nope")
+
+    def test_refuses_a_traversing_name_and_an_unknown_type(self):
+        victim = self.write("victim.md", "keep me\n")
+        for type_, name in (("agents", "../victim"), ("agents", "/etc/passwd"),
+                            ("nope", "reviewer")):
+            with self.subTest(type=type_, name=name):
+                with self.assertRaises(ValueError):
+                    items.item_delete(type_, name)
+        self.assertTrue(victim.is_file())
+
+
 class SkillFlags(Base):
 
     def test_no_model_invoke_flag(self):

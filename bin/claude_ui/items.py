@@ -2,6 +2,8 @@
 
 from pathlib import Path
 import json
+import os
+import shutil
 
 from .core import (CONFIG_FILES, ITEM_TYPES, SOURCE_KEY, atomic_write,
                    config_dir, disabled_dir, item_rel, parse_frontmatter,
@@ -141,9 +143,11 @@ def set_enabled(type_, name, enabled):
     _prune_empty_up(disabled_side.parent)
     return tilde(dst)
 
-def _prune_empty_up(d):
-    """Remove empty dirs from d up to (not including) the config dir."""
-    stop = disabled_dir().parent
+def _prune_empty_up(d, stop=None):
+    """Remove empty dirs from d up to (not including) `stop`, the config dir by
+    default. A caller that must keep a directory Claude Code scans — deleting
+    the last command should not take commands/ with it — passes its own."""
+    stop = stop or disabled_dir().parent
     while d != stop and d.is_dir() and not d.is_symlink():
         try:
             if any(d.iterdir()):
@@ -260,6 +264,34 @@ def item_create(type_, name, content, enabled=True):
     _reject_bad_json(target, content)
     atomic_write(target, content)
     return item_read(type_, name, None, enabled)
+
+def item_delete(type_, name, enabled=True):
+    """Remove an item for good. The one call in this module that destroys.
+
+    A symlinked item loses the link and nothing else: a skill symlinked in from
+    a git checkout lives somewhere we were never invited to write, and rmtree
+    following that link would delete the checkout. Path handling is
+    resolve_item()'s — the name is validated and confined to the type's own
+    directory there, so nothing here can reach outside it.
+
+    Empty parents left behind by a nested command go too, but the prune stops
+    at the type root: `commands/` is a directory Claude Code scans, and
+    deleting the last command in it is not a request to remove it.
+    """
+    root = item_root(type_, enabled)
+    p = resolve_item(type_, name, enabled)
+    if not (p.exists() or p.is_symlink()):
+        raise ValueError(f"{name}: not found")
+    files = 1
+    if p.is_symlink() or p.is_file():
+        p.unlink()
+    else:
+        # os.walk, not rglob: rglob descends into a symlinked subdirectory and
+        # would count files rmtree is (rightly) never going to touch
+        files = sum(len(names) for _, _, names in os.walk(p))
+        shutil.rmtree(p)
+    _prune_empty_up(p.parent, stop=root)
+    return {"deleted": tilde(p), "files": files}
 
 def item_set_model(name, model, enabled=True):
     """Rewrite an agent's `model:` frontmatter line; blank model removes it.

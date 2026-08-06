@@ -10,6 +10,8 @@
 let DATA = { items: {}, config_files: [], config_dir: "", settings: {}, mcp: {}, statusline: {} };
 
 const ITEM_TABS = ["skills", "commands", "agents", "output-styles"];
+// the types core.ITEM_TYPES calls kind "dir": a folder of files, not one file
+const DIR_TYPES = new Set(["skills"]);
 const TABS = [...ITEM_TABS, "mcp", "statusline", "setup", "settings", "insight", "costs", "doctor", "plugins", "backup"];
 
 const TAB_META = {
@@ -688,12 +690,12 @@ async function hookAdd() {
   (entry.hooks = entry.hooks || []).push(h);
   try {
     await hooksSave(hooks);
-    toast("Hook added — applies to new sessions");
+    toast("Hook added · applies to new sessions");
   } catch (e) { toast(e.message, true); }
 }
 
 async function hookDelete(row) {
-  if (!(await mconfirm("Delete hook", row.event + ": " + row.command, "Delete"))) return;
+  if (!(await mconfirm("Delete hook?", row.event + ": " + row.command, "Delete"))) return;
   const hooks = JSON.parse(JSON.stringify(DATA.settings.data.hooks));
   const m = hooks[row.event][row.mi];
   m.hooks.splice(row.hi, 1);
@@ -701,7 +703,7 @@ async function hookDelete(row) {
   if (!hooks[row.event].length) delete hooks[row.event];
   try {
     await hooksSave(hooks);
-    toast("Hook removed");
+    toast("Hook removed · applies to new sessions");
   } catch (e) { toast(e.message, true); }
 }
 
@@ -811,7 +813,7 @@ function renderSettings() {
   bar.append(el("div.toolbar-end", {},
     switchToggle("Only set", SFILTER.set, (v) => { SFILTER.set = v; renderSettings(); },
       "Show only keys present in settings.json"),
-    el("span.muted", { style: { fontSize: ".72rem" },
+    el("span.hint", {
       text: setCount + " of " + SCHEMA.length + " documented keys set" })));
   view.append(bar);
 
@@ -866,7 +868,7 @@ function renderSettings() {
       el("span.sg-meta", {},
         managed ? badge("no-op in user scope", "outline") : null,
         nSet ? badge(nSet + " set", "default") : null,
-        el("span.muted", { style: { fontSize: ".72rem" }, text: items.length + " keys" }))));
+        el("span.hint", { text: items.length + " keys" }))));
     if (managed) {
       group.append(el("div.setgroup-note", { text:
         "These keys are only honored in managed settings — /Library/Application " +
@@ -911,7 +913,8 @@ function mcpEditPanel() {
       name,
       MCPEDIT.enabled === false ? badge("disabled", "outline") : null,
       el("div.toolbar-end", {},
-        MCPEDIT.isNew ? null : mkbtn("btn-sm danger", "Delete", mcpDelete))),
+        MCPEDIT.isNew ? null : mkbtn("btn-sm danger", "Delete",
+          () => mcpDelete(MCPEDIT.name, MCPEDIT.enabled !== false)))),
     ta,
     el("div.toolbar", { style: { marginTop: ".625rem", marginBottom: 0 } },
       mkbtn("btn-primary", "Save", mcpSave),
@@ -926,21 +929,20 @@ async function mcpSave() {
   const enabled = MCPEDIT.enabled !== false;
   try {
     await api("/api/mcp-save", { name, config, enabled });
-    toast(name + " saved" + (enabled ? "" : " (still disabled)") + " — applies to new sessions");
+    toast(name + " saved" + (enabled ? "" : " (still disabled)") + " · applies to new sessions");
     MCPEDIT = null;
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
 
-async function mcpDelete() {
-  const enabled = MCPEDIT.enabled !== false;
-  if (!(await mconfirm("Delete " + MCPEDIT.name,
+async function mcpDelete(name, enabled) {
+  if (!(await mconfirm("Delete " + name + "?",
     enabled ? "Removes it from " + DATA.mcp.machine_path + "."
       : "Removes it from disabled/mcp-servers.json.", "Delete"))) return;
   try {
-    await api("/api/mcp-delete", { name: MCPEDIT.name, enabled });
-    toast(MCPEDIT.name + " deleted");
-    MCPEDIT = null;
+    await api("/api/mcp-delete", { name, enabled });
+    toast(name + " deleted · applies to new sessions");
+    if (MCPEDIT && MCPEDIT.name === name) MCPEDIT = null;
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
@@ -1026,6 +1028,15 @@ function renderMcp() {
       actions.append(ed);
       actions.append(mkbtn("btn-sm" + (s.enabled ? " danger" : ""),
         s.enabled ? "Disable" : "Enable", () => mcpToggle(s.name, !s.enabled)));
+      // the same overflow every other entity list has: deleting a server used
+      // to mean opening the editor first, which nothing else asks of you
+      const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
+        { label: "Copy name", icon: "copy", fn: () => copyText(s.name, "name") },
+        { label: "Delete server", icon: "trash", danger: true,
+          fn: () => mcpDelete(s.name, s.enabled) },
+      ]), "More actions");
+      more.append(icon("chevronDown"));
+      actions.append(more);
     }
     list.append(el("div.list-item", { class: s.enabled ? "" : "off" },
       el("div.li-main", {},
@@ -1101,7 +1112,7 @@ async function renderPlugins(reload) {
   rescan.prepend(icon("refresh"));
   view.append(el("div.toolbar", {}, inp,
     el("div.toolbar-end", {},
-      el("span.muted", { style: { fontSize: ".72rem" },
+      el("span.hint", {
         text: shown.length + " of " + all.length + " shown" }),
       rescan)));
 
@@ -1111,7 +1122,7 @@ async function renderPlugins(reload) {
     return;
   }
   if (!shown.length) {
-    view.append(emptyState("No matches", "Nothing here matches “" + PQ + "”.", "filter"));
+    view.append(noMatches(PQ));
     return;
   }
 
@@ -1337,12 +1348,12 @@ async function togglePluginDetail(p, btn, body) {
   body.hidden ? POPEN.delete(p.id) : POPEN.add(p.id);
   if (body.hidden || body.dataset.built) return;
   body.dataset.built = "1";
-  body.append(el("div.muted", { style: { fontSize: ".72rem" }, text: "Reading the plugin…" }));
+  body.append(el("div.hint", { text: "Reading the plugin…" }));
   try {
     if (!PDETAIL[p.id]) PDETAIL[p.id] = await api("/api/plugin-detail?id=" + encodeURIComponent(p.id));
   } catch (e) {
     body.innerHTML = "";
-    body.append(el("div.muted", { style: { fontSize: ".72rem" }, text: e.message }));
+    body.append(el("div.hint", { text: e.message }));
     return;
   }
   body.innerHTML = "";
@@ -1366,7 +1377,7 @@ function pluginAgentsPanel(p, body) {
 
     const right = el("div.pd-ctrl", {});
     if (forced) {
-      right.append(el("span.muted", { style: { fontSize: ".72rem" },
+      right.append(el("span.hint", {
         text: "set by " + SUBAGENT_KEY }));
     } else if (mine) {
       const sc = scalarControl({ key: SUBAGENT_KEY, type: "combo", values: modelValues() },
@@ -1586,7 +1597,7 @@ async function renderSetup(reload) {
 
 async function setupAct(action, p) {
   if (action === "remove" &&
-      !(await mconfirm("Remove " + p.label,
+      !(await mconfirm("Remove " + p.label + "?",
         "Removes only this piece's own artifacts (" + (p.target || "its files") +
         ") and clears the setting it set. Your own config is left as-is.", "Remove")))
     return;
@@ -2509,6 +2520,33 @@ async function toggleItem(type, name, enabled) {
   } catch (e) { toast(e.message, true); }
 }
 
+/* The one action here that takes something away for good.
+
+   Everything else in this app is reversible: disabling parks a file in
+   disabled/, editing keeps the bytes it replaced in a diff you were shown, a
+   backup can be restored. This cannot, so it asks for the name to be typed and
+   the toast carries no Undo — there is nothing held to put back. */
+async function deleteItem(type, s, enabled) {
+  // no file count in the wording: the only list the browser has is the editor's
+  // (capped, dotfiles excluded), and a number that understates what is about to
+  // go is worse than not giving one
+  const what = s.symlink
+    ? "Removes the link at " + (s.path || s.name) + ". Whatever it points at is "
+      + "left exactly as it is."
+    : "Permanently removes " + (s.path || s.name)
+      + (DIR_TYPES.has(type) ? " and everything inside it." : ".")
+      + " This cannot be undone from here.";
+  const ok = await mconfirmWord("Delete " + s.name + "?",
+    what + (enabled ? "" : " It is already disabled, so nothing in your live config changes."),
+    s.name, "Delete");
+  if (!ok) return;
+  try {
+    await api("/api/item-delete", { type, name: s.name, enabled });
+    toast(s.name + " deleted");
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
 function itemBadges(s) {
   const out = [];
   if (s.symlink && !s.broken) out.push(badge("symlink", "outline"));
@@ -2570,7 +2608,7 @@ function renderInventory() {
   if (TAB === "output-styles") view.append(styleDocsCard());
 
   const end = el("div.toolbar-end", {},
-    el("span.muted", { style: { fontSize: ".72rem" },
+    el("span.hint", {
       text: on.length + " enabled · " + off.length + " disabled"
         + (items.length !== all.length ? " · " + items.length + " of " + all.length + " shown" : "") }));
   if (TAB === "output-styles") {
@@ -2608,6 +2646,8 @@ function renderInventory() {
           ? [{ label: "Open by path", icon: "file", fn: () => openPath(s.path) }] : []),
         { label: enabled ? "Disable" : "Enable", icon: "power",
           fn: () => toggleItem(TAB, s.name, !enabled), danger: enabled },
+        { label: "Delete…", icon: "trash", danger: true,
+          fn: () => deleteItem(TAB, s, enabled) },
       ]), "More actions");
       more.append(icon("chevronDown"));
       actions.append(more);
@@ -2626,7 +2666,7 @@ function renderInventory() {
   section(off, "Disabled", false);
 
   if (!items.length)
-    view.append(emptyState("No matches", "Nothing here matches “" + IQ + "”.", "filter"));
+    view.append(noMatches(IQ));
 }
 
 /* ------------------------------------------------------------------ backup --
@@ -2637,10 +2677,15 @@ function renderInventory() {
    Restore is never one click: /api/backup-inspect answers new / same / differs
    for every file first, and only the rows you leave ticked are written. That
    report is an inline panel rather than a modal — a full backup is thousands
-   of transcripts, and a diff you can expand does not belong in a dialog. */
+   of transcripts, and a diff you can expand does not belong in a dialog.
+
+   A group is a coarse tick; inside it the server offers units — one skill, one
+   config file, one MCP server, one project's transcripts. BUNITS holds the
+   narrowing, and a group with no entry there means all of it. */
 
 let BACKUP = null;      // /api/backup payload
 let BPICKS = null;      // Set of ticked group ids; null until first render
+let BUNITS = {};        // {groupId: Set(unitId)} — absent means every unit
 let BREPORT = null;     // the open dry-run report, or null
 let BSHOWSAME = false;  // identical files are collapsed by default
 
@@ -2669,6 +2714,7 @@ async function renderBackup(reload) {
       return;
     }
     if (TAB !== "backup") return;
+    bPruneUnits();
   }
   if (!BPICKS) BPICKS = new Set(BACKUP.plan.filter((g) => g.files).map((g) => g.id));
 
@@ -2730,23 +2776,96 @@ async function changeBackupDir() {
   } catch (e) { toast(e.message, true); }
 }
 
+/* The units of a group that are actually ticked. No entry in BUNITS means all
+   of them — the same rule the server applies to a group missing from `units`. */
+function bUnits(g) {
+  const picked = BUNITS[g.id];
+  const all = g.units || [];
+  return picked ? all.filter((u) => picked.has(u.id)) : all;
+}
+
+const bCustom = (g) => !!BUNITS[g.id] && bUnits(g).length !== (g.units || []).length;
+
+const bTotals = (g) => bUnits(g).reduce(
+  (t, u) => ({ files: t.files + u.files, bytes: t.bytes + u.bytes }),
+  { files: 0, bytes: 0 });
+
+/* A narrowing must not outlive the units it names: a skill deleted since you
+   ticked it would otherwise leave a subset that silently excludes new ones. */
+function bPruneUnits() {
+  for (const g of BACKUP.plan) {
+    if (!BUNITS[g.id]) continue;
+    const live = new Set((g.units || []).map((u) => u.id));
+    const kept = [...BUNITS[g.id]].filter((id) => live.has(id));
+    if (kept.length === live.size) delete BUNITS[g.id];
+    else BUNITS[g.id] = new Set(kept);
+  }
+}
+
+/* Items are the one group big enough to want sections, and their unit ids are
+   "<type>/<name>" — so the type is already in hand. Everything else is one
+   list under the group's own name. */
+function bUnitGroups(g) {
+  const row = (u) => ({
+    value: u.id, name: u.label,
+    desc: [u.desc, plural(u.files, "file"), fbytes(u.bytes)]
+      .filter(Boolean).join(" · "),
+    checked: !BUNITS[g.id] || BUNITS[g.id].has(u.id),
+  });
+  if (g.id !== "items") return [{ label: g.label, rows: (g.units || []).map(row) }];
+  const byType = new Map();
+  for (const u of g.units || []) {
+    const t = u.id.split("/")[0];
+    if (!byType.has(t)) byType.set(t, []);
+    byType.get(t).push(row(u));
+  }
+  // TAB_META already names each type the way the rest of the app does
+  return [...byType].map(([t, rows]) => ({ label: (TAB_META[t] || {}).label || t, rows }));
+}
+
+async function chooseUnits(g) {
+  const total = (g.units || []).length;
+  const r = await modal({
+    title: g.label,
+    text: "Everything ticked here goes into the archive. Untick what you do not "
+      + "need — the other groups are unaffected.",
+    wide: true,
+    fields: [{ id: "u", type: "checklist", groups: bUnitGroups(g) }],
+    ok: "Use these",
+  });
+  if (!r) return;
+  const chosen = r.u || [];
+  if (!chosen.length) {
+    // ticking nothing in a group and unticking the group are the same request
+    delete BUNITS[g.id];
+    BPICKS.delete(g.id);
+  } else if (chosen.length === total) {
+    delete BUNITS[g.id];
+  } else {
+    BUNITS[g.id] = new Set(chosen);
+  }
+  renderBackup();
+}
+
 function backupCreateCard() {
   const card = el("div.card", { style: { marginBottom: "1.25rem" } });
   card.append(el("div.card-header", {},
     el("div", {},
       el("div.card-title", { text: "Create a backup" }),
-      el("div.card-description", { text: "Pick what goes in. Nothing is moved or changed — this only reads." }))));
+      el("div.card-description", {
+        text: "Pick what goes in, down to the single skill or server. Nothing is "
+          + "moved or changed — this only reads." }))));
 
-  const body = el("div.card-content.flush");
-  const totals = el("span.muted", { style: { fontSize: ".72rem" } });
+  const body = el("div.card-content.tight");
+  const totals = el("span.hint");
   const warn = el("div", {});
 
   const sync = () => {
-    const picked = BACKUP.plan.filter((g) => BPICKS.has(g.id));
-    totals.textContent = picked.reduce((n, g) => n + g.files, 0) + " files · "
-      + fbytes(picked.reduce((n, g) => n + g.bytes, 0)) + " before compression";
+    const picked = BACKUP.plan.filter((g) => BPICKS.has(g.id)).map(bTotals);
+    totals.textContent = plural(picked.reduce((n, t) => n + t.files, 0), "file") + " · "
+      + fbytes(picked.reduce((n, t) => n + t.bytes, 0)) + " before compression";
     warn.innerHTML = "";
-    if (picked.some((g) => g.secrets && g.files))
+    if (BACKUP.plan.some((g) => g.secrets && BPICKS.has(g.id) && bTotals(g).files))
       warn.append(el("div.alert.alert-warning", { style: { margin: "0 1.125rem 1rem" } },
         el("span.alert-icon", {}, icon("key")),
         el("div.alert-body", {},
@@ -2757,21 +2876,42 @@ function backupCreateCard() {
   };
 
   for (const g of BACKUP.plan) {
-    const box = el("input", {
-      type: "checkbox", checked: BPICKS.has(g.id), disabled: !g.files,
-      onchange: (e) => {
-        if (e.currentTarget.checked) BPICKS.add(g.id); else BPICKS.delete(g.id);
-        sync();
-      },
-    });
-    body.append(el("label.drow", { style: { cursor: g.files ? "pointer" : "default" } },
-      box,
-      el("span.dmsg", {},
-        el("div", {}, el("b", { text: g.label }),
-          g.secrets ? el("span", { style: { marginLeft: ".4rem" } }, badge("secrets", "warning")) : null),
-        el("div.muted", { style: { fontSize: ".72rem" }, text: g.note })),
-      el("span.muted", { style: { fontSize: ".72rem", whiteSpace: "nowrap" },
-        text: g.files ? g.files + " files · " + fbytes(g.bytes) : "nothing here" })));
+    const t = bTotals(g);
+    const row = el("label.cl-row", { class: g.files ? "" : "off" });
+    if (g.files) {
+      row.append(el("input", {
+        type: "checkbox", checked: BPICKS.has(g.id),
+        onchange: (e) => {
+          if (e.currentTarget.checked) BPICKS.add(g.id); else BPICKS.delete(g.id);
+          sync();
+        },
+      }));
+    } else {
+      row.append(el("span.cl-slot"));
+    }
+
+    const line = el("div.cl-line", {}, el("span.li-name", { text: g.label }));
+    if (g.secrets) line.append(badge("secrets", "warning"));
+    if (bCustom(g)) {
+      const b = badge("custom", "info");
+      b.title = "Only some of this group is selected";
+      line.append(b);
+    }
+    const extra = el("span.cl-extra", {},
+      el("span.hint", { style: { whiteSpace: "nowrap" },
+        text: !g.files ? "nothing here"
+          : t.files + " of " + plural(g.files, "file") + " · " + fbytes(t.bytes) }));
+    if ((g.units || []).length > 1) {
+      const b = mkbtn("btn-sm btn-ghost", "Choose…", (e) => {
+        e.preventDefault();     // the row is a label; don't toggle it too
+        chooseUnits(g);
+      }, "Pick what goes in from this group");
+      b.prepend(icon("filter"));
+      extra.append(b);
+    }
+    line.append(extra);
+    row.append(el("div.cl-body", {}, line, el("span.li-desc", { text: g.note })));
+    body.append(row);
   }
   sync();
   card.append(body, warn);
@@ -2780,11 +2920,13 @@ function backupCreateCard() {
   const make = mkbtn("btn btn-primary", "Create backup", async () => {
     const picks = [...BPICKS];
     if (!picks.length) { toast("Nothing selected", true); return; }
+    const units = {};
+    for (const id of picks) if (BUNITS[id]) units[id] = [...BUNITS[id]];
     make.disabled = true;
     make.textContent = "Writing…";
     try {
-      const r = await api("/api/backup-create", { picks, note: note.value });
-      toast(r.name + " — " + r.files + " files, " + fbytes(r.zip_bytes));
+      const r = await api("/api/backup-create", { picks, units, note: note.value });
+      toast(r.name + " — " + plural(r.files, "file") + ", " + fbytes(r.zip_bytes));
       renderBackup(true);
     } catch (e) {
       toast(e.message, true);
@@ -2810,13 +2952,15 @@ function backupArchivesCard() {
       emptyState("No backups yet", "Pick what you want above and create one.", "archive")));
     return card;
   }
-  for (const a of BACKUP.archives) body.append(archiveRow(a));
+  const list = el("div.list");
+  for (const a of BACKUP.archives) list.append(archiveRow(a));
+  body.append(list);
   card.append(body);
   return card;
 }
 
 function archiveRow(a) {
-  const actions = el("div.dactions", {});
+  const actions = el("div.li-actions", {});
   if (!a.error) {
     const b = mkbtn("btn-sm btn-primary", "Restore…", () => openRestore(a.name),
       "See what it would change, then pick");
@@ -2839,15 +2983,16 @@ function archiveRow(a) {
   if (a.error) badges.push(badge("unreadable", "destructive"));
 
   const desc = a.error ? a.error
-    : fwhen(a.created_at) + " · " + a.files + " files · " + fbytes(a.zip_bytes) + " on disk"
+    : fwhen(a.created_at) + " · " + plural(a.files, "file") + " · " + fbytes(a.zip_bytes) + " on disk"
       + (a.bytes ? " (" + fbytes(a.bytes) + " uncompressed)" : "")
       + (a.note ? " · " + a.note : "");
 
-  return el("div.drow", {}, icon("archive"),
-    el("span.dmsg", {},
-      el("div", {}, el("b", { class: "dmono", text: a.name }),
-        ...badges.map((b) => el("span", { style: { marginLeft: ".4rem" } }, b))),
-      el("div.muted", { style: { fontSize: ".72rem" }, text: desc })),
+  // an archive is a named thing with badges and actions, the same shape every
+  // other list of those uses — not the flat file row it used to borrow
+  return el("div.list-item", {},
+    el("div.li-main", {},
+      el("span.li-name.mono", { title: a.path, text: a.name }), ...badges),
+    el("span.li-desc", { text: desc }),
     actions);
 }
 
@@ -2887,7 +3032,7 @@ function restorePanel() {
   wrap.append(el("div.toolbar", {},
     mkbtn("btn-sm", "← Back to archives", () => { BREPORT = null; renderBackup(); }),
     el("div.toolbar-end", {},
-      el("span.muted", { style: { fontSize: ".72rem" },
+      el("span.hint", {
         text: "restoring into " + rep.config_dir }))));
 
   wrap.append(el("div.stat-grid", { style: { marginBottom: "1rem" } },
@@ -2916,7 +3061,7 @@ function restorePanel() {
 
   const body = el("div.card-content.flush");
   const rows = rep.entries.filter((e) => BSHOWSAME || e.status !== "same");
-  const count = el("span.muted", { style: { fontSize: ".72rem" } });
+  const count = el("span.hint", {});
   const sync = () => { count.textContent = BREPORT.picked.size + " selected"; };
 
   const setAll = (v) => {
@@ -2967,7 +3112,7 @@ function restoreRow(e, sync) {
   }
   row.append(el("span.dmsg", {},
     el("div.dmono", { text: e.target || e.path }),
-    el("div.muted", { style: { fontSize: ".72rem" },
+    el("div.hint", {
       text: (e.error || "") || (e.group + " · " + fbytes(e.size)) })));
   row.append(badge(label, variant));
 
@@ -2999,8 +3144,8 @@ async function applyRestore() {
   const rows = BREPORT.entries.filter((e) => BREPORT.picked.has(e.path));
   const over = rows.filter((e) => e.status === "differs").length;
   const mcp = rows.some((e) => e.group === "mcp");
-  const ok = await mconfirm("Restore " + paths.length + " file(s)?",
-    (over ? over + " file(s) on disk will be overwritten with the backup's version, and "
+  const ok = await mconfirm("Restore " + plural(paths.length, "file") + "?",
+    (over ? plural(over, "file") + " on disk will be overwritten with the backup's version, and "
           + "that cannot be undone from here. " : "")
     + (mcp ? "MCP servers are merged into ~/.claude.json one at a time; the rest of that "
            + "file is left alone. " : "")
@@ -3012,7 +3157,7 @@ async function applyRestore() {
     if (r.failed_count)
       toast(r.count + " restored, " + r.failed_count + " failed: " + r.failed[0].error, true);
     else
-      toast(r.count + " file(s) restored");
+      toast(plural(r.count, "file") + " restored");
     BREPORT = null;
     await refresh();          // items, settings and MCP all just changed
     renderBackup(true);
