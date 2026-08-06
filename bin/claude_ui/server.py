@@ -13,9 +13,9 @@ import webbrowser
 from .backup import (backup_create, backup_delete, backup_inspect, backup_list,
                      backup_plan, backup_restore, set_backup_dir)
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
-from .items import (Conflict, config_files_state, item_read, item_save,
-                    item_set_model, path_read, path_save, scan_items,
-                    set_enabled)
+from .items import (Conflict, config_files_state, item_create, item_read,
+                    item_save, item_set_model, path_read, path_save,
+                    scan_items, set_enabled)
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
 from . import schema
 from .plugins import (adopted_items, plugin_env_set, plugin_env_vars,
@@ -199,6 +199,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, {"ok": True, **path_save(
                     req.get("path", ""), req.get("content", ""),
                     req.get("base"))})
+            elif action == "item-create":
+                self.send(200, {"ok": True, **item_create(
+                    req.get("type", ""), req.get("name", ""),
+                    req.get("content", ""),
+                    bool(req.get("enabled", True)))})
             elif action == "item-save":
                 self.send(200, {"ok": True, **item_save(
                     req.get("type", ""), req.get("name", ""), req.get("file"),

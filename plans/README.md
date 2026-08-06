@@ -11,7 +11,7 @@ honor its STOP conditions, and update your row when done.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| 001 | Let the backend create a new item file | P1 | S | — | TODO |
+| 001 | Let the backend create a new item file | P1 | S | — | DONE (unmerged — branch `advisor/006-output-style-builder`) |
 | 002 | Build an agent from a guided form, with the reference docs beside it | P1 | M | 001 | TODO |
 | 003 | Edit an agent's frontmatter as a form, with the reference on hand | P2 | M | 002 | TODO |
 | 004 | Catch the agent frontmatter mistakes that fail silently | P2 | S | — | TODO |

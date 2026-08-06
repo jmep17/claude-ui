@@ -55,6 +55,11 @@ def _dir_item(entry, enabled):
         "source": meta.get(SOURCE_KEY) or "",
         "name_mismatch": bool(meta.get("name")) and meta["name"] != entry.name,
         "long_desc": len(meta.get("description", "")) > 1024,
+        # a skill with disable-model-invocation can only be run by the user, so
+        # it can't be preloaded into an agent's `skills:` list either — the
+        # picker that offers skills needs to know before it offers one
+        "no_model_invoke": str(meta.get("disable-model-invocation", "")
+                               ).strip().lower() in ("true", "yes"),
     }
 
 def _scan_dir_type(root, enabled):
@@ -230,6 +235,31 @@ def item_save(type_, name, fname, content, enabled=True, base=None):
     _check_base(target, base)
     atomic_write(target, content)
     return {"path": tilde(target), **_stamp(target)}
+
+def item_create(type_, name, content, enabled=True):
+    """Write a brand-new item and hand back the same shape item_read returns.
+
+    A name that exists on *either* side of disabled/ is a conflict, not just one
+    that exists on the side we're writing to: set_enabled() refuses to move an
+    item onto an occupied name, so creating a twin of a disabled item builds a
+    trap you only spring later. The content arrives fully formed — the caller
+    that composed the frontmatter is the same one showing you a preview of it,
+    and two places generating YAML is one place too many.
+    """
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("nothing to write")
+    if len(content) > MAX_EDIT:
+        raise ValueError("bad content")
+    for side in (True, False):
+        p = resolve_item(type_, name, side)
+        if p.exists() or p.is_symlink():
+            raise ValueError(f"{name}: already exists at {tilde(p)}")
+    target = resolve_item(type_, name, enabled)
+    if ITEM_TYPES[type_]["kind"] == "dir":
+        target = target / "SKILL.md"
+    _reject_bad_json(target, content)
+    atomic_write(target, content)
+    return item_read(type_, name, None, enabled)
 
 def item_set_model(name, model, enabled=True):
     """Rewrite an agent's `model:` frontmatter line; blank model removes it.
