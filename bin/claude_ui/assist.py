@@ -1,10 +1,20 @@
 """Claude-assisted authoring via the local `claude -p` CLI."""
 
 from pathlib import Path
+import os
 import re
 import shutil
 import subprocess
 
+
+# Replaces the default Claude Code system prompt on CLIs that support it: the
+# assist task is pure text-in/text-out, so the preset's tool instructions,
+# MCP schemas and skills listing are dead weight billed to the user.
+ASSIST_SYSTEM_PROMPT = (
+    "You are helping the user edit a Claude Code configuration file "
+    "(CLAUDE.md, skills, agents, commands, settings). Follow the "
+    "instruction you are given and return exactly what it asks for, "
+    "with no preamble and no tool use.")
 
 ASSIST_PRESETS = {
     "improve": (
@@ -17,6 +27,53 @@ ASSIST_PRESETS = {
         "vague or missing 'Use when' triggers, contradictions, verbosity that "
         "wastes context, frontmatter mistakes. Be specific and brief.", False),
 }
+
+_FLAG_CACHE = {}   # (exe path, mtime) -> frozenset of --long-options in --help
+
+def _cli_flags(exe):
+    """Long options the installed claude CLI advertises in --help.
+
+    Cached per (path, mtime) so an upgrade or downgrade mid-session re-probes;
+    any failure (missing exe, hung or erroring --help) caches an empty set,
+    which downgrades assist to the legacy argv rather than breaking it."""
+    try:
+        mtime = os.stat(exe).st_mtime
+    except OSError:
+        mtime = 0
+    key = (exe, mtime)
+    if key not in _FLAG_CACHE:
+        try:
+            r = subprocess.run([exe, "--help"], capture_output=True, text=True,
+                               timeout=20)
+            text = r.stdout if r.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            text = ""
+        flags = set(re.findall(r"--[A-Za-z][A-Za-z0-9-]*", text))
+        # --help abbreviates optional suffixes as --system-prompt[-file];
+        # expand those so the -file variants are discoverable too
+        for base, suf in re.findall(
+                r"(--[A-Za-z][A-Za-z0-9-]*)\[(-[A-Za-z0-9-]+)\]", text):
+            flags.add(base + suf)
+        _FLAG_CACHE[key] = frozenset(flags)
+    return _FLAG_CACHE[key]
+
+def _assist_argv(exe, prompt):
+    """[exe, -p, prompt] plus whatever lean flags this CLI supports.
+
+    The prompt is a positional and must stay ahead of --tools, which is
+    variadic (commander): any bare token after it would be swallowed as a
+    tool name and claude would block on stdin with no prompt at all, so
+    --tools "" stays last. --bare is deliberately not used: it drops
+    OAuth/keychain auth, breaking subscription users."""
+    flags = _cli_flags(exe)
+    argv = [exe, "-p", prompt]
+    if "--system-prompt" in flags:
+        argv += ["--system-prompt", ASSIST_SYSTEM_PROMPT]
+    if "--strict-mcp-config" in flags:
+        argv += ["--strict-mcp-config"]
+    if "--tools" in flags:
+        argv += ["--tools", ""]
+    return argv
 
 def assist(mode, custom, content, path):
     exe = shutil.which("claude")
@@ -38,8 +95,8 @@ def assist(mode, custom, content, path):
         prompt += ("\nReturn ONLY the complete revised file content. "
                    "No preamble, no explanation, no code fences.")
     try:
-        r = subprocess.run([exe, "-p", prompt], capture_output=True, text=True,
-                           timeout=240, cwd=str(Path.home()))
+        r = subprocess.run(_assist_argv(exe, prompt), capture_output=True,
+                           text=True, timeout=240, cwd=str(Path.home()))
     except subprocess.TimeoutExpired:
         raise ValueError("claude -p timed out after 240s") from None
     if r.returncode != 0:
