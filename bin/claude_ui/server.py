@@ -201,8 +201,14 @@ class Handler(BaseHTTPRequestHandler):
                                    bool(req.get("enabled")))
                 self.send(200, {"ok": True, "path": path})
             elif action == "settings-set":
-                settings_set(req.get("key", ""), req.get("value"))
-                self.send(200, {"ok": True})
+                key, value = req.get("key", ""), req.get("value")
+                # Claude Code matches outputStyle exactly (frontmatter name,
+                # not filename) and silently ignores a miss — repair the value
+                # rather than store one that will never apply
+                if key == "outputStyle":
+                    value = output_styles.normalize_setting(value)
+                settings_set(key, value)
+                self.send(200, {"ok": True, "value": value})
             elif action == "path-save":
                 self.send(200, {"ok": True, **path_save(
                     req.get("path", ""), req.get("content", ""),

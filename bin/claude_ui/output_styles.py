@@ -15,6 +15,7 @@ the preset test runs validate(strict=True) over every file in data/presets/.
 from pathlib import Path
 
 from .core import parse_frontmatter
+from .items import scan_items
 
 
 PRESET_DIR = Path(__file__).resolve().parent / "data" / "presets" / "output-styles"
@@ -118,3 +119,37 @@ def presets():
             "content": text,
         })
     return sorted(out, key=lambda s: s["name"].lower())
+
+
+def setting_name(item):
+    """The value Claude Code matches the outputStyle setting against for one
+    installed style: the frontmatter name when set, else the file basename.
+    The match is exact and case-sensitive, and a miss silently falls back to
+    the default style — which is why anything that writes or checks the
+    setting must go through this and not the scan name (which can also carry
+    a subdirectory prefix Claude Code never uses)."""
+    return item.get("meta_name") or item["name"].rsplit("/", 1)[-1]
+
+
+def normalize_setting(value):
+    """Map a near-miss outputStyle value onto the name a style registers as.
+
+    An exact match — and anything unrecognized, including plugin styles
+    (registered as plugin:Name) — passes through unchanged; this must never
+    invent a correction. A value that misses every registered name but matches
+    exactly one enabled style case-insensitively, or by its filename, becomes
+    that style's registered name: the picker used to suggest the filename
+    stem, so settings written by older versions hold exactly this near-miss.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return value
+    styles = [s for s in scan_items("output-styles") if s["enabled"]]
+    names = [setting_name(s) for s in styles]
+    if value in names:
+        return value
+    low = value.strip().lower()
+    hits = {setting_name(s) for s in styles
+            if setting_name(s).lower() == low
+            or s["name"].lower() == low
+            or s["name"].rsplit("/", 1)[-1].lower() == low}
+    return next(iter(hits)) if len(hits) == 1 else value

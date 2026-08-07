@@ -15,6 +15,7 @@ from .core import (CLAUDE_JSON, ITEM_TYPES, _read_json_object, config_dir,
                    tilde)
 from .items import scan_items
 from .mcp import mcp_state
+from .output_styles import normalize_setting, setting_name
 from . import schema
 from .plugins import adopted_items, plugins_state
 from .settings import settings_schema, settings_state
@@ -125,6 +126,37 @@ def doctor():
             add("info", "settings",
                 f"settings.json key not listed in the official schema: {k}",
                 _at_path(settings_path, find=f'"{k}"'))
+
+    # outputStyle: Claude Code resolves the value with an exact, case-sensitive
+    # lookup against each style's registered name (frontmatter `name`, else the
+    # file basename) and a miss silently falls back to default — the one
+    # failure mode with no error message anywhere, so it has to surface here.
+    # Older claude-ui versions suggested the filename stem, which misses any
+    # style whose frontmatter name differs (the shipped preset: adhd.md /
+    # name: ADHD). A value with a colon is a plugin style (plugin:Name); those
+    # can't be checked against the local scan, so they pass.
+    style = sdata.get("outputStyle")
+    if isinstance(style, str) and style and ":" not in style:
+        entry = next((s for s in settings_schema()
+                      if s["key"] == "outputStyle"), {})
+        builtin = set(entry.get("values") or []) | {"default"}
+        installed = {setting_name(s)
+                     for s in scan_items("output-styles") if s["enabled"]}
+        if style not in builtin and style not in installed:
+            fixed = normalize_setting(style)
+            if fixed != style:
+                add("warn", "settings",
+                    f"outputStyle {style!r} matches no style — the installed "
+                    f"one registers as {fixed!r} (frontmatter name, exact "
+                    "case), so Claude Code silently uses default. Re-pick it "
+                    "in Settings to repair the value",
+                    _at_path(settings_path, find='"outputStyle"'))
+            else:
+                add("info", "settings",
+                    f"outputStyle {style!r} matches no built-in or installed "
+                    "style on this machine — Claude Code silently uses "
+                    "default",
+                    _at_path(settings_path, find='"outputStyle"'))
 
     # a key this app itself used to write to the wrong place
     perms = sdata.get("permissions")

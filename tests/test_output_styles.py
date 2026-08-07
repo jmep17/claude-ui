@@ -125,5 +125,70 @@ class SettingsIntegration(unittest.TestCase):
                          ["default", "Proactive", "Explanatory", "Learning"])
 
 
+class NormalizeSetting(unittest.TestCase):
+    """Claude Code matches outputStyle against a style's frontmatter name
+    (else the file basename), exactly and case-sensitively; normalize_setting
+    repairs the unique near-misses older pickers wrote and touches nothing
+    else."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = pathlib.Path(self.tmpdir.name)
+        from claude_ui import items
+        # both namespaces reach the filesystem: item_root reads the patched
+        # name in items, disabled_dir resolves core.config_dir at call time
+        self._saved = [(m, m.config_dir) for m in (items, core)]
+        for m, _ in self._saved:
+            m.config_dir = lambda t=self.tmp: t
+
+    def tearDown(self):
+        for m, fn in self._saved:
+            m.config_dir = fn
+        self.tmpdir.cleanup()
+
+    def write(self, rel, text):
+        p = self.tmp / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+
+    def test_filename_stem_becomes_the_frontmatter_name(self):
+        self.write("output-styles/adhd.md", "---\nname: ADHD\n---\nx\n")
+        self.assertEqual(output_styles.normalize_setting("adhd"), "ADHD")
+
+    def test_case_miss_is_repaired(self):
+        self.write("output-styles/adhd.md", "---\nname: ADHD\n---\nx\n")
+        self.assertEqual(output_styles.normalize_setting("Adhd"), "ADHD")
+
+    def test_exact_match_passes_through(self):
+        self.write("output-styles/adhd.md", "---\nname: ADHD\n---\nx\n")
+        self.assertEqual(output_styles.normalize_setting("ADHD"), "ADHD")
+
+    def test_no_frontmatter_name_matches_by_basename(self):
+        self.write("output-styles/plain.md", "x\n")
+        self.assertEqual(output_styles.normalize_setting("plain"), "plain")
+
+    def test_unknown_and_plugin_values_pass_through(self):
+        self.write("output-styles/adhd.md", "---\nname: ADHD\n---\nx\n")
+        self.assertEqual(output_styles.normalize_setting("Explanatory"),
+                         "Explanatory")
+        self.assertEqual(output_styles.normalize_setting("caveman:Caveman"),
+                         "caveman:Caveman")
+
+    def test_ambiguous_match_is_left_alone(self):
+        self.write("output-styles/a.md", "---\nname: TERSE\n---\nx\n")
+        self.write("output-styles/b.md", "---\nname: Terse\n---\nx\n")
+        self.assertEqual(output_styles.normalize_setting("terse"), "terse")
+
+    def test_exact_match_beats_a_case_insensitive_sibling(self):
+        self.write("output-styles/a.md", "---\nname: TERSE\n---\nx\n")
+        self.write("output-styles/terse.md", "x\n")
+        self.assertEqual(output_styles.normalize_setting("terse"), "terse")
+
+    def test_disabled_styles_do_not_match(self):
+        self.write("disabled/output-styles/adhd.md",
+                   "---\nname: ADHD\n---\nx\n")
+        self.assertEqual(output_styles.normalize_setting("adhd"), "adhd")
+
+
 if __name__ == "__main__":
     unittest.main()

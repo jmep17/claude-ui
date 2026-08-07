@@ -272,8 +272,13 @@ function settingsGet(key) {
 
 async function commitSetting(key, value) {
   try {
-    await api("/api/settings-set", { key, value });
-    toast(value === null ? key + " cleared" : key + " set",
+    const r = await api("/api/settings-set", { key, value });
+    // the server may repair the value (outputStyle name normalization) —
+    // say so, or the correction looks like a bug on the next refresh
+    const stored = r && r.value !== undefined && r.value !== null ? r.value : value;
+    toast(value === null ? key + " cleared"
+      : stored !== value ? key + " set to " + JSON.stringify(stored)
+      : key + " set",
       false, value === null ? null : undefined);
     await refresh();
   } catch (e) { toast(e.message, true); }
