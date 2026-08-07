@@ -644,8 +644,8 @@ function checklist({ groups = [], hint }) {
   node.append(el("div.cl-head", {},
     count,
     el("div.cl-head-actions", {},
-      el("button.btn.btn-sm.btn-ghost", { type: "button", text: "All", onclick: () => setAll(true) }),
-      el("button.btn.btn-sm.btn-ghost", { type: "button", text: "None", onclick: () => setAll(false) }))));
+      el("button.btn.btn-sm.btn-ghost", { type: "button", text: "All",
+        onclick: () => setAll(!boxes.every((b) => b.checked)) }))));
 
   for (const g of groups) {
     if (!g.rows || !g.rows.length) continue;

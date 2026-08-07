@@ -3118,8 +3118,10 @@ function restorePanel() {
     count,
     el("span.spring", { style: { flex: "1" } }),
     switchToggle("Show identical", BSHOWSAME, (v) => { BSHOWSAME = v; renderBackup(); }),
-    mkbtn("btn-sm btn-ghost", "All", () => setAll(true)),
-    mkbtn("btn-sm btn-ghost", "None", () => setAll(false))));
+    mkbtn("btn-sm btn-ghost", "All", () => {
+      const selectable = rows.filter((e) => e.status !== "refused" && e.status !== "missing");
+      setAll(!selectable.every((e) => BREPORT.picked.has(e.path)));
+    })));
 
   for (const e of rows) body.append(restoreRow(e, sync));
   card.append(body);
