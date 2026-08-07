@@ -24,7 +24,7 @@ from .plugins import (adopted_items, plugin_env_set, plugin_env_vars,
                       plugins_state, skill_override_set)
 from .projects import (project_init, project_set_mode, project_toggle,
                        projects_state, registry_add, registry_remove,
-                       wrapper_write)
+                       wrapper_check, wrapper_test, wrapper_write)
 from .settings import (hook_test, settings_schema, settings_set, settings_state,
                        start_docs_fetch, suggest_state)
 from .statusline import statusline_save, statusline_state
@@ -261,6 +261,10 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "project-wrapper":
                 wrapper_write(req.get("root", ""), bool(req.get("force")))
                 self.send(200, {"ok": True})
+            elif action == "project-check":
+                self.send(200, wrapper_check(req.get("root", "")))
+            elif action == "project-test":
+                self.send(200, wrapper_test(req.get("root", "")))
             elif action == "mcp-save":
                 mcp_machine_set(req.get("name", ""), req.get("config"),
                                 bool(req.get("enabled", True)))

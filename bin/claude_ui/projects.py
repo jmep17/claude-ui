@@ -13,7 +13,9 @@ change a claude invocation just by containing files.
 
 from pathlib import Path
 import os
+import re
 import shutil
+import subprocess
 
 from .assist import _cli_flags
 from .core import (PROJECTS_REGISTRY, _read_json_object, atomic_write,
@@ -308,6 +310,81 @@ def wrapper_write(root, force=False):
             raise ValueError(f"{tilde(p)} exists and wasn't written by "
                              "claude-ui — regenerate with force to replace it")
     atomic_write(p, WRAPPER_SCRIPT, mode=0o755)
+
+
+# ---- in-UI verification: a free plumbing check and a paid live test ----
+
+TEST_QUESTION = (
+    "Quote, verbatim and with nothing else, one full line of the "
+    "project-specific instructions that were appended to or replaced your "
+    "system prompt.")
+
+def _wrapper_runnable(root):
+    """The wrapper we're willing to execute: ours (marker present), for a
+    registered root. A foreign claude.sh is the user's own script — we never
+    run someone's code for them from a button."""
+    root = _checked_root(root)
+    p = root / ".claude" / WRAPPER_NAME
+    if not p.is_file():
+        raise ValueError("no claude.sh here — initialise or create the wrapper first")
+    if _wrapper_state(p.parent) == "foreign":
+        raise ValueError("claude.sh wasn't written by claude-ui — "
+                         "run it yourself in a terminal instead")
+    return root, p
+
+def wrapper_check(root):
+    """Free: run the wrapper with --version under `sh -x` and report which
+    exec branch actually fired. Proves the plumbing without an API call."""
+    root, p = _wrapper_runnable(root)
+    try:
+        r = subprocess.run(["sh", "-x", str(p), "--version"],
+                           capture_output=True, text=True, timeout=60,
+                           cwd=str(root))
+    except (OSError, subprocess.SubprocessError) as e:
+        raise ValueError(f"could not run the wrapper: {e}") from None
+    traced = [l for l in r.stderr.splitlines() if "exec claude" in l]
+    cmd = traced[-1].lstrip("+ ") if traced else ""
+    mode = ("replace" if "--system-prompt-file" in cmd
+            else "append" if "--append-system-prompt-file" in cmd else "none")
+    return {"ok": r.returncode == 0, "mode": mode, "command": cmd,
+            "version": r.stdout.strip()[:200],
+            "stderr": "" if r.returncode == 0 else r.stderr.strip()[-500:]}
+
+def wrapper_test(root):
+    """Paid: one real claude call through the wrapper, asking the model to
+    quote the prompt file's first line. Proves the prompt reaches the model,
+    not just the command line."""
+    root, p = _wrapper_runnable(root)
+    st = project_state(root)
+    if not st["enabled"]:
+        raise ValueError("prompt is disabled — the wrapper would just run "
+                         "plain claude; enable it first")
+    text = (root / ".claude" / MODES[st["mode"]]).read_text(errors="replace")
+    try:
+        r = subprocess.run(["sh", str(p), "-p", TEST_QUESTION],
+                           capture_output=True, text=True, timeout=240,
+                           cwd=str(root))
+    except subprocess.TimeoutExpired:
+        raise ValueError("claude timed out after 240s") from None
+    except (OSError, subprocess.SubprocessError) as e:
+        raise ValueError(f"could not run the wrapper: {e}") from None
+    if r.returncode != 0:
+        raise ValueError("claude failed: "
+                         + (r.stderr.strip() or f"exit {r.returncode}")[:500])
+    answer = r.stdout.strip()
+    # a match against ANY line proves receipt — the model may reasonably pick
+    # a body line over a heading. Length guard so "the" can't match anything.
+    norm = lambda s: re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+    na = norm(answer)
+    matched_line = ""
+    if len(na) >= 8:
+        for line in (l.strip() for l in text.splitlines() if l.strip()):
+            nl = norm(line)
+            if nl and (nl in na or na in nl):
+                matched_line = line
+                break
+    return {"ok": bool(matched_line), "mode": st["mode"],
+            "matched_line": matched_line, "answer": answer[:500]}
 
 
 # ---- assembled payload for GET /api/projects ----

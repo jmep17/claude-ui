@@ -1635,6 +1635,7 @@ async function setupAct(action, p) {
 // ---------------------------------------------------------------- projects
 
 let PROJECTS = null;
+let PROJTEST = {};  // root -> last live-test result, shown inline on the card
 
 // mode -> the live filename inside <project>/.claude/ (projects.py MODES)
 const PROJ_FILES = { replace: "system-prompt.md", append: "append-system-prompt.md" };
@@ -1804,6 +1805,17 @@ function projCard(st) {
     badge(wbadge[0], wbadge[1]),
     el("div.dactions", {}));
   const wacts = wrow.querySelector(".dactions");
+  const runnable = st.wrapper === "current" || st.wrapper === "stale"
+    || st.wrapper === "not-executable";
+  if (runnable) {
+    const chk = mkbtn("btn-sm", "Check", () => projCheck(st),
+      "Free: run the wrapper with --version and show which flag it passes");
+    chk.prepend(icon("play"));
+    wacts.append(chk);
+    if (st.enabled)
+      wacts.append(mkbtn("btn-sm", "Test live…", () => projTest(st),
+        "Ask claude to quote your prompt file — spends one real claude call"));
+  }
   if (st.wrapper !== "none")
     wacts.append(mkbtn("btn-sm btn-ghost", "Copy run command",
       () => copyText("./.claude/claude.sh", "run command")));
@@ -1811,6 +1823,24 @@ function projCard(st) {
     wacts.append(mkbtn("btn-sm", st.wrapper === "none" ? "Create" : "Regenerate",
       () => projWrapper(st)));
   body.append(wrow);
+
+  const tr = PROJTEST[st.root];
+  if (tr) {
+    body.append(el("div.drow", {},
+      icon(tr.ok ? "check" : "warning"),
+      tr.ok ? badge("prompt reached claude", "success")
+            : badge("no match", "destructive"),
+      el("span.dmsg", { text: tr.ok
+        ? "The model quoted a line of your prompt file verbatim."
+        : "The model's answer didn't match any line of your prompt file." })));
+    body.append(el("div.drow", {},
+      el("span.dmsg", { text: "Claude answered:" }),
+      el("span.dmsg.dmono", { text: tr.answer || "(no output)" })));
+    if (tr.ok)
+      body.append(el("div.drow", {},
+        el("span.dmsg", { text: "Matches this line of your file:" }),
+        el("span.dmsg.dmono", { text: tr.matched_line })));
+  }
 
   const styles = st.output_styles.length ? st.output_styles.join(", ") : null;
   const setting = Object.entries(st.output_style_setting)
@@ -1871,6 +1901,34 @@ async function projPost(action, body, msg) {
     if (msg) toast(msg);
     renderProjects(true);
   } catch (e) { toast(e.message, true); }
+}
+
+async function projCheck(st) {
+  const t = toast({ title: "Checking the wrapper…", variant: "loading", duration: 0 });
+  try {
+    const r = await api("/api/project-check", { root: st.root });
+    t.close();
+    if (!r.ok) toast("Wrapper failed: " + (r.stderr || "nonzero exit"), true);
+    else if (r.mode === "none")
+      toast("Wrapper ran plain claude (no live prompt file) · " + r.version, true);
+    else toast("Wrapper passed the " + r.mode + " flag · " + r.version);
+  } catch (e) { t.close(); toast(e.message, true); }
+}
+
+async function projTest(st) {
+  if (!(await mconfirm("Run a live test?",
+      "Asks claude — through ./.claude/claude.sh — to quote the first line of your "
+      + "prompt file. Spends one real claude call (API or subscription), like any "
+      + "claude -p run. Takes up to a minute.", "Run test")))
+    return;
+  const t = toast({ title: "Asking claude…", variant: "loading", duration: 0 });
+  try {
+    const r = await api("/api/project-test", { root: st.root });
+    t.close();
+    PROJTEST[st.root] = r;
+    toast(r.ok ? "Prompt reached claude" : "Answer didn't match — details on the card", !r.ok);
+    renderProjects();
+  } catch (e) { t.close(); toast(e.message, true); }
 }
 
 // -------------------------------------------------------------- statusline

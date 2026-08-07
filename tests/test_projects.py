@@ -367,6 +367,95 @@ class ResolveEditable(Base):
         self.assertTrue(readonly)
 
 
+class _Result:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class WrapperRun(Base):
+    """wrapper_check / wrapper_test: the in-UI verification buttons."""
+
+    def setUp(self):
+        super().setUp()
+        self.add()
+        projects.wrapper_write(self.proj)
+        self._run = projects.subprocess.run
+        self.seen = None
+
+    def tearDown(self):
+        projects.subprocess.run = self._run
+        super().tearDown()
+
+    def fake(self, result, raise_=None):
+        def run(argv, **kw):
+            self.seen = argv
+            if raise_:
+                raise raise_
+            return result
+        projects.subprocess.run = run
+
+    def test_check_reports_the_branch_that_fired(self):
+        (self.cdir() / projects.APPEND_MD).write_text("x")
+        self.fake(_Result(0, "2.1.224 (Claude Code)",
+                          "+ exec claude --append-system-prompt-file "
+                          "/p/.claude/append-system-prompt.md --version\n"))
+        r = projects.wrapper_check(self.proj)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["mode"], "append")
+        self.assertEqual(self.seen[:2], ["sh", "-x"])
+
+    def test_check_plain_claude_when_nothing_live(self):
+        self.fake(_Result(0, "2.1.224", "+ exec claude --version\n"))
+        self.assertEqual(projects.wrapper_check(self.proj)["mode"], "none")
+
+    def test_check_nonzero_exit_reports_stderr(self):
+        self.fake(_Result(1, "", "boom"))
+        r = projects.wrapper_check(self.proj)
+        self.assertFalse(r["ok"])
+        self.assertIn("boom", r["stderr"])
+
+    def test_check_refuses_foreign_and_missing_wrapper(self):
+        (self.cdir() / projects.WRAPPER_NAME).write_text("#!/bin/sh\necho mine\n")
+        with self.assertRaises(ValueError):
+            projects.wrapper_check(self.proj)
+        (self.cdir() / projects.WRAPPER_NAME).unlink()
+        with self.assertRaises(ValueError):
+            projects.wrapper_check(self.proj)
+
+    def test_live_test_matches_any_line_of_the_file(self):
+        (self.cdir() / projects.REPLACE_MD).write_text(
+            "# Heading line.\nAlways answer in haiku form.\n")
+        self.fake(_Result(0, '"Always answer in haiku form."'))
+        r = projects.wrapper_test(self.proj)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["matched_line"], "Always answer in haiku form.")
+        self.assertEqual(self.seen[0], "sh")
+        self.assertEqual(self.seen[2], "-p")
+
+    def test_live_test_reports_mismatch_without_raising(self):
+        (self.cdir() / projects.REPLACE_MD).write_text("# You are the tester.\n")
+        self.fake(_Result(0, "I have no such instructions in my prompt."))
+        self.assertFalse(projects.wrapper_test(self.proj)["ok"])
+
+    def test_live_test_short_answers_cannot_match(self):
+        (self.cdir() / projects.REPLACE_MD).write_text("# You are the tester.\n")
+        self.fake(_Result(0, "the"))
+        self.assertFalse(projects.wrapper_test(self.proj)["ok"])
+
+    def test_live_test_requires_enabled_prompt(self):
+        (self.cdir() / (projects.REPLACE_MD + ".off")).write_text("x")
+        with self.assertRaises(ValueError):
+            projects.wrapper_test(self.proj)
+
+    def test_live_test_surfaces_claude_failure(self):
+        (self.cdir() / projects.REPLACE_MD).write_text("x")
+        self.fake(_Result(1, "", "auth gone"))
+        with self.assertRaisesRegex(ValueError, "auth gone"):
+            projects.wrapper_test(self.proj)
+
+
 class ZshPiece(Base):
     """The zsh setup piece: function file + marker block in .zshrc."""
 
