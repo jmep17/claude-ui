@@ -314,10 +314,11 @@ const itemNames = (t) =>
 const mcpNames = () => ((DATA.mcp || {}).servers || []).map((sv) => sv.name);
 // Claude Code matches outputStyle against a style's frontmatter name when
 // set, else the file basename (exact case) — never a subdirectory prefix
+const styleSettingName = (it) =>
+  it.meta_name || (it.name || "").split("/").pop();
 const styleNames = () =>
   ((DATA.items || {})["output-styles"] || [])
-    .map((it) => it.meta_name || (it.name || "").split("/").pop())
-    .filter(Boolean);
+    .map(styleSettingName).filter(Boolean);
 const LIVE_SUGGEST = {
   "outputStyle": styleNames,
   "skillOverrides:key": () => itemNames("skills"),
@@ -2630,7 +2631,9 @@ function renderInventory() {
   const end = el("div.toolbar-end", {},
     el("span.hint", {
       text: on.length + " enabled · " + off.length + " disabled"
-        + (items.length !== all.length ? " · " + items.length + " of " + all.length + " shown" : "") }));
+        + (items.length !== all.length ? " · " + items.length + " of " + all.length + " shown" : "")
+        + (TAB === "output-styles"
+           ? " · active: " + (settingsGet("outputStyle") || "default") : "") }));
   if (TAB === "output-styles") {
     const nb = mkbtn("btn-sm btn-primary", "New output style", openNewStyle);
     nb.prepend(icon("plus"));
@@ -2645,12 +2648,25 @@ function renderInventory() {
     return;
   }
 
+  // Which style outputStyle actually selects, so the list can say so. The
+  // file being enabled only makes it selectable; this key is what applies it.
+  const activeStyle = TAB === "output-styles"
+    ? (settingsGet("outputStyle") || "default") : null;
+
   const section = (list, label, enabled) => {
     if (!list.length) return;
     view.append(sectionTitle(label, list.length));
     const box = el("div.list");
     for (const s of list) {
+      const isActive = activeStyle !== null && enabled && !s.broken
+        && styleSettingName(s) === activeStyle;
       const actions = el("div.li-actions");
+      if (activeStyle !== null && enabled && !s.broken && !isActive) {
+        actions.append(mkbtn("btn-sm", "Set active",
+          () => commitSetting("outputStyle", styleSettingName(s)),
+          "Write outputStyle: " + styleSettingName(s)
+          + " to settings.json — applies to new sessions"));
+      }
       if (!s.broken) {
         const eb = mkbtn("btn-sm", "Edit", () => openItemEditor(TAB, s.name, null, enabled));
         eb.prepend(icon("pencil"));
@@ -2672,9 +2688,15 @@ function renderInventory() {
       more.append(icon("chevronDown"));
       actions.append(more);
 
+      let activeBadge = null;
+      if (isActive) {
+        activeBadge = badge("active", "default");
+        activeBadge.title = "outputStyle in settings.json selects this style";
+      }
       box.append(el("div.list-item", { class: enabled ? "" : "off" },
         el("div.li-main", {},
           el("span.li-name", { title: s.path || "", text: s.name }),
+          activeBadge,
           ...itemBadges(s)),
         el("span.li-desc", { text: s.description || "" }),
         actions));
