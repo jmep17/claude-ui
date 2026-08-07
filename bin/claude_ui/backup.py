@@ -36,11 +36,12 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import zipfile
 
 from .core import (CLAUDE_JSON, CONFIG_FILES, ITEM_TYPES, MCP_FILE, NAME_RE,
-                   _read_json_object, _within, atomic_write_bytes, config_dir,
-                   disabled_dir, read_cfg, tilde, write_cfg)
+                   _read_json_object, _within, atomic_write, atomic_write_bytes,
+                   config_dir, disabled_dir, read_cfg, tilde, write_cfg)
 from .insight import MAX_TRANSCRIPT, projects_dir
 from .items import resolve_item, scan_items
 from .mcp import mcp_machine_set, mcp_state
@@ -703,3 +704,105 @@ def backup_restore(name, paths):
 def backup_delete(name):
     archive_path(name).unlink()
     return {"deleted": name}
+
+
+# --------------------------------------------------------------- fresh start
+
+def _reset_targets(keep_transcripts):
+    """(dirs, files) the reset deletes — the same things the groups archive.
+
+    Deliberately a list of names, not a directory wipe: the config dir also
+    holds things this app does not model — .credentials.json, todos/,
+    shell-snapshots/ — and a reset that logs you out or eats Claude Code's own
+    state is a bug, not a feature.
+    """
+    cfg = config_dir()
+    dirs = [cfg / t for t in ITEM_TYPES] + [disabled_dir(), plugins_root()]
+    files = [cfg / n for n in CONFIG_FILES] + list(statusline_paths())
+    if not keep_transcripts:
+        dirs.append(projects_dir())
+    return dirs, files
+
+def reset_config(keep_transcripts=True):
+    """Delete the modelled slice of the config dir and the mcpServers key.
+
+    Never creates a backup — the caller does that first (see fresh_start).
+    Collects per-path failures rather than stopping at the first one: a
+    half-reset with a precise list of what refused beats an exception that
+    leaves the user guessing how far it got.
+    """
+    cfg = config_dir()
+    rcfg = cfg.resolve(strict=False)
+    if rcfg == Path(rcfg.anchor) or rcfg == Path.home().resolve():
+        raise ValueError(f"refusing to reset {tilde(cfg)} — not a config dir")
+    dirs, files = _reset_targets(keep_transcripts)
+    deleted, failed = [], []
+
+    def fail(path, err):
+        failed.append({"path": tilde(Path(path)), "error": str(err)})
+
+    for d in dirs:
+        if not (d.is_symlink() or d.exists()):
+            continue
+        if d.is_symlink() or d.is_file():
+            # a symlinked item dir is a pointer into someone's checkout:
+            # remove the pointer, never the target — which is also why this
+            # runs before the containment check, which judges the target
+            try:
+                d.unlink()
+                deleted.append(tilde(d))
+            except OSError as e:
+                fail(d, e)
+            continue
+        if not _within(d.resolve(strict=False), rcfg):
+            fail(d, "outside the config dir")
+            continue
+        errs = []
+        shutil.rmtree(d, onerror=lambda _f, p, ei: errs.append((p, ei[1])))
+        if errs:
+            for p, e in errs:
+                fail(p, e)
+        else:
+            deleted.append(tilde(d))
+    for f in files:
+        if not (f.is_symlink() or f.exists()):
+            continue
+        if not f.is_symlink() and not _within(f.resolve(strict=False), rcfg):
+            fail(f, "outside the config dir")
+            continue
+        try:
+            f.unlink()
+            deleted.append(tilde(f))
+        except OSError as e:
+            fail(f, e)
+
+    # ~/.claude.json: pop mcpServers and nothing else — the rest of that file
+    # is your login and project history, which a reset must survive
+    mcp_cleared = 0
+    data, err = _read_json_object(CLAUDE_JSON)
+    if err:
+        fail(CLAUDE_JSON, f"mcpServers not cleared: {err}")
+    elif "mcpServers" in data:
+        servers = data.pop("mcpServers")
+        try:
+            atomic_write(CLAUDE_JSON, json.dumps(data, indent=2) + "\n")
+            mcp_cleared = len(servers) if isinstance(servers, dict) else 0
+            deleted.append(tilde(CLAUDE_JSON) + " → mcpServers")
+        except OSError as e:
+            fail(CLAUDE_JSON, e)
+    return {"deleted": deleted, "failed": failed, "mcp_cleared": mcp_cleared}
+
+def fresh_start(keep_transcripts=True):
+    """Snapshot everything, then reset — in that order, and only that order.
+
+    The snapshot is the whole safety story: if it cannot be written, nothing
+    is touched. Transcripts go into it only when they are about to be deleted;
+    when they stay on disk, archiving them too would double the disk they use
+    for no recovery value.
+    """
+    picks = (GROUP_IDS if not keep_transcripts
+             else [g for g in GROUP_IDS if g != "transcripts"])
+    snap = backup_create(
+        picks, note="Fresh Start snapshot — taken automatically before reset")
+    result = reset_config(keep_transcripts=keep_transcripts)
+    return {"snapshot": snap["name"], "snapshot_path": snap["path"], **result}

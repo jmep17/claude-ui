@@ -11,7 +11,7 @@ import urllib.parse
 import webbrowser
 
 from .backup import (backup_create, backup_delete, backup_inspect, backup_list,
-                     backup_plan, backup_restore, set_backup_dir)
+                     backup_plan, backup_restore, fresh_start, set_backup_dir)
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
 from .items import (Conflict, config_files_state, item_create, item_delete,
                     item_read, item_save, item_set_model, path_read, path_save,
@@ -284,6 +284,9 @@ class Handler(BaseHTTPRequestHandler):
                     req.get("name", ""), req.get("paths") or [])})
             elif action == "backup-delete":
                 self.send(200, {"ok": True, **backup_delete(req.get("name", ""))})
+            elif action == "fresh-start":
+                self.send(200, {"ok": True, **fresh_start(
+                    keep_transcripts=bool(req.get("keep_transcripts", True)))})
             elif action == "assist":
                 self.send(200, assist(req.get("mode", ""), req.get("custom", ""),
                                       req.get("content", ""), req.get("path", "")))

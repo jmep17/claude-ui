@@ -480,5 +480,103 @@ class TestDestination(unittest.TestCase):
         self.assertEqual(backup.backup_dir(), backup.default_backup_dir())
 
 
+class TestFreshStart(Base):
+    """Snapshot first, targeted deletion second, login always intact."""
+
+    def test_reset_deletes_the_modelled_slice_and_nothing_else(self):
+        write(self.cfg / "todos" / "keep.json", "{}")
+        write(self.cfg / ".credentials.json", '{"token": "keep"}')
+        write(self.cfg / "plugins" / "config.json", "{}")
+        write(self.cfg / "keybindings.json", "{}")
+        backup.reset_config()
+        for gone in ("skills", "disabled", "plugins", "CLAUDE.md",
+                     "settings.json", "keybindings.json", "statusline.sh"):
+            self.assertFalse((self.cfg / gone).exists(), gone)
+        self.assertTrue((self.cfg / "todos" / "keep.json").is_file())
+        self.assertTrue((self.cfg / ".credentials.json").is_file())
+
+    def test_reset_pops_mcp_servers_and_keeps_the_login(self):
+        result = backup.reset_config()
+        data = json.loads(self.claude_json.read_text())
+        self.assertNotIn("mcpServers", data)
+        self.assertEqual(data["oauthAccount"]["email"], "me@example.com")
+        self.assertEqual(data["projects"], {"/tmp/x": {"history": []}})
+        self.assertEqual(result["mcp_cleared"], 1)
+
+    def test_reset_is_a_noop_on_a_missing_or_serverless_claude_json(self):
+        self.claude_json.unlink()
+        self.assertEqual(backup.reset_config()["mcp_cleared"], 0)
+        self.assertFalse(self.claude_json.exists())
+        self.claude_json.write_text(json.dumps({"oauthAccount": {}}))
+        backup.reset_config()
+        self.assertEqual(json.loads(self.claude_json.read_text()),
+                         {"oauthAccount": {}})
+
+    def test_a_corrupt_claude_json_is_reported_not_clobbered(self):
+        self.claude_json.write_text("{nope")
+        result = backup.reset_config()
+        self.assertEqual(self.claude_json.read_text(), "{nope")
+        self.assertTrue(any("mcpServers not cleared" in f["error"]
+                            for f in result["failed"]))
+
+    def test_transcripts_survive_by_default_and_go_when_asked(self):
+        backup.reset_config(keep_transcripts=True)
+        self.assertTrue((self.cfg / "projects" / "proj" / "a.jsonl").is_file())
+        backup.reset_config(keep_transcripts=False)
+        self.assertFalse((self.cfg / "projects").exists())
+
+    def test_a_symlinked_item_dir_loses_the_pointer_not_the_target(self):
+        target = self.tmp / "checkout"
+        write(target / "mine.md", "---\n---\nreal file\n")
+        (self.cfg / "commands").symlink_to(target)
+        backup.reset_config()
+        self.assertFalse((self.cfg / "commands").is_symlink())
+        self.assertTrue((target / "mine.md").is_file())
+
+    def test_a_dangerous_config_dir_is_refused(self):
+        backup.config_dir = lambda: pathlib.Path("/")
+        with self.assertRaises(ValueError):
+            backup.reset_config()
+
+    def test_fresh_start_snapshots_then_resets(self):
+        result = backup.fresh_start()
+        self.assertFalse((self.cfg / "skills").exists())
+        self.assertNotIn("mcpServers", json.loads(self.claude_json.read_text()))
+        names = self.members(result["snapshot"])
+        self.assertIn("files/skills/pdf/SKILL.md", names)
+        self.assertIn("mcp/servers/gh.json", names)
+        # transcripts stayed on disk, so the snapshot leaves them out
+        self.assertNotIn("files/projects/proj/a.jsonl", names)
+        self.assertTrue((self.cfg / "projects" / "proj" / "a.jsonl").is_file())
+
+    def test_deleted_transcripts_ride_in_the_snapshot(self):
+        result = backup.fresh_start(keep_transcripts=False)
+        self.assertFalse((self.cfg / "projects").exists())
+        self.assertIn("files/projects/proj/a.jsonl",
+                      self.members(result["snapshot"]))
+
+    def test_nothing_is_deleted_when_the_snapshot_cannot_be_written(self):
+        self.dest.write_text("a file where the backup dir should be")
+        with self.assertRaises((ValueError, OSError)):
+            backup.fresh_start()
+        self.assertTrue((self.cfg / "skills" / "pdf" / "SKILL.md").is_file())
+        self.assertIn("mcpServers", json.loads(self.claude_json.read_text()))
+
+    def test_the_round_trip_restores_what_was_picked_and_only_that(self):
+        result = backup.fresh_start()
+        picked = ["files/skills/pdf/SKILL.md", "files/skills/pdf/logo.bin",
+                  "mcp/servers/gh.json", "files/CLAUDE.md"]
+        r = backup.backup_restore(result["snapshot"], picked)
+        self.assertEqual(r["failed"], [])
+        self.assertEqual((self.cfg / "CLAUDE.md").read_text(), "be brief\n")
+        self.assertTrue((self.cfg / "skills" / "pdf" / "logo.bin").is_file())
+        data = json.loads(self.claude_json.read_text())
+        self.assertEqual(data["mcpServers"]["gh"]["command"], "gh-mcp")
+        self.assertEqual(data["oauthAccount"]["email"], "me@example.com")
+        # what was not picked stays gone
+        self.assertFalse((self.cfg / "settings.json").exists())
+        self.assertFalse((self.cfg / "disabled").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2730,6 +2730,7 @@ let BPICKS = null;      // Set of ticked group ids; null until first render
 let BUNITS = {};        // {groupId: Set(unitId)} — absent means every unit
 let BREPORT = null;     // the open dry-run report, or null
 let BSHOWSAME = false;  // identical files are collapsed by default
+let BFRESH = null;      // snapshot name of an in-flight fresh start, or null
 
 const fbytes = (n) => {
   if (!n) return "0 B";
@@ -2772,6 +2773,7 @@ async function renderBackup(reload) {
   if (BREPORT) { view.append(restorePanel()); return; }
   view.append(backupCreateCard());
   view.append(backupArchivesCard());
+  view.append(freshStartCard());
 }
 
 function backupDestCard() {
@@ -3050,17 +3052,89 @@ async function deleteArchive(a) {
   } catch (e) { toast(e.message, true); }
 }
 
+/* ------------------------------------------------------------ fresh start --
+   Reset with a parachute. The server snapshots everything first and refuses
+   to delete a single file until that zip is on disk; the way back in is the
+   same restore picker every archive uses, opened on the snapshot with nothing
+   ticked except the config files. What the reset never touches: your login
+   (~/.claude.json keeps everything but mcpServers), and anything in the
+   config dir this app does not model — credentials, session state, todos. */
+
+function freshStartCard() {
+  const card = el("div.card", {
+    style: { marginTop: "1.25rem", borderColor: "var(--destructive)" } });
+  card.append(el("div.card-header", {},
+    el("div", {},
+      el("div.card-title", { text: "Start fresh" }),
+      el("div.card-description", {
+        text: "Back everything up automatically, wipe the config, then pick "
+          + "what comes back — piece by piece." }))));
+
+  const keep = el("input", { type: "checkbox", checked: true });
+  const body = el("div.card-content.tight");
+  body.append(el("div.drow", {}, icon("info"),
+    el("span.dmsg", {},
+      el("div", { text: "Deletes: skills, commands, agents, output styles, "
+        + "CLAUDE.md, settings, keybindings, statusline, plugins, and the MCP "
+        + "servers in ~/.claude.json." }),
+      el("div.hint", { text: "Keeps: your login and everything else in "
+        + "~/.claude.json, plus files this app does not manage. Plugins you "
+        + "restore re-download on the next Claude Code start." }))));
+  body.append(el("label.cl-row", {}, keep,
+    el("div.cl-body", {},
+      el("div.cl-line", {}, el("span.li-name", { text: "Keep cost history (transcripts)" })),
+      el("span.li-desc", { text: "Unticked, transcripts go into the snapshot "
+        + "and are deleted from disk — the Costs tab starts at zero." }))));
+  card.append(body);
+
+  const go = mkbtn("btn btn-destructive", "Reset config…", async () => {
+    const ok = await mconfirm("Reset your Claude Code config?",
+      "Three steps, in order: a full backup is written first, then the config "
+      + "is wiped" + (keep.checked ? "" : " including cost history")
+      + ", then you pick what to restore from that backup. If the backup "
+      + "cannot be written, nothing is deleted.",
+      "Back up and reset");
+    if (!ok) return;
+    go.disabled = true;
+    go.textContent = "Backing up & resetting…";
+    try {
+      const r = await api("/api/fresh-start", { keep_transcripts: keep.checked });
+      BFRESH = r.snapshot;
+      if (r.failed && r.failed.length)
+        toast(r.failed.length + " path(s) could not be deleted: "
+          + r.failed[0].error + " — snapshot is safe at " + r.snapshot_path, true);
+      else
+        toast("Config reset — snapshot saved as " + r.snapshot);
+      await refresh();          // items, settings and MCP all just changed
+      await openRestore(r.snapshot, true);
+      renderBackup(true);
+    } catch (e) {
+      toast(e.message, true);
+      go.disabled = false;
+      go.textContent = "Reset config…";
+    }
+  });
+  go.prepend(icon("refresh"));
+  card.append(el("div.card-content", {
+    style: { display: "flex", justifyContent: "flex-end" } }, go));
+  return card;
+}
+
 /* ---------------------------------------------------------------- restore --
    The dry run. Every row already knows its verdict; the ticks decide what gets
    written. `differs` rows start ticked (you asked to restore), `same` rows are
    hidden behind a toggle since writing identical bytes is a no-op. */
 
-async function openRestore(name) {
+async function openRestore(name, fresh) {
   try {
     const rep = await api("/api/backup-inspect?name=" + encodeURIComponent(name));
-    BREPORT = { ...rep, picked: new Set(rep.entries
-      .filter((e) => e.status === "new" || e.status === "differs")
-      .map((e) => e.path)) };
+    // after a reset, start from nothing: only the config files are ticked,
+    // because a config that cannot even find its settings is the one thing
+    // nobody means by "fresh". A normal restore keeps its old default.
+    const want = fresh
+      ? (e) => e.group === "config" && e.status !== "refused" && e.status !== "missing"
+      : (e) => e.status === "new" || e.status === "differs";
+    BREPORT = { ...rep, picked: new Set(rep.entries.filter(want).map((e) => e.path)) };
     BSHOWSAME = false;
     renderBackup();
   } catch (e) { toast(e.message, true); }
@@ -3072,10 +3146,20 @@ function restorePanel() {
   const c = rep.counts || {};
 
   wrap.append(el("div.toolbar", {},
-    mkbtn("btn-sm", "← Back to archives", () => { BREPORT = null; renderBackup(); }),
+    mkbtn("btn-sm", BFRESH ? "Skip — keep empty config" : "← Back to archives",
+      () => { BREPORT = null; BFRESH = null; renderBackup(); }),
     el("div.toolbar-end", {},
       el("span.hint", {
         text: "restoring into " + rep.config_dir }))));
+
+  if (BFRESH)
+    wrap.append(el("div.alert.alert-success", { style: { marginBottom: "1rem" } },
+      el("span.alert-icon", {}, icon("success")),
+      el("div.alert-body", {},
+        el("div.alert-title", { text: "Config reset — snapshot saved as " + BFRESH }),
+        el("div", { text: "Tick what you want back; everything else stays gone. "
+          + "The snapshot keeps sitting in your archives either way, so nothing "
+          + "here is a one-shot decision." }))));
 
   wrap.append(el("div.stat-grid", { style: { marginBottom: "1rem" } },
     statCard(String(c.new || 0), "new", { accent: true, hint: "not on disk here" }),
@@ -3157,7 +3241,9 @@ function restoreRow(e, sync) {
   row.append(el("span.dmsg", {},
     el("div.dmono", { text: e.target || e.path }),
     el("div.hint", {
-      text: (e.error || "") || (e.group + " · " + fbytes(e.size)) })));
+      text: (e.error || "") || (e.group + " · " + fbytes(e.size)
+        + (BFRESH && e.group === "plugins"
+           ? " · re-downloads on next Claude Code start" : "")) })));
   row.append(badge(label, variant));
 
   const actions = el("div.dactions", {});
@@ -3201,8 +3287,10 @@ async function applyRestore() {
     if (r.failed_count)
       toast(r.count + " restored, " + r.failed_count + " failed: " + r.failed[0].error, true);
     else
-      toast(plural(r.count, "file") + " restored");
+      toast(plural(r.count, "file") + " restored"
+        + (BFRESH ? " — fresh start complete" : ""));
     BREPORT = null;
+    BFRESH = null;
     await refresh();          // items, settings and MCP all just changed
     renderBackup(true);
   } catch (e) { toast(e.message, true); }
