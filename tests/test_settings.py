@@ -553,6 +553,87 @@ class TestSettingsSet(unittest.TestCase):
             settings.settings_set("env.ANTHROPIC_MODEL", "opus")
         self.assertEqual(self.raw(), "{not json")
 
+    def test_set_same_value_does_not_rewrite(self):
+        settings.settings_set("model", "opus")
+        with self.count_writes() as calls:
+            settings.settings_set("model", "opus")
+        self.assertEqual(calls, [])
+
+    def test_delete_on_missing_file_creates_nothing(self):
+        settings.settings_set("model", None)
+        self.assertFalse(os.path.exists(self.path))
+
+    def count_writes(self):
+        """Count atomic_write calls in a with-block, restoring on exit."""
+        test = self
+
+        class Counter:
+            def __enter__(self):
+                self.calls = []
+                self._orig = settings.atomic_write
+
+                def counting(path, text):
+                    self.calls.append(path)
+                    return self._orig(path, text)
+
+                settings.atomic_write = counting
+                return self.calls
+
+            def __exit__(self, *exc):
+                settings.atomic_write = self._orig
+                return False
+
+        return Counter()
+
+
+class TestSettingsSetMany(unittest.TestCase):
+    """settings_set_many: one parse, one write, whole batch or nothing.
+    settings_set delegates here, so TestSettingsSet above pins the single-key
+    semantics and this class pins what only a batch can show."""
+
+    setUp = TestSettingsSet.setUp
+    tearDown = TestSettingsSet.tearDown
+    read = TestSettingsSet.read
+    raw = TestSettingsSet.raw
+    count_writes = TestSettingsSet.count_writes
+
+    def test_batch_nests_and_coexists(self):
+        settings.settings_set_many([("model", "sonnet"),
+                                    ("env.A", "1"), ("env.B", "2")])
+        self.assertEqual(self.read(), {"model": "sonnet",
+                                       "env": {"A": "1", "B": "2"}})
+
+    def test_one_write_for_many_pairs(self):
+        with self.count_writes() as calls:
+            settings.settings_set_many([("model", "sonnet"),
+                                        ("env.A", "1"), ("env.B", "2")])
+        self.assertEqual(len(calls), 1)
+
+    def test_identical_batch_skips_the_write(self):
+        pairs = [("model", "sonnet"), ("env.A", "1")]
+        settings.settings_set_many(pairs)
+        before = self.raw()
+        with self.count_writes() as calls:
+            settings.settings_set_many(pairs)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.raw(), before)
+
+    def test_mixed_set_and_delete_prunes(self):
+        settings.settings_set("env.A", "1")
+        settings.settings_set_many([("env.A", None), ("model", "sonnet")])
+        self.assertEqual(self.read(), {"model": "sonnet"})
+
+    def test_bad_key_rejects_the_whole_batch(self):
+        settings.settings_set("model", "opus")
+        before = self.raw()
+        with self.assertRaises(ValueError):
+            settings.settings_set_many([("ok", "1"), ("bad key", "x")])
+        self.assertEqual(self.raw(), before)
+
+    def test_duplicate_key_last_write_wins(self):
+        settings.settings_set_many([("model", "opus"), ("model", "sonnet")])
+        self.assertEqual(self.read(), {"model": "sonnet"})
+
 
 if __name__ == "__main__":
     unittest.main()

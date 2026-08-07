@@ -7,8 +7,10 @@ result; removing touches only the piece's own artifacts.
 The registry below is the extension point: each entry supplies a `state`
 callable (returns the piece's current status) plus `apply` and `remove`. New
 pieces (fish/tmux/ghostty drop-ins) slot in as more entries once their payload
-exists in this checkout."""
+exists in this checkout; settings presets slot in as a data file under
+data/presets/settings/ plus a PRESETS row in settings_presets.py."""
 
+from .settings_presets import preset_apply, preset_remove, preset_state
 from .statusline import statusline_apply, statusline_remove, statusline_state
 
 
@@ -33,6 +35,9 @@ PIECES = {
     "statusline": {"state": _statusline_state,
                    "apply": lambda: statusline_apply(),
                    "remove": statusline_remove},
+    "token-saver": {"state": lambda: preset_state("token-saver"),
+                    "apply": lambda: preset_apply("token-saver"),
+                    "remove": lambda: preset_remove("token-saver")},
 }
 
 def setup_state():

@@ -1,0 +1,18 @@
+[
+  {"key": "model", "value": "sonnet",
+   "why": "The biggest lever: Sonnet-class costs a fraction of Opus-class per token, and it is the documented recommended default for coding."},
+  {"key": "effortLevel", "value": "medium",
+   "why": "Adaptive-reasoning models default to high or xhigh effort; medium trims thinking-token spend at modest quality cost, and /effort still raises it for one session."},
+  {"key": "env.CLAUDE_CODE_SUBAGENT_MODEL", "value": "haiku",
+   "why": "Subagent fan-out is where one prompt becomes many sessions; Haiku-class input is about a third of Sonnet's price."},
+  {"key": "workflowSizeGuideline", "value": "small",
+   "why": "Dynamic workflows default to unrestricted agent counts; small advises Claude to write leaner ones."},
+  {"key": "workflowKeywordTriggerEnabled", "value": false,
+   "why": "By default the literal word ultracode in a prompt launches a multi-agent workflow; off means workflows run only when asked for deliberately."},
+  {"key": "fastModePerSessionOptIn", "value": true,
+   "why": "Fast mode bills roughly double per token; per-session opt-in stops it persisting silently across sessions."},
+  {"key": "awaySummaryEnabled", "value": false,
+   "why": "The return-to-terminal recap is model-generated on your key."},
+  {"key": "env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "value": "1",
+   "why": "Terminal titles are Haiku-generated per session; a small but pure saving."}
+]

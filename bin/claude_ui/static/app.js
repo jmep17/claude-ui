@@ -1585,12 +1585,21 @@ async function renderSetup(reload) {
       mkbtn("btn-sm btn-primary", p.installed ? "Re-apply" : "Apply", () => setupAct("apply", p)));
     if (p.removable && p.installed)
       actions.append(mkbtn("btn-sm danger", "Remove", () => setupAct("remove", p)));
-    list.append(el("div.list-item", {},
+    const row = el("div.list-item", {},
       el("div.li-main", {},
         el("span.li-name", { text: p.label }),
         p.installed ? badge("installed", "success") : badge("not installed", "outline")),
-      el("span.li-desc", { text: p.desc + (p.detail ? " — " + p.detail : "") }),
-      actions));
+      el("span.li-desc", { text: p.desc + (p.detail ? " — " + p.detail : "") }));
+    // A piece may carry notes: the exact writes it makes, one per line, so the
+    // list is on screen before the button that performs them is pressed.
+    if (p.notes && p.notes.length) {
+      const fold = el("details.piece-notes", {},
+        el("summary", { text: "What it writes (" + p.notes.length + " keys)" }));
+      for (const n of p.notes) fold.append(el("div.li-desc", { text: n }));
+      row.append(fold);
+    }
+    row.append(actions);
+    list.append(row);
   }
   view.append(list);
 }

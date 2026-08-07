@@ -238,11 +238,16 @@ values and `@file` imports, then show what refers to what and which references
 are broken. A command that invokes a skill you later disabled just quietly does
 less.
 
-### 22. Grow the setup-pieces registry — M
-`setup.py`'s `PIECES` dict is documented as the extension point and holds
-exactly one entry. Candidates following the same derived-state contract: a
-session-start git-identity hook, a stop-hook desktop notifier, a safe-defaults
-permissions preset, shell completions.
+### 22. Grow the setup-pieces registry — M *(first growth: token-saver preset)*
+`setup.py`'s `PIECES` dict is documented as the extension point and now holds
+two entries: the second is the **token-saver settings preset**
+(`settings_presets.py` + `data/presets/settings/token-saver.json`), which
+points eight documented `settings.json` keys at cheaper defaults through
+`settings_set_many()` in one atomic write, and removes only values still at
+preset values. Remaining candidates following the same derived-state contract:
+a session-start git-identity hook, a stop-hook desktop notifier, a
+safe-defaults permissions preset — now mostly a JSON file plus a `PRESETS` row
+and a `PIECES` entry — and shell completions.
 
 ### 23. Import/export a config bundle — *(shipped; see Done)*
 What is left of it: **sharing**. The Backup tab does "set up my new laptop"; it

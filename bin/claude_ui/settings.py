@@ -748,9 +748,42 @@ def settings_state():
             st["error"] = str(e)
     return st
 
-def settings_set(key, value):
-    if not SETTINGS_KEY_RE.match(key or ""):
-        raise ValueError("bad settings key")
+_MISSING = object()
+
+def _apply_setting(data, key, value):
+    """One set or delete against a parsed settings dict, dotted paths nesting.
+    Returns whether anything changed; the caller prunes and writes once."""
+    parts = key.split(".")
+    node = data
+    for p in parts[:-1]:
+        nxt = node.get(p)
+        if not isinstance(nxt, dict):
+            if value is None:
+                return False  # deleting under a missing parent: nothing to do
+            nxt = {}
+            node[p] = nxt
+        node = nxt
+    last = parts[-1]
+    if value is None:
+        return node.pop(last, _MISSING) is not _MISSING
+    if last in node and node[last] == value:
+        return False
+    node[last] = value
+    return True
+
+def settings_set_many(pairs):
+    """Several settings_set writes as one read → modify → atomic_write cycle.
+
+    `pairs` is (key, value) tuples; value None deletes, exactly as
+    settings_set, and a duplicate key behaves like two sequential calls. Every
+    key is validated before anything is touched, so a batch — a setup preset —
+    lands whole or not at all. When nothing would change, the file is not
+    rewritten: re-applying an installed preset must not churn the mtime.
+    """
+    pairs = list(pairs)
+    for key, _ in pairs:
+        if not SETTINGS_KEY_RE.match(key or ""):
+            raise ValueError("bad settings key")
     path = config_dir() / "settings.json"
     data = {}
     if path.is_file():
@@ -760,19 +793,14 @@ def settings_set(key, value):
             raise ValueError(f"{path.name} has invalid JSON — fix it by hand first ({e})")
         if not isinstance(data, dict):
             raise ValueError(f"{path.name}: top level is not a JSON object")
-    parts = key.split(".")
-    node = data
-    for p in parts[:-1]:
-        nxt = node.get(p)
-        if not isinstance(nxt, dict):
-            if value is None:
-                return
-            nxt = {}
-            node[p] = nxt
-        node = nxt
-    if value is None:
-        node.pop(parts[-1], None)
-
+    changed = deleted = False
+    for key, value in pairs:
+        one = _apply_setting(data, key, value)
+        changed = changed or one
+        deleted = deleted or (one and value is None)
+    if not changed:
+        return
+    if deleted:
         def prune(d):
             for k in list(d):
                 if isinstance(d[k], dict):
@@ -780,9 +808,10 @@ def settings_set(key, value):
                     if not d[k]:
                         del d[k]
         prune(data)
-    else:
-        node[parts[-1]] = value
     atomic_write(path, json.dumps(data, indent=2) + "\n")
+
+def settings_set(key, value):
+    settings_set_many([(key, value)])
 
 # The nine events the hooks builder used to know, kept as the head of the list
 # so the common ones stay at the top of the event picker. The rest — 22 more —

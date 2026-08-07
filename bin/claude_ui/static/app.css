@@ -203,6 +203,15 @@ main {
   flex-wrap: wrap;
   flex: none;
 }
+.piece-notes { flex: 1 1 100%; min-width: 0; }
+.piece-notes > summary {
+  cursor: pointer;
+  color: var(--muted-foreground);
+  font-size: 0.72rem;
+  width: fit-content;
+}
+.piece-notes > summary:hover { color: var(--foreground); }
+.piece-notes > .li-desc { -webkit-line-clamp: 3; padding: 0.125rem 0 0 0.875rem; }
 /* the overflow "…" is the only thing that hides until the row is touched;
    Edit/Disable stay at full strength, since a dimmed button reads as disabled */
 @media (hover: hover) and (min-width: 720px) {

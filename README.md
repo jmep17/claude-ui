@@ -36,6 +36,11 @@ owns, links, tracks, or syncs anything:
   statusline script into the config dir and points the `statusLine` key at it.
   Setup pieces are idempotent, derive their installed state by inspection, and
   are removable.
+- **Token saver** — a setup piece that points eight `settings.json` keys at
+  cheaper defaults for pay-per-token API use: Sonnet main model, Haiku
+  subagents, medium effort, smaller workflows, and fewer model-generated
+  extras. Applied as one atomic write; Remove clears only the keys still at
+  preset values, so anything you changed since stays yours.
 - **Doctor** for machine health: broken symlinks, leftover backups, hooks or
   statusline entries pointing at missing executables, and more.
 - **Backup** — a zip of the parts of your config that took work to build, kept
