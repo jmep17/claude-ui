@@ -94,12 +94,35 @@ def plugins_dir():
 def _within(path, root):
     return path == root or root in path.parents
 
+# One absolute project root per line; the Projects tab appends to it and the
+# generated fish function greps it as an allowlist. Lives here (not in
+# projects.py) because resolve_editable() below needs it — the same layering
+# note as plugins_dir() above.
+PROJECTS_REGISTRY = "claude-ui-projects.txt"
+
+def project_roots():
+    """Registered project roots, exactly as recorded (absolute, resolved at
+    registration). Read fresh on every call: it is one small file, and
+    resolve_editable must see a just-registered project without a restart.
+    Validation happens at registration (projects.py); a root that has since
+    vanished simply matches nothing here."""
+    try:
+        text = (config_dir() / PROJECTS_REGISTRY).read_text()
+    except OSError:
+        return []
+    return [Path(s) for s in (l.strip() for l in text.splitlines())
+            if s and not s.startswith("#")]
+
 def resolve_editable(raw):
     """Expand a user-supplied path and decide whether we'll open it at all.
 
-    Returns (resolved Path, readonly bool); raises ValueError otherwise. The
-    check runs against the *resolved* path, so a symlink sitting in the config
-    dir is judged by where it points, not by where it lives."""
+    Editable: the config dir, ~/.claude.json, and the .claude/ subtree of each
+    registered project root. Installed plugins are readable only. Returns
+    (resolved Path, readonly bool); raises ValueError otherwise. The check
+    runs against the *resolved* path, so a symlink sitting in the config dir
+    is judged by where it points, not by where it lives — and a project whose
+    .claude is itself a symlink is refused outright, so a checkout cannot
+    point us at an arbitrary directory."""
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError("no path given")
     p = Path(raw.strip()).expanduser()
@@ -111,7 +134,13 @@ def resolve_editable(raw):
         return p, True  # installed plugins are someone else's copy — look only
     if _within(p, config_dir().resolve()) or p == CLAUDE_JSON.resolve():
         return p, False
-    raise ValueError("path is outside the config dir")
+    for root in project_roots():
+        croot = root.resolve() / ".claude"
+        if croot.resolve() != croot:
+            continue
+        if _within(p, croot):
+            return p, False
+    raise ValueError("path is outside the config dir and every registered project")
 
 def tilde(p):
     return str(p).replace(str(Path.home()), "~", 1)

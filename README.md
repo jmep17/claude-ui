@@ -36,6 +36,17 @@ owns, links, tracks, or syncs anything:
   statusline script into the config dir and points the `statusLine` key at it.
   Setup pieces are idempotent, derive their installed state by inspection, and
   are removable.
+- **Projects** — per-project system prompts for Claude Code. A registered
+  project keeps `system-prompt.md` (replaces the default system prompt) or
+  `append-system-prompt.md` (adds to it) in its `.claude/`; disable is a rename
+  to `.md.off`, so state is always just files. A generated `.claude/claude.sh`
+  wrapper launches `claude` with the matching `--system-prompt-file` /
+  `--append-system-prompt-file` flag and ships with the repo. An optional zsh
+  setup piece makes plain `claude` pick these up automatically — but only for
+  projects in the registry file, which doubles as an allowlist, so a cloned
+  repo can never change your invocation just by containing files; prompt files
+  are passed as data, never executed. bash users source the same function file
+  with one line; the registry lives at `<config>/claude-ui-projects.txt`.
 - **Token saver** — a setup piece that points eight `settings.json` keys at
   cheaper defaults for pay-per-token API use: Sonnet main model, Haiku
   subagents, medium effort, smaller workflows, and fewer model-generated

@@ -314,7 +314,8 @@ def item_set_model(name, model, enabled=True):
 
 def path_read(raw):
     """Read any file we're willing to open by absolute path — the config dir,
-    ~/.claude.json, or (read-only) an installed plugin."""
+    ~/.claude.json, a registered project's .claude/ subtree, or (read-only)
+    an installed plugin."""
     p, readonly = resolve_editable(raw)
     if p.is_file() and p.stat().st_size > MAX_EDIT:
         raise ValueError(f"{p.name}: too large to edit here "

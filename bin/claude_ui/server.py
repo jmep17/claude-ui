@@ -22,6 +22,9 @@ from . import schema
 from .plugins import (adopted_items, plugin_env_set, plugin_env_vars,
                       plugin_resync, plugin_set_enabled, plugins_split,
                       plugins_state, skill_override_set)
+from .projects import (project_init, project_set_mode, project_toggle,
+                       projects_state, registry_add, registry_remove,
+                       wrapper_write)
 from .settings import (hook_test, settings_schema, settings_set, settings_state,
                        start_docs_fetch, suggest_state)
 from .statusline import statusline_save, statusline_state
@@ -158,6 +161,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, doctor())
         elif self.path == "/api/setup":
             self.send(200, setup_state())
+        elif self.path == "/api/projects":
+            self.send(200, projects_state())
         elif self.path == "/api/plugins":
             # adopted items are the other half of the plugin story — what a
             # Split actually left in your config — and only the doctor could
@@ -237,6 +242,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, {"ok": True})
             elif action == "setup-remove":
                 setup_remove(req.get("id", ""))
+                self.send(200, {"ok": True})
+            elif action == "project-add":
+                registry_add(req.get("path", ""))
+                self.send(200, {"ok": True})
+            elif action == "project-remove":
+                registry_remove(req.get("root", ""))
+                self.send(200, {"ok": True})
+            elif action == "project-init":
+                project_init(req.get("root", ""), req.get("mode", ""))
+                self.send(200, {"ok": True})
+            elif action == "project-toggle":
+                project_toggle(req.get("root", ""), bool(req.get("enabled")))
+                self.send(200, {"ok": True})
+            elif action == "project-mode":
+                project_set_mode(req.get("root", ""), req.get("mode", ""))
+                self.send(200, {"ok": True})
+            elif action == "project-wrapper":
+                wrapper_write(req.get("root", ""), bool(req.get("force")))
                 self.send(200, {"ok": True})
             elif action == "mcp-save":
                 mcp_machine_set(req.get("name", ""), req.get("config"),

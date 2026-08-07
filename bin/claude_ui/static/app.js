@@ -12,7 +12,7 @@ let DATA = { items: {}, config_files: [], config_dir: "", settings: {}, mcp: {},
 const ITEM_TABS = ["skills", "commands", "agents", "output-styles"];
 // the types core.ITEM_TYPES calls kind "dir": a folder of files, not one file
 const DIR_TYPES = new Set(["skills"]);
-const TABS = [...ITEM_TABS, "mcp", "statusline", "setup", "settings", "insight", "costs", "doctor", "plugins", "backup"];
+const TABS = [...ITEM_TABS, "mcp", "statusline", "projects", "setup", "settings", "insight", "costs", "doctor", "plugins", "backup"];
 
 const TAB_META = {
   "skills": { icon: "sparkles", label: "Skills" },
@@ -21,6 +21,7 @@ const TAB_META = {
   "output-styles": { icon: "droplet", label: "Output styles" },
   "mcp": { icon: "server", label: "MCP" },
   "statusline": { icon: "panel", label: "Statusline" },
+  "projects": { icon: "folder", label: "Projects" },
   "setup": { icon: "wrench", label: "Setup" },
   "settings": { icon: "settings", label: "Settings" },
   "insight": { icon: "chart", label: "Insight" },
@@ -222,6 +223,7 @@ function tabBadge(t) {
   if (t === "doctor" && DOCTOR && DOCTOR.warns) return String(DOCTOR.warns);
   if (t === "plugins" && PLUGINS)
     return String(PLUGINS.plugins.filter((p) => p.enabled).length);
+  if (t === "projects" && PROJECTS) return String(PROJECTS.projects.length);
   return null;
 }
 
@@ -1627,6 +1629,247 @@ async function setupAct(action, p) {
     toast(p.label + (action === "apply" ? " applied" : " removed") + " · applies to new sessions");
     await refresh();
     renderSetup(true);
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------------------------------------------------------------- projects
+
+let PROJECTS = null;
+
+// mode -> the live filename inside <project>/.claude/ (projects.py MODES)
+const PROJ_FILES = { replace: "system-prompt.md", append: "append-system-prompt.md" };
+
+async function renderProjects(reload) {
+  const view = document.getElementById("projectsview");
+  if (!PROJECTS || reload) {
+    if (!PROJECTS) {
+      view.innerHTML = "";
+      view.append(skeletonList(3));
+    }
+    try { PROJECTS = await api("/api/projects"); }
+    catch (e) {
+      view.innerHTML = "";
+      view.append(el("div.alert.alert-destructive", {},
+        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
+      return;
+    }
+    if (TAB !== "projects") return;
+  }
+  view.innerHTML = "";
+  view.append(el("div.view-head", {
+    text: "Per-project system prompts. Each project keeps its prompt in its own .claude/ "
+        + "directory: system-prompt.md replaces Claude Code's entire default system prompt, "
+        + "append-system-prompt.md adds to it. Disable is a rename to .md.off — the whole "
+        + "feature is plain files, nothing recorded elsewhere.",
+  }));
+  const f = PROJECTS.flags;
+  if (!f.cli || !f.system_prompt_file) {
+    view.append(el("div.alert.alert-warning", {},
+      el("span.alert-icon", {}, icon("warning")),
+      el("div.alert-body", { text: !f.cli
+        ? "claude CLI not found on PATH — the wrappers will not work until it is installed."
+        : "Your installed claude doesn't advertise --system-prompt-file; the wrappers would "
+        + "fail with it. Update Claude Code to use this feature." })));
+  }
+  view.append(projMechanismCard());
+  view.append(projListCard());
+  for (const st of PROJECTS.projects) view.append(projCard(st));
+}
+
+function projMechanismCard() {
+  const card = el("div.card", { style: { marginBottom: "1.25rem" } });
+  card.append(el("div.card-header", {},
+    el("div", {},
+      el("div.card-title", { text: "How it applies" }),
+      el("div.card-description", {
+        text: "Prompt files are data — passed to claude as flag arguments, never executed. "
+            + "Two ways a session picks them up:" }))));
+  const body = el("div.card-content.flush");
+  body.append(el("div.drow", {},
+    icon("terminal"),
+    el("span.dmsg", { text: "Per project: run ./.claude/claude.sh instead of claude. "
+      + "The script ships with the repo, so teammates get it without claude-ui." })));
+  const z = PROJECTS.zsh;
+  body.append(el("div.drow", {},
+    icon("wrench"),
+    el("span.dmsg", { text: "Everywhere: the zsh setup piece makes plain `claude` pick up "
+      + "registered projects automatically. Only projects listed below are honored." }),
+    z.installed ? badge("installed", "success") : badge("not installed", "outline"),
+    el("div.dactions", {}, mkbtn("btn-sm", z.installed ? "Manage in Setup" : "Install in Setup",
+      () => goTab("setup")))));
+  body.append(el("div.drow", {},
+    icon("file"),
+    el("span.dmsg", { text: "bash: source the same function from ~/.bashrc" }),
+    el("span.dmsg.dmono", { text: 'source "' + PROJECTS.zsh_file + '"' }),
+    el("div.dactions", {}, mkbtn("btn-sm btn-ghost", "Copy",
+      () => copyText('source "' + PROJECTS.zsh_file + '"', "bash line")))));
+  card.append(body);
+  return card;
+}
+
+function projListCard() {
+  const card = el("div.card", { style: { marginBottom: "1.25rem" } });
+  card.append(el("div.card-header", {},
+    el("div", {},
+      el("div.card-title", { text: "Registered projects" }),
+      el("div.card-description", {
+        text: "Recorded in " + PROJECTS.registry + " — also the allowlist the zsh function "
+            + "checks, so nothing outside this list ever changes a claude invocation." }))));
+  const body = el("div.card-content.flush");
+  body.append(el("div.drow", {},
+    el("span.dmsg", { text: PROJECTS.projects.length
+      ? "Registering only records the path; files are written when you initialise."
+      : "No projects yet. Registering only records the path; files are written when you "
+      + "initialise a prompt." }),
+    el("div.dactions", {}, mkbtn("btn-sm btn-primary", "Add project…", addProject))));
+  for (const s of PROJECTS.suggestions) {
+    body.append(el("div.drow", {},
+      icon("folder"),
+      el("span.dmsg.dmono", { text: s }),
+      el("span.dmsg", { text: "seen in your session history" }),
+      el("div.dactions", {}, mkbtn("btn-sm", "Add",
+        () => projPost("project-add", { path: s }, "Added " + s)))));
+  }
+  card.append(body);
+  return card;
+}
+
+async function addProject() {
+  const r = await modal({
+    title: "Add project",
+    text: "Absolute path (or ~/…) of a project root. Registering only records the path — "
+        + "nothing is written into the project until you initialise a prompt there.",
+    fields: [{ id: "p", label: "Path", mono: true, placeholder: "~/src/my-project" }],
+    ok: "Add",
+  });
+  if (!r || !r.p) return;
+  projPost("project-add", { path: r.p }, "Project added");
+}
+
+function projCard(st) {
+  const card = el("div.card", { style: { marginBottom: "1.25rem" } });
+  const title = el("div", {},
+    el("div.card-title", { text: st.tilde }),
+    el("div.card-description", { text: st.mode
+      ? (st.mode === "replace" ? "Replaces the entire default system prompt"
+                               : "Appends to the default system prompt")
+      : "No prompt file yet — initialise to create one." }));
+  const badges = el("div", {});
+  if (st.missing) badges.append(badge("missing", "destructive"));
+  if (st.conflict) badges.append(badge("conflict", "destructive"));
+  if (st.mode) {
+    badges.append(badge(st.mode, "outline"));
+    badges.append(st.enabled ? badge("enabled", "success") : badge("disabled", "outline"));
+  }
+  card.append(el("div.card-header", {}, title, badges));
+  const body = el("div.card-content.flush");
+
+  if (st.conflict) {
+    body.append(el("div.drow", {},
+      el("span.dmsg", { text: "Both a live and a disabled copy (or both modes) exist — "
+        + "claude-ui won't guess which prompt is yours. Open .claude/ and remove one." })));
+  }
+  if (st.mode && !st.conflict) {
+    const name = PROJ_FILES[st.mode] + (st.enabled ? "" : ".off");
+    body.append(el("div.drow", {},
+      icon("file"),
+      el("span.dmsg.dmono", { text: ".claude/" + name }),
+      el("div.dactions", {},
+        openFileBtn(st.root + "/.claude/" + name, "Edit prompt"),
+        mkbtn("btn-sm", st.mode === "replace" ? "Switch to append" : "Switch to replace",
+          () => projPost("project-mode",
+            { root: st.root, mode: st.mode === "replace" ? "append" : "replace" },
+            "Mode switched")))));
+    body.append(el("div.drow", {},
+      el("span.dmsg", { text: st.enabled
+        ? "Enabled — wrapper-launched sessions use this prompt."
+        : "Disabled — the file is parked as " + name + "; plain claude behavior." }),
+      el("div.dactions", {}, switchToggle("", st.enabled,
+        (v) => projPost("project-toggle", { root: st.root, enabled: v },
+          v ? "Enabled" : "Disabled")))));
+  }
+  if (!st.mode && !st.missing) {
+    body.append(el("div.drow", {},
+      el("span.dmsg", { text: "Initialise writes a starter prompt file and the claude.sh "
+        + "wrapper into .claude/ — nothing else in the project is touched." }),
+      el("div.dactions", {}, mkbtn("btn-sm btn-primary", "Initialise…", () => projInit(st)))));
+  }
+
+  const wbadge = { current: ["current", "success"], stale: ["stale", "outline"],
+    foreign: ["not ours", "outline"], "not-executable": ["not executable", "destructive"],
+    none: ["none", "outline"] }[st.wrapper];
+  const wrow = el("div.drow", {},
+    icon("terminal"),
+    el("span.dmsg.dmono", { text: ".claude/claude.sh" }),
+    badge(wbadge[0], wbadge[1]),
+    el("div.dactions", {}));
+  const wacts = wrow.querySelector(".dactions");
+  if (st.wrapper !== "none")
+    wacts.append(mkbtn("btn-sm btn-ghost", "Copy run command",
+      () => copyText("./.claude/claude.sh", "run command")));
+  if (st.wrapper !== "current" && !st.missing)
+    wacts.append(mkbtn("btn-sm", st.wrapper === "none" ? "Create" : "Regenerate",
+      () => projWrapper(st)));
+  body.append(wrow);
+
+  const styles = st.output_styles.length ? st.output_styles.join(", ") : null;
+  const setting = Object.entries(st.output_style_setting)
+    .map(([f2, v]) => v + " (" + f2 + ")").join(", ");
+  if (styles || setting) {
+    body.append(el("div.drow", {},
+      icon("droplet"),
+      el("span.dmsg", { text: "Output styles in this project: "
+        + (styles || "none") + (setting ? " · outputStyle: " + setting : "") })));
+  }
+
+  body.append(el("div.drow", {},
+    el("span.dmsg", { text: "Removing only unregisters the project — its files stay." }),
+    el("div.dactions", {}, mkbtn("btn-sm danger", "Remove", async () => {
+      if (await mconfirm("Remove " + st.tilde + "?",
+          "Removes the registry entry (and allowlisting) only. Files under " + st.tilde
+          + "/.claude/ are left exactly as they are.", "Remove"))
+        projPost("project-remove", { root: st.root }, "Project removed");
+    }))));
+  card.append(body);
+  return card;
+}
+
+async function projInit(st) {
+  const r = await modal({
+    title: "Initialise system prompt",
+    text: "Writes a starter prompt file plus the claude.sh wrapper into " + st.tilde
+        + "/.claude/. Append keeps Claude Code's default prompt; replace discards all of it "
+        + "— tone, workflow and safety guidance included — so spell out what you need.",
+    fields: [{ id: "m", label: "Mode", type: "select", value: "append",
+               options: [
+                 { value: "append", label: "Append — add project instructions to the default prompt" },
+                 { value: "replace", label: "Replace — swap out the entire default prompt" }] }],
+    ok: "Initialise",
+  });
+  if (!r) return;
+  projPost("project-init", { root: st.root, mode: r.m },
+    "Initialised — now edit the prompt");
+}
+
+async function projWrapper(st) {
+  try {
+    await api("/api/project-wrapper", { root: st.root });
+    toast("Wrapper written");
+    renderProjects(true);
+  } catch (e) {
+    if (/wasn't written by claude-ui/.test(e.message)) {
+      if (await mconfirm("Replace your claude.sh?",
+          e.message + " Regenerating replaces it with the claude-ui version.", "Replace"))
+        projPost("project-wrapper", { root: st.root, force: true }, "Wrapper written");
+    } else toast(e.message, true);
+  }
+}
+
+async function projPost(action, body, msg) {
+  try {
+    await api("/api/" + action, body);
+    if (msg) toast(msg);
+    renderProjects(true);
   } catch (e) { toast(e.message, true); }
 }
 
@@ -3383,8 +3626,8 @@ function render() {
   renderHeader();
   renderTabs();
   const views = { settings: "settingsview", mcp: "mcpview", statusline: "stlview",
-    setup: "setupview", insight: "insightview", costs: "costsview", doctor: "doctorview",
-    plugins: "pluginsview", backup: "backupview" };
+    projects: "projectsview", setup: "setupview", insight: "insightview", costs: "costsview",
+    doctor: "doctorview", plugins: "pluginsview", backup: "backupview" };
   const isEditor = !!EDITING;
   document.getElementById("editorview").hidden = !isEditor;
   document.getElementById("itemsview").hidden = isEditor || !ITEM_TABS.includes(TAB);
@@ -3399,6 +3642,7 @@ function render() {
   if (TAB === "settings") { renderSettings(); return; }
   if (TAB === "mcp") { renderMcp(); return; }
   if (TAB === "statusline") { renderStatusline(); return; }
+  if (TAB === "projects") { renderProjects(); return; }
   if (TAB === "setup") { renderSetup(); return; }
   if (TAB === "insight") { renderInsight(); return; }
   if (TAB === "costs") { renderCosts(); return; }

@@ -150,7 +150,8 @@ function styleDocsCard() {
       "(every such directory between the working directory and the repo root; " +
       "closest to the working directory wins a name clash), the managed policy " +
       "directory, and any enabled plugin's output-styles/ directory. This app " +
-      "writes the first of those.")));
+      "writes the first of those; the Projects tab shows what a registered " +
+      "project's .claude/output-styles/ holds.")));
   return card;
 }
 
