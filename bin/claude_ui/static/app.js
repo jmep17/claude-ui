@@ -307,8 +307,14 @@ function datalist(values) {
 const itemNames = (t) =>
   ((DATA.items || {})[t] || []).map((it) => it.name).filter(Boolean);
 const mcpNames = () => ((DATA.mcp || {}).servers || []).map((sv) => sv.name);
+// Claude Code matches outputStyle against a style's frontmatter name when
+// set, else the file basename (exact case) — never a subdirectory prefix
+const styleNames = () =>
+  ((DATA.items || {})["output-styles"] || [])
+    .map((it) => it.meta_name || (it.name || "").split("/").pop())
+    .filter(Boolean);
 const LIVE_SUGGEST = {
-  "outputStyle": () => itemNames("output-styles"),
+  "outputStyle": styleNames,
   "skillOverrides:key": () => itemNames("skills"),
   "mcpServerTimeouts:key": mcpNames,
   "enabledMcpjsonServers": mcpNames,

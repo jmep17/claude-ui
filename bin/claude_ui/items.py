@@ -101,6 +101,9 @@ def _scan_md_type(root, enabled):
             "todo_line": _todo_line(text),
             "source": meta.get(SOURCE_KEY) or "",
             "model": meta.get("model", ""),
+            # Claude Code registers an output style under its frontmatter
+            # name when set, not the filename — settings must use this value
+            "meta_name": "" if broken else str(meta.get("name", "") or ""),
             "name_mismatch": False,
             "long_desc": len(meta.get("description", "")) > 1024,
         })

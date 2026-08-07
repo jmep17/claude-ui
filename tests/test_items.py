@@ -162,5 +162,18 @@ class SkillFlags(Base):
         self.assertFalse(flags["open"])
 
 
+class MetaName(Base):
+    """Claude Code selects an output style by its frontmatter name when set,
+    so scan_items must surface it alongside the filename-derived name."""
+
+    def test_meta_name_from_frontmatter(self):
+        self.write("output-styles/adhd.md", "---\nname: ADHD\n---\nbody\n")
+        self.write("output-styles/plain.md", "body only\n")
+        got = {s["name"]: s["meta_name"]
+               for s in items.scan_items("output-styles")}
+        self.assertEqual(got["adhd"], "ADHD")
+        self.assertEqual(got["plain"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

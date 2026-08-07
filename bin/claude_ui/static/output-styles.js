@@ -139,6 +139,9 @@ function styleDocsCard() {
 
     styleDocPoint("Choosing one",
       "/config, then Output style — or set outputStyle in Settings. The " +
+      "value must be the style's frontmatter name (or its filename when no " +
+      "name is set), exact case: a file adhd.md with name: ADHD is selected " +
+      "as ADHD, not adhd. A mismatch silently falls back to default. The " +
       "standalone /output-style command was deprecated in v2.1.73 and removed " +
       "in v2.1.91."),
 
