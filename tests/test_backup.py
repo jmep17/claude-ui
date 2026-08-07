@@ -138,6 +138,36 @@ class TestUnits(Base):
         self.assertEqual(set(self.units("statusline")), {"statusline.sh"})
         self.assertEqual(set(self.units("mcp")), {"gh"})
 
+    def test_inspect_rows_carry_the_unit_so_a_skill_is_one_tick(self):
+        """Restore groups its rows by the unit recorded at create time — the
+        whole pdf skill is one checkbox, not one per file inside it."""
+        rows = {e["path"]: e
+                for e in backup.backup_inspect(self.create()["name"])["entries"]}
+        self.assertEqual(rows["files/skills/pdf/SKILL.md"]["unit"], "skills/pdf")
+        self.assertEqual(rows["files/skills/pdf/logo.bin"]["unit"], "skills/pdf")
+        self.assertEqual(rows["files/skills/pdf/SKILL.md"]["unit_label"], "pdf")
+        self.assertEqual(rows["files/skills/pdf/SKILL.md"]["unit_desc"], "skill")
+        self.assertEqual(rows["mcp/servers/gh.json"]["unit"], "gh")
+
+    def test_an_archive_without_units_still_inspects(self):
+        """Archives from before units were recorded in the manifest fall back
+        to empty unit fields — one row per file, never an error."""
+        name = self.create()["name"]
+        path = self.dest / name
+        with zipfile.ZipFile(path) as z:
+            m = json.loads(z.read("manifest.json"))
+            blobs = {n: z.read(n) for n in z.namelist() if n != "manifest.json"}
+        for e in m["entries"]:
+            for k in ("unit", "unit_label", "unit_desc"):
+                e.pop(k, None)
+        with zipfile.ZipFile(path, "w") as z:
+            for n, b in blobs.items():
+                z.writestr(n, b)
+            z.writestr("manifest.json", json.dumps(m))
+        rows = backup.backup_inspect(name)["entries"]
+        self.assertTrue(rows)
+        self.assertTrue(all(r["unit"] == "" for r in rows))
+
     def test_transcripts_are_one_unit_per_project(self):
         write(self.cfg / "projects" / "other" / "b.jsonl", '{"usage": 2}\n')
         self.assertEqual(set(self.units("transcripts")), {"proj", "other"})

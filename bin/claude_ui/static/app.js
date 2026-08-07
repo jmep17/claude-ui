@@ -2731,6 +2731,7 @@ let BUNITS = {};        // {groupId: Set(unitId)} — absent means every unit
 let BREPORT = null;     // the open dry-run report, or null
 let BSHOWSAME = false;  // identical files are collapsed by default
 let BFRESH = null;      // snapshot name of an in-flight fresh start, or null
+let BOPEN = new Set();  // restore units expanded to show their files
 
 const fbytes = (n) => {
   if (!n) return "0 B";
@@ -3136,6 +3137,7 @@ async function openRestore(name, fresh) {
       : (e) => e.status === "new" || e.status === "differs";
     BREPORT = { ...rep, picked: new Set(rep.entries.filter(want).map((e) => e.path)) };
     BSHOWSAME = false;
+    BOPEN = new Set();
     renderBackup();
   } catch (e) { toast(e.message, true); }
 }
@@ -3207,7 +3209,19 @@ function restorePanel() {
       setAll(!selectable.every((e) => BREPORT.picked.has(e.path)));
     })));
 
-  for (const e of rows) body.append(restoreRow(e, sync));
+  // a skill is one tick, not the eleven files inside it — the same unit rows
+  // the create pick list showed. Archives from before units were recorded
+  // have no unit on their rows and fall back to one row per file.
+  const units = new Map();
+  for (const e of rows) {
+    const key = e.group + " " + (e.unit || e.path);
+    if (!units.has(key)) units.set(key, { key, entries: [] });
+    units.get(key).entries.push(e);
+  }
+  for (const u of units.values()) {
+    if (u.entries.length === 1) body.append(restoreRow(u.entries[0], sync));
+    else body.append(unitRestoreRows(u, sync));
+  }
   card.append(body);
 
   const apply = mkbtn("btn btn-primary", "Restore selected", () => applyRestore());
@@ -3221,6 +3235,68 @@ function restorePanel() {
 const BSTATUS = { new: ["new", "success"], differs: ["differs", "warning"],
   same: ["identical", "secondary"], refused: ["refused", "destructive"],
   missing: ["missing", "destructive"] };
+
+// restoring the plugin list does not bring plugin files back — Claude Code
+// re-clones them from the marketplaces the restored list names
+const PLUGIN_REFETCH = "plugins re-download on next Claude Code start";
+
+/* One row for a whole unit — a skill folder, a project's transcripts. The
+   checkbox is the unit's verdict on all its usable files (indeterminate when
+   they disagree), and the files themselves sit behind an expander. */
+function unitRestoreRows(u, sync) {
+  const first = u.entries[0];
+  const usable = u.entries.filter((e) => e.status !== "refused" && e.status !== "missing");
+  const files = el("div", { hidden: !BOPEN.has(u.key),
+    style: { paddingLeft: "1.75rem" } });
+
+  const row = el("div.drow", {});
+  const cb = el("input", { type: "checkbox" });
+  const syncBox = () => {
+    const on = usable.filter((e) => BREPORT.picked.has(e.path)).length;
+    cb.checked = on > 0 && on === usable.length;
+    cb.indeterminate = on > 0 && on < usable.length;
+    sync();
+  };
+  cb.onchange = () => {
+    for (const e of usable) {
+      if (cb.checked) BREPORT.picked.add(e.path);
+      else BREPORT.picked.delete(e.path);
+    }
+    fill();
+    syncBox();
+  };
+  row.append(usable.length ? cb : icon("warn"));
+
+  const bytes = u.entries.reduce((n, e) => n + (e.size || 0), 0);
+  row.append(el("span.dmsg", {},
+    el("div", {}, el("span.li-name", { text: first.unit_label || first.unit })),
+    el("div.hint", { text: [first.unit_desc, plural(u.entries.length, "file"),
+        fbytes(bytes), first.group === "plugins" ? PLUGIN_REFETCH : ""]
+      .filter(Boolean).join(" · ") })));
+
+  // one badge per verdict present, counted — "3 new · 2 differs" at a glance
+  const counts = {};
+  for (const e of u.entries) counts[e.status] = (counts[e.status] || 0) + 1;
+  for (const [status, n] of Object.entries(counts)) {
+    const [label, variant] = BSTATUS[status] || [status, "secondary"];
+    row.append(badge(n > 1 ? n + " " + label : label, variant));
+  }
+
+  const toggle = mkbtn("btn-sm btn-ghost", "Files", () => {
+    files.hidden = !files.hidden;
+    if (files.hidden) BOPEN.delete(u.key); else BOPEN.add(u.key);
+  }, "Show the files inside");
+  toggle.prepend(icon("chevronDown"));
+  row.append(el("div.dactions", {}, toggle));
+
+  const fill = () => {
+    files.innerHTML = "";
+    for (const e of u.entries) files.append(restoreRow(e, syncBox));
+  };
+  fill();
+  syncBox();
+  return el("div", {}, row, files);
+}
 
 function restoreRow(e, sync) {
   const [label, variant] = BSTATUS[e.status] || [e.status, "secondary"];
@@ -3241,9 +3317,9 @@ function restoreRow(e, sync) {
   row.append(el("span.dmsg", {},
     el("div.dmono", { text: e.target || e.path }),
     el("div.hint", {
-      text: (e.error || "") || (e.group + " · " + fbytes(e.size)
-        + (BFRESH && e.group === "plugins"
-           ? " · re-downloads on next Claude Code start" : "")) })));
+      text: (e.error || "") || ([e.unit_desc || e.group, fbytes(e.size),
+        e.group === "plugins" ? PLUGIN_REFETCH : ""]
+        .filter(Boolean).join(" · ")) })));
   row.append(badge(label, variant));
 
   const actions = el("div.dactions", {});
@@ -3274,11 +3350,14 @@ async function applyRestore() {
   const rows = BREPORT.entries.filter((e) => BREPORT.picked.has(e.path));
   const over = rows.filter((e) => e.status === "differs").length;
   const mcp = rows.some((e) => e.group === "mcp");
+  const plug = rows.some((e) => e.group === "plugins");
   const ok = await mconfirm("Restore " + plural(paths.length, "file") + "?",
     (over ? plural(over, "file") + " on disk will be overwritten with the backup's version, and "
           + "that cannot be undone from here. " : "")
     + (mcp ? "MCP servers are merged into ~/.claude.json one at a time; the rest of that "
            + "file is left alone. " : "")
+    + (plug ? "The plugin list only names your plugins — Claude Code downloads "
+            + "them again the next time it starts. " : "")
     + "Nothing is deleted.",
     over ? "Overwrite and restore" : "Restore");
   if (!ok) return;
@@ -3288,7 +3367,8 @@ async function applyRestore() {
       toast(r.count + " restored, " + r.failed_count + " failed: " + r.failed[0].error, true);
     else
       toast(plural(r.count, "file") + " restored"
-        + (BFRESH ? " — fresh start complete" : ""));
+        + (BFRESH ? " — fresh start complete" : "")
+        + (plug ? " · " + PLUGIN_REFETCH : ""));
     BREPORT = null;
     BFRESH = null;
     await refresh();          // items, settings and MCP all just changed

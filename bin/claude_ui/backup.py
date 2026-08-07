@@ -462,7 +462,11 @@ def backup_create(picks, note="", units=None):
                     continue    # vanished mid-run; the manifest just won't list it
                 manifest["entries"].append({
                     "path": e["path"], "group": e["group"], "size": len(data),
-                    "mode": e["mode"], "sha256": _sha(data)})
+                    "mode": e["mode"], "sha256": _sha(data),
+                    # the unit rides along so restore can offer "the pdf skill"
+                    # as one tick, the same row the create pick list showed
+                    "unit": e["unit"], "unit_label": e["unit_label"],
+                    "unit_desc": e["unit_desc"]})
                 z.writestr(e["path"], data)
                 written += len(data)
             z.writestr("manifest.json", json.dumps(manifest, indent=2) + "\n")
@@ -610,7 +614,12 @@ def backup_inspect(name):
         for e in m["entries"]:
             member = e.get("path") or ""
             row = {"path": member, "group": e.get("group", ""),
-                   "size": int(e.get("size") or 0)}
+                   "size": int(e.get("size") or 0),
+                   # empty on archives from before units were recorded — the
+                   # UI then falls back to one row per file
+                   "unit": e.get("unit") or "",
+                   "unit_label": e.get("unit_label") or "",
+                   "unit_desc": e.get("unit_desc") or ""}
             if member not in names:
                 rows.append({**row, "status": "missing",
                              "error": "listed in the manifest but not in the zip"})
