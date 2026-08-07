@@ -203,6 +203,10 @@ main {
   flex-wrap: wrap;
   flex: none;
 }
+/* Setup rows exist to say exactly what a piece does to your config — the one
+   list where .li-desc's two-line clamp hides the point. Unclamp the view;
+   display:block alone disables the clamp, which needs -webkit-box. */
+#setupview .li-desc { display: block; }
 .piece-notes { flex: 1 1 100%; min-width: 0; }
 .piece-notes > summary {
   cursor: pointer;
@@ -211,7 +215,7 @@ main {
   width: fit-content;
 }
 .piece-notes > summary:hover { color: var(--foreground); }
-.piece-notes > .li-desc { -webkit-line-clamp: 3; padding: 0.125rem 0 0 0.875rem; }
+.piece-notes > .li-desc { padding: 0.125rem 0 0 0.875rem; }
 /* the overflow "…" is the only thing that hides until the row is touched;
    Edit/Disable stay at full strength, since a dimmed button reads as disabled */
 @media (hover: hover) and (min-width: 720px) {
