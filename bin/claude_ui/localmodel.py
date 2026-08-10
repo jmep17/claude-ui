@@ -41,11 +41,15 @@ LOCAL_BEGIN = "# >>> claude-ui local model >>>"
 LOCAL_END = "# <<< claude-ui local model <<<"
 
 # Values are spliced into a shell script inside single quotes; these charsets
-# are the injection guard. `'`, whitespace, `$`, backticks are all refused, so
-# quoting can never be escaped. HF-style model ids (unsloth/Qwen3-14B-MLX-4bit)
-# and localhost URLs fit comfortably.
+# are the injection guard. URLs and model ids are conservative — `'`,
+# whitespace, `$`, backticks are all refused, so quoting can never be escaped;
+# HF-style ids (unsloth/Qwen3-14B-MLX-4bit) fit comfortably. An API key is
+# whatever the server generated, so it allows any printable ASCII except `'`
+# (the one character that escapes single quotes) — control characters are also
+# out, which keeps it header-safe for the probe's Authorization line.
 _URL_RE = re.compile(r"^https?://[A-Za-z0-9._:/@%+-]+$")
 _VAL_RE = re.compile(r"^[A-Za-z0-9._/:@=+-]*$")
+_KEY_RE = re.compile(r"^[ -&(-~]*$")  # printable ASCII minus the single quote
 
 
 # ---- config, in machine-local .claude-ui.json ----
@@ -62,8 +66,9 @@ def local_config_set(base_url, model, api_key):
         raise ValueError("base URL must be http(s)://… with no spaces or quotes")
     if not _VAL_RE.match(model):
         raise ValueError("model id contains characters we won't put in a shell script")
-    if not _VAL_RE.match(api_key):
-        raise ValueError("API key contains characters we won't put in a shell script")
+    if not _KEY_RE.match(api_key):
+        raise ValueError("API key contains a quote or control character "
+                         "we won't put in a shell script")
     cfg = read_cfg()
     old_model = (cfg.get("local_model") or {}).get("model", "")
     cfg["local_model"] = {"base_url": base_url, "model": model, "api_key": api_key}

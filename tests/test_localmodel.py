@@ -105,12 +105,23 @@ class Injection(Base):
     """Config values land inside single quotes in a shell script; anything
     that could escape them is refused at save time."""
 
-    def test_rejects_shell_metacharacters(self):
+    def test_model_rejects_shell_metacharacters(self):
         for bad in ("a'b", "a b", "a$(x)", "a`x`", 'a"b', "a\nb", "a;b"):
             with self.assertRaises(ValueError, msg=bad):
                 localmodel.local_config_set("", bad, "")
+
+    def test_api_key_rejects_only_quote_and_control_chars(self):
+        # a key is server-generated: any printable ASCII except the one
+        # character that escapes single quotes must round-trip
+        for bad in ("a'b", "a\nb", "a\tb", "a\x00b", "café"):
             with self.assertRaises(ValueError, msg=bad):
                 localmodel.local_config_set("", "m", bad)
+        odd = 'sk!#$%^&*(){}[]|;<>?,"\\ key'
+        localmodel.local_config_set("", "m", odd)
+        self.assertEqual(localmodel.local_cfg()["api_key"], odd)
+        # and it lands in the wrapper still inside intact single quotes
+        self.assertIn(f"ANTHROPIC_AUTH_TOKEN='{odd}'",
+                      localmodel.local_wrapper_text())
 
     def test_rejects_bad_urls(self):
         for bad in ("ftp://x", "localhost:8000", "http://a b", "http://a'b"):
