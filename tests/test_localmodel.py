@@ -22,7 +22,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "bin"))
 
-from claude_ui import core, localmodel, projects  # noqa: E402
+from claude_ui import core, localmodel, projects, settings  # noqa: E402
 
 
 class Base(unittest.TestCase):
@@ -39,6 +39,11 @@ class Base(unittest.TestCase):
         core.config_dir = lambda: self.cfg
         self._lm_config_dir = localmodel.config_dir
         localmodel.config_dir = core.config_dir
+        # localmodel writes the picker env pair through settings_set_many,
+        # which resolves the settings.json path via its own binding — patched
+        # so apply can never touch the developer's real ~/.claude
+        self._s_config_dir = settings.config_dir
+        settings.config_dir = core.config_dir
         self._cfg_file = core.CONFIG_FILE
         core.CONFIG_FILE = base / "claude-ui.json"
         self._zdot = os.environ.get("ZDOTDIR")
@@ -47,6 +52,7 @@ class Base(unittest.TestCase):
     def tearDown(self):
         core.config_dir = self._config_dir
         localmodel.config_dir = self._lm_config_dir
+        settings.config_dir = self._s_config_dir
         core.CONFIG_FILE = self._cfg_file
         if self._zdot is None:
             os.environ.pop("ZDOTDIR", None)
@@ -271,6 +277,63 @@ class Pricing(Base):
         core.write_cfg(cfg)
         localmodel.local_remove()
         self.assertEqual(self.pricing()["unsloth/Qwen3-14B-MLX-4bit"], [1, 2])
+
+
+class PickerEntry(Base):
+    """The one settings.json write: the additive /model picker env pair."""
+
+    MODEL = "unsloth/Qwen3-14B-MLX-4bit"
+
+    def sjson(self):
+        p = self.cfg / "settings.json"
+        return json.loads(p.read_text()) if p.is_file() else {}
+
+    def test_apply_writes_the_env_pair(self):
+        self.configure()
+        localmodel.local_apply()
+        env = self.sjson()["env"]
+        self.assertEqual(env["ANTHROPIC_CUSTOM_MODEL_OPTION"], self.MODEL)
+        self.assertEqual(env["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"],
+                         localmodel.PICKER_DESC)
+
+    def test_apply_patches_never_replaces(self):
+        (self.cfg / "settings.json").write_text(
+            '{"theme": "dark", "env": {"FOO": "bar"}}')
+        self.configure()
+        localmodel.local_apply()
+        data = self.sjson()
+        self.assertEqual(data["theme"], "dark")
+        self.assertEqual(data["env"]["FOO"], "bar")
+
+    def test_remove_drops_only_our_values_and_prunes(self):
+        self.configure()
+        localmodel.local_apply()
+        localmodel.local_remove()
+        self.assertNotIn("env", self.sjson())
+        # a repointed entry is the user's and survives
+        localmodel.local_apply()
+        settings.settings_set("env.ANTHROPIC_CUSTOM_MODEL_OPTION", "other")
+        localmodel.local_remove()
+        self.assertEqual(self.sjson()["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION"],
+                         "other")
+        # the description we still owned is gone
+        self.assertNotIn("ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+                         self.sjson()["env"])
+
+    def test_model_change_moves_the_entry_when_installed(self):
+        self.configure()
+        localmodel.local_apply()
+        self.configure(model="mlx-community/other-model-4bit")
+        self.assertEqual(self.sjson()["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION"],
+                         "mlx-community/other-model-4bit")
+        st = localmodel.local_state()
+        self.assertTrue(st["installed"])
+
+    def test_missing_entry_reads_as_not_installed(self):
+        self.configure()
+        localmodel.local_apply()
+        settings.settings_set("env.ANTHROPIC_CUSTOM_MODEL_OPTION", None)
+        self.assertFalse(localmodel.local_state()["installed"])
 
 
 class Suggestions(Base):

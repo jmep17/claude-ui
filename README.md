@@ -66,9 +66,11 @@ owns, links, tracks, or syncs anything:
   command running Claude Code against a local [oMLX](https://github.com/jundot/omlx)
   server (Anthropic-compatible, so no proxy). A generated `claude-local.sh`
   exports `ANTHROPIC_BASE_URL` and the model names and execs `claude`; plain
-  `claude` and `settings.json` are never touched. The model picker lists what
-  the server actually serves (`GET /v1/models`), and applying adds a `$0`
-  pricing override so local sessions stay visible on the Costs tab.
+  `claude` stays on the Anthropic API. The model picker lists what the server
+  actually serves (`GET /v1/models`). Applying also adds the model to every
+  session's `/model` picker via `env.ANTHROPIC_CUSTOM_MODEL_OPTION` in
+  `settings.json` (additive — nothing is restricted) and a `$0` pricing
+  override so local sessions stay visible on the Costs tab.
 - **Doctor** for machine health: broken symlinks, leftover backups, hooks or
   statusline entries pointing at missing executables, and more.
 - **Backup** — a zip of the parts of your config that took work to build, kept

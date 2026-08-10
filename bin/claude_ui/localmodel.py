@@ -13,6 +13,14 @@ like the config-dir and pricing overrides: a local inference server is a
 property of this machine, not of the Claude config dir. State is derived by
 inspection, per the setup-piece contract.
 
+Applying touches settings.json in exactly one way: it sets
+env.ANTHROPIC_CUSTOM_MODEL_OPTION (plus its description), the documented
+*additive* /model picker entry — so the local model is selectable in every
+session, plain claude included. availableModels was considered and rejected:
+it is a restriction allowlist, and writing it would block every model not
+listed. Picking the local model in a plain session still needs the base URL
+to point somewhere that serves it; inside claude-local that's automatic.
+
 Applying also adds a `pricing` override of [0, 0] for the chosen model id, the
 documented opt-in that keeps local sessions visible on the Costs tab instead
 of being dropped as unpriceable (insight._excluded). The statusline's cost
@@ -28,8 +36,10 @@ import subprocess
 import urllib.error
 import urllib.request
 
-from .core import atomic_write, config_dir, read_cfg, tilde, write_cfg
+from .core import (_read_json_object, atomic_write, config_dir, read_cfg,
+                   tilde, write_cfg)
 from .projects import _write_rc, _zshrc_without_block, zshrc_path
+from .settings import settings_set_many
 
 
 DEFAULT_BASE_URL = "http://localhost:8000"
@@ -78,6 +88,9 @@ def local_config_set(base_url, model, api_key):
     # keep an installed wrapper in sync — script and config must never drift
     if model and local_wrapper_state() in ("current", "stale"):
         local_wrapper_write()
+        # ... and the settings.json picker entry follows the model with it
+        if old_model != model and _settings_env().get(ENV_OPTION) == old_model:
+            settings_set_many([("env." + ENV_OPTION, model)])
 
 
 # ---- the wrapper script ----
@@ -162,6 +175,34 @@ def local_zshrc_block():
             f"{LOCAL_END}\n")
 
 
+# ---- the settings.json picker entry: the one write into Claude's config ----
+
+ENV_OPTION = "ANTHROPIC_CUSTOM_MODEL_OPTION"
+ENV_DESC = "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"
+PICKER_DESC = "local model via oMLX (claude-ui)"
+
+def _settings_env():
+    data, _ = _read_json_object(config_dir() / "settings.json")
+    env = data.get("env")
+    return env if isinstance(env, dict) else {}
+
+def _picker_add(model):
+    settings_set_many([("env." + ENV_OPTION, model),
+                       ("env." + ENV_DESC, PICKER_DESC)])
+
+def _picker_drop(model):
+    """Unset our env keys, each only while still holding our value — a
+    repointed entry is the user's."""
+    env = _settings_env()
+    pairs = []
+    if env.get(ENV_OPTION) == model:
+        pairs.append(("env." + ENV_OPTION, None))
+    if env.get(ENV_DESC) == PICKER_DESC:
+        pairs.append(("env." + ENV_DESC, None))
+    if pairs:
+        settings_set_many(pairs)
+
+
 # ---- pricing override: local tokens are real, their price is $0 ----
 
 def _pricing_add(cfg, model):
@@ -198,10 +239,12 @@ def local_state():
         rc_text = ""
     sourced = LOCAL_BEGIN in rc_text
     func_current = func.is_file() and func.read_text(errors="replace") == local_zsh_text()
-    installed = wrapper == "current" and sourced and func_current
+    picker = bool(c.get("model")) and _settings_env().get(ENV_OPTION) == c.get("model")
+    installed = wrapper == "current" and sourced and func_current and picker
     if installed:
         detail = (f"claude-local runs {c.get('model')} at "
-                  f"{c.get('base_url') or DEFAULT_BASE_URL} — new zsh shells only")
+                  f"{c.get('base_url') or DEFAULT_BASE_URL} — new zsh shells only; "
+                  "also in every session's /model picker")
     elif wrapper == "foreign":
         detail = f"{tilde(_wrapper_path())} exists but isn't ours — move it aside first"
     elif wrapper in ("stale", "not-executable"):
@@ -215,15 +258,19 @@ def local_state():
     return {"id": "local-model", "label": "Local model: claude-local (oMLX)",
             "desc": "An opt-in `claude-local` command that runs Claude Code "
                     "against a local oMLX server (Anthropic-compatible, no "
-                    "proxy). Plain `claude` keeps using the Anthropic API; "
-                    "settings.json is never touched.",
+                    "proxy). Plain `claude` keeps using the Anthropic API; the "
+                    "model is also added to every session's /model picker via "
+                    "one env pair in settings.json.",
             "installed": installed, "detail": detail,
             "target": tilde(_wrapper_path()),
             "removable": wrapper in ("current", "stale", "not-executable")
-                         or sourced or func.is_file(),
+                         or sourced or func.is_file() or picker,
             "notes": [f"{tilde(_wrapper_path())} — env exports + exec claude",
                       f"{tilde(func)} — the claude-local() function",
                       f"{tilde(rc)} — one marker block sourcing it",
+                      f"settings.json env.{ENV_OPTION} = "
+                      f"{c.get('model') or '<model>'} — adds it to the /model "
+                      "picker in every session (additive; nothing is blocked)",
                       f".claude-ui.json pricing[{c.get('model') or '<model>'}]"
                       " = [0, 0] so local sessions show on the Costs tab"],
             "config": {"base_url": c.get("base_url", ""),
@@ -252,6 +299,7 @@ def local_apply():
     new += ("\n" if new else "") + local_zshrc_block()
     if new != text:
         _write_rc(rc, new)
+    _picker_add(model)
     _pricing_add(cfg, model)
     write_cfg(cfg)
 
@@ -268,6 +316,7 @@ def local_remove():
     cfg = read_cfg()
     model = (cfg.get("local_model") or {}).get("model", "")
     if model:
+        _picker_drop(model)
         _pricing_drop(cfg, model)
     # the local_model config itself stays — it is user input; re-apply restores
     write_cfg(cfg)
