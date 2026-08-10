@@ -51,7 +51,7 @@
   --shadow-xl: 0 20px 25px -5px var(--shadow-color), 0 8px 10px -6px var(--shadow-color);
 
   /* ---- layout ---- */
-  --page: 1080px;
+  --page: 1280px;
   --header-h: 3.25rem;
 }
 

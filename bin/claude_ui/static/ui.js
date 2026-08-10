@@ -694,16 +694,33 @@ function checklist({ groups = [], hint }) {
 
 const FSEL_MIN = 6;
 
+/* Subsequence match, scored so the ranking is useful on the underscore-joined
+   names this mostly searches: continuing a run scores, and so does landing on a
+   word start, with ties broken toward the shorter name.
+
+   Every occurrence of the query's first character is tried as an anchor and the
+   best run wins. Taking the first one greedily instead would score "disablenon"
+   from the d in "claude", burying CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+   under every DISABLE_* var that happens to be shorter. */
 function fuzzy(q, s) {
   s = s.toLowerCase();
-  let score = 0, i = 0;
-  for (const ch of q) {
-    const j = s.indexOf(ch, i);
-    if (j < 0) return -1;
-    score += (j === i ? 3 : 1) + (j === 0 ? 2 : 0);
-    i = j + 1;
+  if (!q) return 0;
+  let best = -1;
+  for (let a = s.indexOf(q[0]); a >= 0; a = s.indexOf(q[0], a + 1)) {
+    let score = 0, i = a, run = false, ok = true;
+    for (const ch of q) {
+      const j = s.indexOf(ch, i);
+      if (j < 0) { ok = false; break; }
+      // the anchor itself has no run behind it, so it only scores if the name
+      // really does start a word there
+      const start = (run && j === i) || j === 0 || "_-./: ".includes(s[j - 1]);
+      score += (start ? 3 : 1) + (j === 0 ? 2 : 0);
+      i = j + 1;
+      run = true;
+    }
+    if (ok && score > best) best = score;
   }
-  return score - s.length / 100;
+  return best < 0 ? -1 : best - s.length / 100;
 }
 
 /* The popup itself: items are {value, text}, value() reports what is currently
@@ -723,6 +740,9 @@ function filterPopup(wrap, { items, value, own, onPick }) {
       list.append(el("div.fselempty", { text: "No matches" }));
       return;
     }
+    // Without a cursor to follow, reveal whatever is already set instead:
+    // opening 341 env vars scrolled to the top hides the one row that matters.
+    const show = cur >= 0 ? cur : hits.findIndex((o) => o.value === value());
     hits.forEach((o, i) => {
       const row = el("div.fselrow", {
         role: "option",
@@ -732,14 +752,31 @@ function filterPopup(wrap, { items, value, own, onPick }) {
         onmousedown: (e) => { e.preventDefault(); onPick(o); },
       });
       list.append(row);
-      if (i === cur) setTimeout(() => row.scrollIntoView({ block: "nearest" }));
+      if (i !== show) return;
+      // scrollIntoView() walks every scrollable ancestor, so centring the set
+      // row that way would scroll the settings page under the popup too. The
+      // cursor only needs to clear an edge, which "nearest" already does
+      // without moving the page.
+      if (cur >= 0) setTimeout(() => row.scrollIntoView({ block: "nearest" }));
+      else setTimeout(() => {
+        list.scrollTop = row.offsetTop - list.offsetTop
+          - (list.clientHeight - row.offsetHeight) / 2;
+      });
     });
   };
 
   const ctl = {
     filter(s) {
       s = s.trim().toLowerCase();
-      hits = s ? items.filter((o) => fuzzy(s, o.text + " " + o.value) >= 0) : items;
+      // fuzzy() already ranks; sorting by it puts the name you half-remembered
+      // above the ones that merely contain those letters in that order. The
+      // unfiltered list keeps its own (alphabetical) order.
+      hits = s
+        ? items.map((o) => ({ o, k: fuzzy(s, o.text + " " + o.value) }))
+            .filter((h) => h.k >= 0)
+            .sort((a, b) => b.k - a.k)
+            .map((h) => h.o)
+        : items;
       cur = own ? 0 : -1;
       draw();
     },

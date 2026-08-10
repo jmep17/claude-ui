@@ -423,6 +423,11 @@ function mapForm(ctrl, s, cur) {
   const ksugg = suggestFor(s.key + ":key", s.key_values);
   // env alone suggests 300-odd names — those filter in a popup, not a datalist
   const kdl = ksugg.length && ksugg.length <= FSEL_MIN ? datalist(ksugg) : null;
+  // Size the key column to the names this setting actually suggests: env's run
+  // to 53 characters, an MCP server timeout's are short. Clamped so one outlier
+  // cannot eat the value field, and settings with no suggestions keep 14ch.
+  box.style.setProperty("--kk-ch",
+    Math.min(56, Math.max(14, ...ksugg.map((v) => String(v).length))));
   if (kdl) ctrl.append(kdl);
   const addRow = (k, v) => {
     const kin = el("input.kk.mono", { type: "text", placeholder: "key", value: k || "" });
