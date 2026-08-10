@@ -273,6 +273,22 @@ class Pricing(Base):
         self.assertEqual(self.pricing()["unsloth/Qwen3-14B-MLX-4bit"], [1, 2])
 
 
+class Suggestions(Base):
+
+    def test_saved_model_feeds_the_settings_model_pickers(self):
+        from claude_ui import settings
+        self.configure()
+        sugg = settings.suggest_state()
+        for key in settings.MODEL_VALUED_KEYS:
+            self.assertIn("unsloth/Qwen3-14B-MLX-4bit", sugg[key], key)
+
+    def test_no_saved_model_suggests_nothing_extra(self):
+        from claude_ui import settings
+        sugg = settings.suggest_state()
+        for vals in sugg.values():
+            self.assertNotIn("unsloth/Qwen3-14B-MLX-4bit", vals)
+
+
 class _Resp:
     def __init__(self, body):
         self.body = body

@@ -9,7 +9,7 @@ import threading
 import urllib.request
 
 from . import schema
-from .core import atomic_write, config_dir, tilde
+from .core import atomic_write, config_dir, read_cfg, tilde
 
 
 # User-scope settings.json keys. The entries below are hand-written and carry
@@ -703,6 +703,14 @@ def suggest_state():
     out = dict(_local_suggest())
     for key, vals in _docs_values.items():
         out[key] = list(dict.fromkeys(out.get(key, []) + vals))
+    # a configured local model (Setup tab's local-model piece) belongs in the
+    # model pickers too — read live, not cached, so saving one shows up on the
+    # next state fetch
+    local = read_cfg().get("local_model")
+    lm = local.get("model") if isinstance(local, dict) else None
+    if lm:
+        for key in MODEL_VALUED_KEYS:
+            out[key] = list(dict.fromkeys(out.get(key, []) + [lm]))
     return out
 
 @functools.lru_cache(maxsize=1)
