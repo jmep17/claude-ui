@@ -71,7 +71,7 @@ def _dir_item(entry, enabled):
         "incomplete": not broken and not skill_md.is_file(),
         "description": ("(broken symlink: " + str(entry.readlink()) + ")")
                        if broken else meta.get("description", ""),
-        "path": tilde(entry), "mtime": mtime,
+        "path": tilde(entry), "mtime": mtime, "chars": len(text),
         "todo": "TODO" in text,
         "todo_line": _todo_line(text),
         # the plugin this was split out of, if any — the frontmatter is already
@@ -118,7 +118,7 @@ def _scan_md_type(root, enabled):
             "symlink": p.is_symlink(), "broken": broken, "incomplete": False,
             "description": ("(broken symlink: " + str(p.readlink()) + ")")
                            if broken else meta.get("description", ""),
-            "path": tilde(p), "mtime": mtime,
+            "path": tilde(p), "mtime": mtime, "chars": len(text),
             "todo": "TODO" in text,
             "todo_line": _todo_line(text),
             "source": meta.get(SOURCE_KEY) or "",

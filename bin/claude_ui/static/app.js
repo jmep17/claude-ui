@@ -12,7 +12,7 @@ let DATA = { items: {}, config_files: [], config_dir: "", settings: {}, mcp: {},
 const ITEM_TABS = ["skills", "commands", "agents", "output-styles"];
 // the types core.ITEM_TYPES calls kind "dir": a folder of files, not one file
 const DIR_TYPES = new Set(["skills"]);
-const TABS = [...ITEM_TABS, "mcp", "statusline", "projects", "setup", "settings", "insight", "costs", "doctor", "plugins", "backup"];
+const TABS = [...ITEM_TABS, "mcp", "statusline", "projects", "setup", "settings", "insight", "context", "costs", "doctor", "plugins", "backup"];
 
 const TAB_META = {
   "skills": { icon: "sparkles", label: "Skills" },
@@ -25,6 +25,7 @@ const TAB_META = {
   "setup": { icon: "wrench", label: "Setup" },
   "settings": { icon: "settings", label: "Settings" },
   "insight": { icon: "chart", label: "Insight" },
+  "context": { icon: "layers", label: "Context" },
   "costs": { icon: "dollar", label: "Costs" },
   "doctor": { icon: "pulse", label: "Doctor" },
   "plugins": { icon: "plug", label: "Plugins" },
@@ -232,6 +233,8 @@ function tabBadge(t) {
   if (t === "settings") return String(Object.keys((DATA.settings || {}).data || {}).length);
   if (t === "mcp") return String(((DATA.mcp || {}).servers || []).filter((s) => s.enabled).length);
   if (t === "doctor" && DOCTOR && DOCTOR.warns) return String(DOCTOR.warns);
+  if (t === "context" && CONTEXT)
+    return String(CONTEXT.pointers.filter((f) => f.level === "warn").length);
   if (t === "plugins" && PLUGINS)
     return String(PLUGINS.plugins.filter((p) => p.enabled).length);
   if (t === "projects" && PROJECTS) return String(PROJECTS.projects.length);
@@ -262,7 +265,8 @@ function renderTabs() {
 
     const count = tabBadge(t);
     if (count && count !== "0")
-      b.append(el("span.tab-count", { class: t === "doctor" ? "warn" : "", text: count }));
+      b.append(el("span.tab-count", {
+        class: t === "doctor" || t === "context" ? "warn" : "", text: count }));
     if (t === "statusline" && (DATA.statusline || {}).applied)
       b.append(el("span.tab-dot.ok", { title: "statusLine is set in settings.json" }));
     nav.append(b);
@@ -3063,7 +3067,8 @@ let INSIGHT = null;
 let DOCTOR = null;
 
 const BUDGET_COLORS = { "CLAUDE.md": "var(--chart-1)", skills: "var(--chart-2)",
-  commands: "var(--chart-3)", agents: "var(--chart-4)", "output-styles": "var(--chart-5)" };
+  commands: "var(--chart-3)", agents: "var(--chart-4)", "output-styles": "var(--chart-5)",
+  plugins: "var(--chart-1)", memory: "var(--chart-3)" };
 const USAGE_KIND = { skills: "skill", commands: "command", agents: "agent" };
 
 function tokfmt(n) {
@@ -3113,19 +3118,21 @@ async function renderInsight(rescan) {
     }
     if (TAB !== "insight") return;
   }
-  const b = INSIGHT.budget, u = INSIGHT.usage;
+  const u = INSIGHT.usage;
   view.innerHTML = "";
   view.append(el("div.view-head", {
-    html: "What your config costs at the start of <i>every</i> session (chars÷4 estimate — CLAUDE.md "
-      + "is injected wholesale, each active item contributes its name + description), and what "
-      + "actually gets used (session transcripts in <b>" + esc(u.dir) + "</b>, parsed locally).",
+    html: "What actually gets used: skills, commands, agents and Bash prefixes counted "
+      + "from the session transcripts in <b>" + esc(u.dir) + "</b>, parsed locally. "
+      + "What all of it costs in context lives in the Context tab.",
   }));
 
+  // what the transcripts never mention, from the same inventory the item tabs show
   const used = u.by || {};
   const now = Date.now();
   const unused = [];
   for (const [t, kind] of Object.entries(USAGE_KIND)) {
-    for (const s of ((b.types[t] || {}).items) || []) {
+    for (const s of ((DATA.items || {})[t] || [])) {
+      if (!s.enabled || s.broken) continue;
       const rec = (used[kind] || {})[s.name];
       const last = rec && rec.last ? Date.parse(rec.last) : 0;
       if (!last || now - last > 90 * 86400000)
@@ -3133,41 +3140,12 @@ async function renderInsight(rescan) {
     }
   }
 
-  const stats = el("div.stat-grid", { style: { marginBottom: "1.25rem" } },
-    statCard(tokfmt(b.total), "tokens every session", { accent: true }),
-    statCard(tokfmt(b.claude_md), "CLAUDE.md"),
-    statCard(tokfmt((b.types.skills || {}).tokens || 0), "skill descriptions"));
-  if (u.available) stats.append(statCard(String(u.sessions), "sessions scanned"));
-  if (u.available && u.sessions) stats.append(statCard(String(unused.length), "unused 90d+"));
-  view.append(stats);
-  view.append(el("div.toolbar", {},
-    openFileBtn(cfgPath("CLAUDE.md"), "Edit CLAUDE.md", null,
-      "The single biggest fixed cost above — open it")));
-
-  const segs = [["CLAUDE.md", b.claude_md],
-    ...Object.entries(b.types).map(([t, v]) => [t, v.tokens])];
-  const bar = el("div.budgetbar");
-  const key = el("div.budgetkey");
-  for (const [name, tok] of segs) {
-    if (!tok) continue;
-    const color = BUDGET_COLORS[name] || "var(--muted-foreground)";
-    bar.append(el("div", { style: { flex: String(tok), background: color },
-      title: name + ": ~" + tokfmt(tok) + " tokens" }));
-    key.append(el("span", {},
-      el("span.sw", { style: { background: color } }),
-      el("span", { text: name + " ~" + tokfmt(tok) })));
+  if (u.available) {
+    const stats = el("div.stat-grid", { style: { marginBottom: "1.25rem" } },
+      statCard(String(u.sessions), "sessions scanned", { accent: true }));
+    if (u.sessions) stats.append(statCard(String(unused.length), "unused 90d+"));
+    view.append(stats);
   }
-  view.append(bar, key);
-
-  const consumers = Object.entries(b.types)
-    .flatMap(([t, v]) => v.items.map((it) => ({ type: t, ...it })))
-    .sort((a, b2) => b2.tokens - a.tokens)
-    .slice(0, 12);
-  view.append(sectionTitle("Top context consumers"));
-  view.append(dataTable(["Item", "Type", "~tokens"],
-    consumers.map((c) =>
-      `<td class="mono">${esc(c.name)}</td><td class="dim">${esc(c.type)}</td>`
-      + `<td class="num">${tokfmt(c.tokens)}</td>`)));
 
   if (u.available && u.sessions) {
     const rows = [];
@@ -3241,6 +3219,235 @@ async function renderInsight(rescan) {
   const rb = mkbtn("btn-sm", "Rescan transcripts", () => renderInsight(true),
     "Drop the cache and re-read every transcript"
     + (u.scanned_now ? " (last run read " + u.scanned_now + " new file(s))" : ""));
+  rb.prepend(icon("refresh"));
+  view.append(el("div.toolbar", {}, rb));
+}
+
+// ----------------------------------------------------------------- context
+
+let CONTEXT = null;
+
+function median(nums) {
+  if (!nums.length) return 0;
+  const s = [...nums].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+}
+
+/* One scope's stacked bar: CLAUDE.md (+imports), each item listing, memory. */
+function ctxBudgetBar(sc) {
+  const segs = [["CLAUDE.md", sc.claude_md.reduce((n, m) => n + m.total_tok, 0)],
+    ...Object.entries(sc.types).map(([t, v]) => [t, v.listing_tok])];
+  if (sc.memory) segs.push(["memory", sc.memory.memory_tok]);
+  const bar = el("div.budgetbar");
+  const key = el("div.budgetkey");
+  for (const [name, tok] of segs) {
+    if (!tok) continue;
+    const color = BUDGET_COLORS[name] || "var(--muted-foreground)";
+    bar.append(el("div", { style: { flex: String(tok), background: color },
+      title: name + ": ~" + tokfmt(tok) + " tokens" }));
+    key.append(el("span", {},
+      el("span.sw", { style: { background: color } }),
+      el("span", { text: name + " ~" + tokfmt(tok) })));
+  }
+  return bar.childElementCount ? [bar, key] : [];
+}
+
+function ctxScopeCard(sc) {
+  const card = el("div.card", { style: { marginBottom: "1.25rem" } });
+  card.append(el("div.card-header", {},
+    el("div", {},
+      el("div.card-title", {
+        text: (sc.scope === "user" ? "Every session — " : "Project — ") + sc.tilde }),
+      el("div.card-description", {
+        text: "~" + tokfmt(sc.est_tok) + " tokens loaded at session start"
+          + (sc.scope === "user" ? " in every project"
+             : ", on top of the user scope") }))));
+  const body = el("div.card-content");
+  add(body, ctxBudgetBar(sc));
+  const rows = el("div.list", { style: { marginTop: ".5rem" } });
+
+  for (const md of sc.claude_md) {
+    if (!md.exists && sc.scope !== "user") continue;
+    const chips = md.imports.map((imp) => badge(
+      imp.ref + (imp.resolved ? " ~" + tokfmt(imp.tok) : " missing"),
+      imp.resolved ? "outline" : "destructive"));
+    rows.append(el("div.drow", {},
+      icon("file"),
+      el("span.dmsg.dmono", { text: md.tilde }),
+      md.exists ? badge("~" + tokfmt(md.total_tok), "secondary")
+                : badge("not present", "outline"),
+      ...chips,
+      el("div.dactions", {},
+        md.exists ? openFileBtn(md.path, "Edit") : null)));
+  }
+
+  if (sc.memory) {
+    const mem = sc.memory;
+    rows.append(el("div.drow", {},
+      icon("book"),
+      el("span.dmsg", { text: "auto-memory MEMORY.md — plus "
+        + plural(mem.topics.length, "topic file") + " ("
+        + tokfmt(mem.topics_chars) + " chars) loaded on demand" }),
+      badge("~" + tokfmt(mem.memory_tok), "secondary"),
+      el("div.dactions", {}, openFileBtn(mem.dir + "/MEMORY.md", "Edit"))));
+  }
+
+  if (sc.mcp.count) {
+    const enabled = sc.mcp.servers.filter((s) => s.enabled !== false
+      && s.approval !== "rejected");
+    rows.append(el("div.drow", {},
+      icon("server"),
+      el("span.dmsg", { text: plural(sc.mcp.count, "MCP server")
+        + (enabled.length !== sc.mcp.count ? " (" + enabled.length + " active)" : "") }),
+      el("div.dactions", {}, infoTrigger("MCP context cost", () =>
+        el("div", { style: { padding: ".75rem", maxWidth: "22rem" } },
+          el("div", { style: { marginBottom: ".5rem" },
+            text: "Each connected server injects its tool schemas at session "
+              + "start. Their size can't be measured without connecting, so "
+              + "no token number is shown — but every enabled server adds "
+              + "real context in every session that loads it." }),
+          el("div.dim.mono", { style: { fontSize: ".75rem" },
+            text: sc.mcp.servers.map((s) => s.name).join(", ") }))))));
+  }
+  if (rows.childElementCount) body.append(rows);
+
+  const consumers = Object.entries(sc.types)
+    .flatMap(([t, v]) => v.items.map((it) => ({ type: t, ...it })))
+    .filter((it) => it.listing_tok > 0)
+    .sort((a, b) => b.listing_tok - a.listing_tok)
+    .slice(0, 8);
+  if (consumers.length) {
+    body.append(dataTable(["Item", "Type", "~listing", "File"],
+      consumers.map((c) =>
+        `<td class="mono">${esc(c.name)}</td><td class="dim">${esc(c.type)}</td>`
+        + `<td class="num">${tokfmt(c.listing_tok)}</td>`
+        + `<td class="num dim">${c.file_chars ? tokfmt(c.file_chars) + " chars" : ""}</td>`)));
+  }
+  card.append(body);
+  return card;
+}
+
+function ctxMeasuredTable(m) {
+  const t = el("table.table");
+  t.append(el("thead", {}, el("tr", {},
+    ...["Project", "Sessions", "Starts at", "Peak seen", "Cache reads", "Spend"]
+      .map((h) => el("th", { text: h })))));
+  const body = el("tbody");
+  const shown = m.projects.slice(0, 20);
+  for (const p of shown) {
+    const sess = m.sessions[p.cwd] || [];
+    const tr = el("tr", { style: sess.length ? { cursor: "pointer" } : {},
+      title: sess.length ? "Click for recent sessions ("
+        + tokfmt(p.base_min) + "–" + tokfmt(p.base_max) + " start range)" : "" });
+    add(tr, [
+      el("td.mono", {}, el("span", { text: p.tilde }),
+        p.registered ? null : badge("unregistered", "outline")),
+      el("td.num", { text: String(p.sessions)
+        + (p.subagents ? " +" + p.subagents + " sub" : "") }),
+      el("td.num", { text: "~" + tokfmt(p.base_med) }),
+      el("td.num.dim", { text: tokfmt(p.peak_max) }),
+      el("td.num.dim", { text: tokfmt(p.cache_read_tok) }),
+      el("td.num", { text: usd(p.cache_spend) })]);
+    if (!p.registered) tr.classList.add("dim");
+    body.append(tr);
+    if (!sess.length) continue;
+    let open = [];
+    tr.onclick = () => {
+      if (open.length) { open.forEach((r) => r.remove()); open = []; return; }
+      for (const s of sess) {
+        const sr = el("tr.dim", {});
+        add(sr, [
+          el("td.mono", { text: "  " + s.id }),
+          el("td.num", { text: plural(s.msgs, "msg") }),
+          el("td.num", { text: "~" + tokfmt(s.baseline) }),
+          el("td.num", { text: tokfmt(s.peak) }),
+          el("td.dim", { text: s.model.replace(/^claude-/, "") }),
+          el("td.dim", { text: relTime(s.last_ts) })]);
+        open.push(sr);
+      }
+      tr.after(...open);
+    };
+  }
+  t.append(body);
+  const wrap = el("div.table-wrap", { style: { marginBottom: "1.25rem" } }, t);
+  const out = [wrap];
+  if (m.projects.length > shown.length)
+    out.push(el("div.muted", { style: { marginBottom: "1rem", fontSize: ".8125rem" },
+      text: "…and " + (m.projects.length - shown.length)
+        + " more projects with smaller cache spend." }));
+  return out;
+}
+
+async function renderContext(rescan) {
+  const view = document.getElementById("contextview");
+  if (!CONTEXT || rescan) {
+    view.innerHTML = "";
+    view.append(el("div.muted", { style: { marginBottom: ".75rem", fontSize: ".8125rem" },
+      text: "Sizing your config and reading session transcripts…" }), skeletonList(5));
+    try { CONTEXT = await api("/api/context" + (rescan ? "?rescan" : "")); }
+    catch (e) {
+      view.innerHTML = "";
+      view.append(el("div.alert.alert-destructive", {},
+        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
+      return;
+    }
+    // the transcript cache is shared, so a rescan here refreshed them too
+    if (rescan) { INSIGHT = null; COSTS = null; }
+    if (TAB !== "context") return;
+  }
+  const scopes = CONTEXT.scopes, m = CONTEXT.measured, user = scopes[0];
+  view.innerHTML = "";
+  view.append(el("div.view-head", {
+    html: "Everything that loads into a session's context, and what your sessions "
+      + "measurably started with. Left numbers are chars÷4 <i>estimates</i> of your "
+      + "config; measured numbers come from the transcripts in <b>" + esc(m.dir)
+      + "</b> — a session's first API call carries the whole fixed context, and "
+      + "cache reads re-bill that context on every later call, which is why "
+      + "trimming it cuts cost.",
+  }));
+
+  const typical = median(m.projects.filter((p) => p.sessions >= 3).map((p) => p.base_med));
+  const spend = m.projects.reduce((n, p) => n + p.cache_spend, 0);
+  const stats = el("div.stat-grid", { style: { marginBottom: "1.25rem" } },
+    statCard(tokfmt(user.est_tok), "estimated: your config, every session"));
+  if (m.available && typical)
+    stats.prepend(statCard("~" + tokfmt(typical), "measured: typical session start",
+      { accent: true, hint: "median across projects with 3+ sessions" }));
+  if (m.available && m.sessions_total) {
+    stats.append(statCard(usd(spend), "cache reads, all time"),
+      statCard(String(m.sessions_total), "transcripts scanned"));
+  }
+  view.append(stats);
+
+  view.append(sectionTitle("What loads into context", scopes.length));
+  for (const sc of scopes) view.append(ctxScopeCard(sc));
+
+  if (m.available && m.projects.length) {
+    view.append(sectionTitle("Measured from transcripts", m.projects.length));
+    add(view, ctxMeasuredTable(m));
+  } else {
+    view.append(emptyState("No transcripts found",
+      "Measured context sizes appear once Claude Code has recorded sessions "
+      + "on this machine. Looked in " + m.dir + ".", "layers"));
+  }
+
+  if (CONTEXT.pointers.length) {
+    view.append(sectionTitle("Where to cut", CONTEXT.pointers.length));
+    const list = el("div.list");
+    for (const f of CONTEXT.pointers) {
+      list.append(el("div.drow", {},
+        f.level === "warn" ? badge("warn", "destructive") : badge("note", "outline"),
+        badge(f.area, "secondary"),
+        el("span.dmsg", { text: f.msg }),
+        el("div.dactions", {}, findingAction(f))));
+    }
+    view.append(list);
+  }
+
+  const rb = mkbtn("btn-sm", "Rescan transcripts", () => renderContext(true),
+    "Drop the shared transcript cache and re-read every session "
+    + "(also refreshes Insight and Costs)");
   rb.prepend(icon("refresh"));
   view.append(el("div.toolbar", {}, rb));
 }
@@ -4464,7 +4671,8 @@ function render() {
   renderHeader();
   renderTabs();
   const views = { settings: "settingsview", mcp: "mcpview", statusline: "stlview",
-    projects: "projectsview", setup: "setupview", insight: "insightview", costs: "costsview",
+    projects: "projectsview", setup: "setupview", insight: "insightview",
+    context: "contextview", costs: "costsview",
     doctor: "doctorview", plugins: "pluginsview", backup: "backupview" };
   const isEditor = !!EDITING;
   document.getElementById("editorview").hidden = !isEditor;
@@ -4483,6 +4691,7 @@ function render() {
   if (TAB === "projects") { renderProjects(); return; }
   if (TAB === "setup") { renderSetup(); return; }
   if (TAB === "insight") { renderInsight(); return; }
+  if (TAB === "context") { renderContext(); return; }
   if (TAB === "costs") { renderCosts(); return; }
   if (TAB === "doctor") { renderDoctor(); return; }
   if (TAB === "plugins") { renderPlugins(); return; }

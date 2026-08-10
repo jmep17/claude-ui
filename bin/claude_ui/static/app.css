@@ -738,6 +738,9 @@ main {
   font-size: 0.7rem;
 }
 
+/* context tab: unregistered-project and drill-down session rows read quieter */
+.table tr.dim td { color: var(--muted-foreground); }
+
 /* ==================================================================== mcp === */
 .mcppanel {
   margin-bottom: 1rem;

@@ -425,6 +425,58 @@ class Dedup(FixedZone):
         self.assertEqual((row_[5], row_[6]), (500, 0))
 
 
+class Sess(FixedZone):
+    """The per-session summary the Context tab reads: first message, peak,
+    timestamps. Cached per file, so its shape change is behind CACHE_V >= 6."""
+
+    entry = staticmethod(Dedup.entry)
+
+    def full(self, lines):
+        fd, path = tempfile.mkstemp(suffix=".jsonl")
+        os.close(fd)
+        with open(path, "w") as fh:
+            for obj in lines:
+                fh.write(json.dumps(obj) + "\n")
+        try:
+            return insight._scan_transcript(path)
+        finally:
+            os.unlink(path)
+
+    def stamped(self, ts, mid, tin=10, cw=0, cr=0):
+        e = self.entry(uuid=mid, mid=mid, request=mid, tokens=tin)
+        e["timestamp"] = ts
+        e["message"]["usage"].update({"cache_creation_input_tokens": cw,
+                                      "cache_read_input_tokens": cr})
+        return e
+
+    def test_first_message_fixes_the_baseline(self):
+        sess = self.full([
+            self.stamped("2026-07-30T10:00:00Z", "m1", tin=5, cw=30000, cr=7),
+            self.stamped("2026-07-30T10:05:00Z", "m2", tin=999, cw=90000,
+                         cr=60000)])["sess"]
+        self.assertEqual(sess["first"], [5, 30000, 7])
+        self.assertEqual(sess["max_cr"], 60000)
+        self.assertEqual(sess["first_ts"], "2026-07-30T10:00:00Z")
+        self.assertEqual(sess["last_ts"], "2026-07-30T10:05:00Z")
+        self.assertEqual(sess["model"], "claude-opus-5")
+
+    def test_streamed_partial_first_line_is_healed(self):
+        """The first message's early lines can carry partial usage; `first`
+        must read the max-merged value, not the first line's."""
+        partial = self.stamped("2026-07-30T10:00:00Z", "m1", tin=1)
+        final = self.stamped("2026-07-30T10:00:00Z", "m1", tin=1, cw=33000)
+        sess = self.full([partial, final])["sess"]
+        self.assertEqual(sess["first"], [1, 33000, 0])
+
+    def test_no_usage_means_no_session(self):
+        self.assertIsNone(self.full([{"cwd": "/x", "type": "user"}])["sess"])
+
+    def test_cache_version_covers_the_new_shape(self):
+        """`sess` joined the cached per-file data in v6; an older cache must
+        be discarded wholesale, not read with the key missing."""
+        self.assertGreaterEqual(insight.CACHE_V, 6)
+
+
 class MixedRatesInOneDay(unittest.TestCase):
     """A day can mix fast and standard requests; each part prices separately."""
 

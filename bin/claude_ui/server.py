@@ -35,7 +35,8 @@ from .settings import (hook_test, settings_schema, settings_set, settings_state,
                        start_docs_fetch, suggest_state)
 from .statusline import statusline_save, statusline_state
 from .setup import setup_apply, setup_remove, setup_state
-from .insight import cost_stats, insight_budget, usage_stats
+from .insight import cost_stats, usage_stats
+from .context import context_state
 from .assist import assist
 from .doctor import doctor
 
@@ -161,12 +162,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(400, {"error": str(e)})
         elif self.path.startswith("/api/insight"):
             rescan = "rescan" in self.path
-            self.send(200, {"budget": insight_budget(),
-                            "usage": usage_stats(rescan=rescan),
+            self.send(200, {"usage": usage_stats(rescan=rescan),
                             "allow": (settings_state()["data"]
                                       .get("permissions", {}) or {}).get("allow", [])})
         elif self.path.startswith("/api/costs"):
             self.send(200, cost_stats(rescan="rescan" in self.path))
+        elif self.path.startswith("/api/context"):
+            self.send(200, context_state(rescan="rescan" in self.path))
         elif self.path == "/api/doctor":
             self.send(200, doctor())
         elif self.path == "/api/setup":

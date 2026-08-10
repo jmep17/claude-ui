@@ -168,6 +168,30 @@ class SkillFlags(Base):
         self.assertFalse(flags["open"])
 
 
+class Chars(Base):
+    """Every scanned item reports its file size in chars — the Context tab
+    weighs items with it, so it must track the bytes actually on disk."""
+
+    def test_chars_matches_written_length(self):
+        body = "---\nname: reviewer\n---\n" + "x" * 100
+        self.write("agents/reviewer.md", body)
+        (it,) = items.scan_items("agents")
+        self.assertEqual(it["chars"], len(body))
+
+    def test_skill_counts_its_skill_md(self):
+        body = "---\ndescription: d\n---\nhow\n"
+        self.write("skills/pdf/SKILL.md", body)
+        (it,) = items.scan_items("skills")
+        self.assertEqual(it["chars"], len(body))
+
+    def test_broken_symlink_is_zero(self):
+        (self.tmp / "agents").mkdir()
+        (self.tmp / "agents" / "ghost.md").symlink_to(self.tmp / "gone.md")
+        (it,) = items.scan_items("agents")
+        self.assertTrue(it["broken"])
+        self.assertEqual(it["chars"], 0)
+
+
 class MetaName(Base):
     """Claude Code selects an output style by its frontmatter name when set,
     so scan_items must surface it alongside the filename-derived name."""

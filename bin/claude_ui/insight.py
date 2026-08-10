@@ -1,4 +1,9 @@
-"""Transcript analytics: context budget, usage, Bash prefixes, cost stats."""
+"""Transcript analytics: usage counters, Bash prefixes, cost stats.
+
+The context-budget estimate that used to live here moved to context.py, which
+sizes every scope rather than just the config dir; this module keeps the
+transcript machinery both tabs read.
+"""
 
 from pathlib import Path
 import calendar
@@ -7,41 +12,14 @@ import json
 import re
 import time
 
-from .core import ITEM_TYPES, config_dir, read_cfg, tilde
-from .items import scan_items
-from .plugins import PLUGIN_TYPES, plugins_state
+from .core import config_dir, read_cfg, tilde
 
-
-def _tok(s):
-    return (len(s) + 3) // 4 if s else 0
-
-def insight_budget():
-    claude_md = config_dir() / "CLAUDE.md"
-    md_tok = _tok(claude_md.read_text(errors="replace")) if claude_md.is_file() else 0
-    per_type = {}
-    for t in ITEM_TYPES:
-        items = scan_items(t)
-        rows = [{"name": it["name"],
-                 "tokens": _tok(it["name"]) + _tok(it.get("description", ""))}
-                for it in items if it["enabled"] and not it.get("broken")]
-        rows.sort(key=lambda r: -r["tokens"])
-        per_type[t] = {"tokens": sum(r["tokens"] for r in rows), "items": rows}
-    # enabled plugins load their components alongside yours, so a budget that
-    # counted only the config dir would under-report every plugin you have on
-    rows = [{"name": f"{p['name']}:{c['name']}",
-             "tokens": _tok(c["name"]) + _tok(c.get("description", ""))}
-            for p in plugins_state()["plugins"] if p["enabled"]
-            for c in p["components"] if c["kind"] in PLUGIN_TYPES]
-    rows.sort(key=lambda r: -r["tokens"])
-    per_type["plugins"] = {"tokens": sum(r["tokens"] for r in rows), "items": rows}
-    return {"claude_md": md_tok, "types": per_type,
-            "total": md_tok + sum(v["tokens"] for v in per_type.values())}
 
 USAGE_CACHE = Path.home() / ".cache" / "claude-ui-usage.json"
 
 # Bump whenever the shape or meaning of the cached per-file data changes, so
 # stale entries are re-scanned instead of being mixed with the current format.
-CACHE_V = 5
+CACHE_V = 6
 
 def projects_dir():
     """Transcripts live under the resolved config dir, not always ~/.claude."""
@@ -181,11 +159,13 @@ def _bash_prefix(cmd):
     return head
 
 def _scan_transcript(path):
-    """One transcript -> {counts, msgs, bash, cwd}."""
+    """One transcript -> {counts, msgs, bash, cwd, sess}."""
     counts = {}   # "kind\tname" -> [count, last_iso_ts]
     msgs = {}     # dedup key -> [local day, model, in, out, cacheW5m, cacheW1h, cacheR]
     bash = {}     # prefix -> count
     cwd = ""
+    first_ts = ""
+    last_ts = ""
 
     def bump(kind, name, ts):
         k = kind + "\t" + name
@@ -240,6 +220,9 @@ def _scan_transcript(path):
                         int(usage.get("output_tokens") or 0),
                         cw - w1h, w1h,
                         int(usage.get("cache_read_input_tokens") or 0), web]
+                    if not first_ts:
+                        first_ts = ts
+                    last_ts = max(last_ts, ts)
                     key = _msg_key(d, msg, path, lineno)
                     prev = msgs.get(key)
                     if prev is None:
@@ -272,8 +255,22 @@ def _scan_transcript(path):
                         if p:
                             bash[p] = bash.get(p, 0) + 1
     except OSError:
-        return {"counts": {}, "msgs": {}, "bash": {}, "cwd": ""}
-    return {"counts": counts, "msgs": msgs, "bash": bash, "cwd": cwd}
+        return {"counts": {}, "msgs": {}, "bash": {}, "cwd": "", "sess": None}
+    # Per-session summary for the Context tab. `first` is the first
+    # usage-bearing message's [input, cache writes, cache reads] — read from
+    # msgs after the streaming max-merge above, so a partial early line does
+    # not understate it. Their sum approximates the context present at the
+    # session's first turn; the running max of cache reads its peak.
+    sess = None
+    if msgs:
+        f = msgs[next(iter(msgs))]   # insertion order: first usage message
+        c = R_FIRST_COUNT
+        sess = {"first": [f[c + R_IN], f[c + R_CW5M] + f[c + R_CW1H],
+                          f[c + R_CR]],
+                "max_cr": max(e[c + R_CR] for e in msgs.values()),
+                "first_ts": first_ts, "last_ts": last_ts, "model": f[1]}
+    return {"counts": counts, "msgs": msgs, "bash": bash, "cwd": cwd,
+            "sess": sess}
 
 def transcript_stats(rescan=False):
     """Aggregate usage/cost/bash data across all transcripts, incrementally
@@ -319,9 +316,13 @@ def transcript_stats(rescan=False):
     days = {}
     bash = {}
     projects = {}
+    session_rows = []
     seen_msgs = set()
     for key in sorted(files):   # sorted so a cross-file duplicate resolves the same way every run
         data = files[key].get("data") or {}
+        session_rows.append({"path": key, "cwd": data.get("cwd") or "",
+                             "sess": data.get("sess"),
+                             "msgs": len(data.get("msgs") or {})})
         for k, (n, ts) in (data.get("counts") or {}).items():
             kind, _, name = k.partition("\t")
             slot = by.setdefault(kind, {}).setdefault(name, {"count": 0, "last": ""})
@@ -346,13 +347,16 @@ def transcript_stats(rescan=False):
             bash[prefix] = bash.get(prefix, 0) + n
     return {"sessions": len(files), "scanned_now": scanned, "by": by,
             "days": days, "bash": bash, "projects": projects,
+            "session_rows": session_rows,
             "dir": tilde(pdir), "available": pdir.is_dir()}
 
 def usage_stats(rescan=False):
     # The insight tab wants the item/bash counters, not the cost aggregates — and
     # `days`/`projects` are keyed by the internal rate key, so don't ship them.
+    # `session_rows` belongs to the Context tab, which has its own endpoint.
     st = transcript_stats(rescan)
-    return {k: v for k, v in st.items() if k not in ("days", "projects")}
+    return {k: v for k, v in st.items()
+            if k not in ("days", "projects", "session_rows")}
 
 # USD per million tokens, (model-id substring, input, output[, last day the rate
 # applied]). First match wins, so put narrower substrings first. A dated entry
