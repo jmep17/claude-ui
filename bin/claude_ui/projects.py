@@ -861,14 +861,15 @@ def zsh_remove():
     if func.is_file() and ZSH_MARKER in func.read_text(errors="replace"):
         func.unlink()
 
-def _zshrc_without_block(text):
+def _zshrc_without_block(text, begin=ZSHRC_BEGIN, end=ZSHRC_END):
     """`text` with our marker block removed. Everything outside the markers
-    is the user's — an unterminated block is refused, never guessed at."""
-    if ZSHRC_BEGIN not in text:
+    is the user's — an unterminated block is refused, never guessed at.
+    localmodel.py reuses this with its own markers."""
+    if begin not in text:
         return text
     lines = text.splitlines(keepends=True)
-    starts = [i for i, l in enumerate(lines) if l.rstrip("\n") == ZSHRC_BEGIN]
-    ends = [i for i, l in enumerate(lines) if l.rstrip("\n") == ZSHRC_END]
+    starts = [i for i, l in enumerate(lines) if l.rstrip("\n") == begin]
+    ends = [i for i, l in enumerate(lines) if l.rstrip("\n") == end]
     if len(starts) != 1 or len(ends) != 1 or ends[0] < starts[0]:
         raise ValueError(f"{tilde(zshrc_path())}: claude-ui marker block is "
                          "damaged — fix it by hand first")

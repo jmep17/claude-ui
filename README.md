@@ -62,6 +62,13 @@ owns, links, tracks, or syncs anything:
   subagents, medium effort, smaller workflows, and fewer model-generated
   extras. Applied as one atomic write; Remove clears only the keys still at
   preset values, so anything you changed since stays yours.
+- **Local model** — a setup piece that generates an opt-in `claude-local`
+  command running Claude Code against a local [oMLX](https://github.com/jundot/omlx)
+  server (Anthropic-compatible, so no proxy). A generated `claude-local.sh`
+  exports `ANTHROPIC_BASE_URL` and the model names and execs `claude`; plain
+  `claude` and `settings.json` are never touched. The model picker lists what
+  the server actually serves (`GET /v1/models`), and applying adds a `$0`
+  pricing override so local sessions stay visible on the Costs tab.
 - **Doctor** for machine health: broken symlinks, leftover backups, hooks or
   statusline entries pointing at missing executables, and more.
 - **Backup** — a zip of the parts of your config that took work to build, kept
@@ -126,7 +133,7 @@ The Claude Code config dir is resolved in this order:
 ## Layout
 
 `bin/claude-ui` is a thin launcher; the code lives in `bin/claude_ui/*.py`
-(core → schema → settings → items/mcp/plugins → statusline/insight/assist/setup
+(core → schema → settings → items/mcp/plugins → statusline/localmodel/insight/assist/setup
 → doctor → server, a clean DAG). The frontend is plain files in `bin/claude_ui/static/`
 (no build step), layered theme → components → app, with `ui.js` and `editor.js`
 before `app.js`.

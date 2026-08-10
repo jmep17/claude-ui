@@ -1909,6 +1909,7 @@ async function renderSetup(reload) {
       for (const n of p.notes) fold.append(el("div.li-desc", { text: n }));
       row.append(fold);
     }
+    if (p.id === "local-model") row.append(localModelBody(p));
     row.append(actions);
     list.append(row);
   }
@@ -1927,6 +1928,86 @@ async function setupAct(action, p) {
     await refresh();
     renderSetup(true);
   } catch (e) { toast(e.message, true); }
+}
+
+// ------------------------------------------------ setup: local-model piece
+
+let LOCALPROBE = null;  // last /api/local-probe result, shown inline
+let LOCALTEST = null;   // last /api/local-test result, shown inline
+
+function localModelBody(p) {
+  const box = el("div.localcfg");
+  const url = el("input.mono", { type: "text", placeholder: "http://localhost:8000",
+    value: p.config.base_url || "" });
+  const key = el("input.mono", { type: "text", placeholder: "API key (optional)",
+    value: p.config.api_key || "" });
+  const sel = el("select");
+  const models = LOCALPROBE && LOCALPROBE.ok ? LOCALPROBE.models : [];
+  sel.append(opt("", models.length ? "Pick a model…" : "Fetch models first…"));
+  for (const m of models) sel.append(opt(m));
+  // keep a saved model visible even when it's not in (or there is no) fetch
+  if (p.config.model && !models.includes(p.config.model))
+    sel.append(opt(p.config.model, p.config.model + " (saved)"));
+  if (p.config.model) sel.value = p.config.model;
+
+  const save = async (probe) => {
+    try {
+      await api("/api/local-config",
+        { base_url: url.value, model: sel.value, api_key: key.value });
+      if (probe) {
+        LOCALPROBE = await api("/api/local-probe", {});
+        // one model on the server: picking it is the only sensible choice
+        if (LOCALPROBE.ok && !sel.value && LOCALPROBE.models.length === 1)
+          await api("/api/local-config", { base_url: url.value,
+            model: LOCALPROBE.models[0], api_key: key.value });
+      } else toast("Local model saved" + (p.installed ? " · wrapper regenerated" : ""));
+      renderSetup(true);
+    } catch (e) { toast(e.message, true); }
+  };
+
+  box.append(el("div.lmrow", {},
+    el("span.lmlbl", { text: "server" }), url,
+    el("span.lmlbl", { text: "key" }), key,
+    mkbtn("btn-sm", "Fetch models", () => save(true),
+      "Save the server address, then list its models (GET /v1/models — free)")));
+  box.append(el("div.lmrow", {},
+    el("span.lmlbl", { text: "model" }), filterSelect(sel),
+    mkbtn("btn-sm btn-primary", "Save", () => save(false),
+      "Store the choice and, if installed, regenerate claude-local.sh")));
+  if (LOCALPROBE && !(LOCALPROBE.ok && LOCALPROBE.models.length))
+    box.append(el("div.lmrow", {}, icon("warn"),
+      el("span.li-desc", { text: (LOCALPROBE.detail || "no models")
+        + (LOCALPROBE.ok ? " — download one in the oMLX admin page first"
+           : " — start it (omlx start) or install: brew install jundot/omlx/omlx") })));
+  if (p.installed)
+    box.append(el("div.lmrow", {},
+      mkbtn("btn-sm", "Test live…", localTest,
+        "One real generation through claude-local — free, but runs on this machine"),
+      mkbtn("btn-sm btn-ghost", "Copy run command",
+        () => copyText("claude-local", "run command"))));
+  if (LOCALTEST)
+    box.append(el("div.lmrow", {},
+      icon(LOCALTEST.ok ? "check" : "warn"),
+      LOCALTEST.ok ? badge("local model answered", "success")
+                   : badge("unexpected answer", "destructive"),
+      el("span.li-desc.dmono", { text: LOCALTEST.answer || "(no output)" })));
+  return box;
+}
+
+async function localTest() {
+  if (!(await mconfirm("Run a live test?",
+      "Asks the local model — through claude-local.sh — to echo a fixed phrase. "
+      + "Free, but it runs a real generation on this machine; a cold model can "
+      + "take a while to load.", "Run test")))
+    return;
+  const t = toast({ title: "Asking the local model…", variant: "loading", duration: 0 });
+  try {
+    const r = await api("/api/local-test", {});
+    t.close();
+    LOCALTEST = r;
+    toast(r.ok ? "Local model answered" : "Unexpected answer — details on the card", !r.ok);
+    renderSetup();
+  } catch (e) { t.close(); toast(e.message, true); }
 }
 
 // ---------------------------------------------------------------- projects

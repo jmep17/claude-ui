@@ -18,6 +18,7 @@ from .items import (Conflict, config_files_state, item_copy, item_create,
                     item_delete, item_move, item_read, item_save, item_scope,
                     item_set_model, path_read, path_save, scan_items,
                     set_enabled)
+from .localmodel import local_config_set, local_probe, local_test
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
 from . import output_styles
 from . import schema
@@ -281,6 +282,16 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "setup-remove":
                 setup_remove(req.get("id", ""))
                 self.send(200, {"ok": True})
+            elif action == "local-config":
+                local_config_set(req.get("base_url", ""), req.get("model", ""),
+                                 req.get("api_key", ""))
+                self.send(200, {"ok": True})
+            elif action == "local-probe":
+                # POST despite being read-only: it triggers network activity
+                # and must stay behind the token
+                self.send(200, local_probe(req.get("base_url")))
+            elif action == "local-test":
+                self.send(200, local_test())
             elif action == "project-add":
                 registry_add(req.get("path", ""))
                 self.send(200, {"ok": True})
