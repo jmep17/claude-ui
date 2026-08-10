@@ -1,4 +1,4 @@
-"""Creating a new item file, and the one skill flag the agent picker needs.
+"""Creating, copying and deleting item files, in both scopes.
 
 Stdlib unittest, no dependencies — `python3 -m unittest discover tests` from the
 repo root, or just `python3 tests/test_items.py`.
@@ -6,6 +6,12 @@ repo root, or just `python3 tests/test_items.py`.
 config_dir is patched in both namespaces that reach the filesystem here: items
 (item_root builds the live path from it) and core (disabled_dir resolves it at
 call time to find the parking area).
+
+The Scope and Copy classes run the same operations against a project's own
+.claude/ instead. One implementation serves both, so what they pin is that the
+scope argument reaches the bottom, that nothing lands in the config dir by
+accident, and that the tidy-up which follows a move stops at the project rather
+than climbing into the repo.
 """
 
 import os
@@ -173,6 +179,169 @@ class MetaName(Base):
                for s in items.scan_items("output-styles")}
         self.assertEqual(got["adhd"], "ADHD")
         self.assertEqual(got["plain"], "")
+
+
+class ProjectBase(Base):
+    """Base plus a project of its own, well outside the config dir.
+
+    `self.out` is a second temp root — a project must not be a child of the
+    stand-in ~/.claude, or a test could pass because a path was contained when
+    the real arrangement has it nowhere near.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.outdir = tempfile.TemporaryDirectory()
+        self.out = pathlib.Path(self.outdir.name)
+        self.cdir = self.out / "proj" / ".claude"
+        self.cdir.mkdir(parents=True)
+
+    def tearDown(self):
+        self.outdir.cleanup()
+        super().tearDown()
+
+
+class Scope(ProjectBase):
+    """Every item op again, this time against a project's own .claude/.
+
+    One implementation serves both scopes, so what these pin is not that the
+    logic works — Create and the rest already prove that — but that the scope
+    argument reaches all the way down, that nothing lands in the config dir by
+    accident, and that the prune which tidies empty directories stops at the
+    project instead of eating it.
+    """
+
+    def test_create_lands_in_the_project_and_not_the_config_dir(self):
+        items.item_create("agents", "reviewer", AGENT, scope=self.cdir)
+        self.assertEqual((self.cdir / "agents" / "reviewer.md").read_text(), AGENT)
+        self.assertFalse((self.tmp / "agents").exists())
+
+    def test_skill_create_read_save_round_trip(self):
+        items.item_create("skills", "pdf", "---\nname: pdf\n---\nhow to\n",
+                          scope=self.cdir)
+        got = items.item_read("skills", "pdf", None, True, self.cdir)
+        self.assertEqual(got["file"], "SKILL.md")
+        self.assertIn("how to", got["content"])
+        items.item_save("skills", "pdf", "SKILL.md", "changed\n",
+                        scope=self.cdir)
+        self.assertEqual((self.cdir / "skills" / "pdf" / "SKILL.md").read_text(),
+                         "changed\n")
+
+    def test_scan_sees_only_this_scope(self):
+        self.write("skills/mine/SKILL.md", "---\nname: mine\n---\nx\n")
+        (self.cdir / "skills" / "theirs").mkdir(parents=True)
+        (self.cdir / "skills" / "theirs" / "SKILL.md").write_text(
+            "---\nname: theirs\ndescription: d\n---\nx\n")
+        self.assertEqual([s["name"] for s in items.scan_items("skills")], ["mine"])
+        rows = items.scan_items("skills", scope=self.cdir)
+        self.assertEqual([s["name"] for s in rows], ["theirs"])
+        self.assertEqual(rows[0]["description"], "d")
+
+    def test_disable_parks_inside_the_project(self):
+        items.item_create("commands", "ship", "body\n", scope=self.cdir)
+        items.set_enabled("commands", "ship", False, self.cdir)
+        self.assertTrue((self.cdir / "disabled" / "commands" / "ship.md").is_file())
+        self.assertFalse((self.tmp / "disabled").exists())
+        items.set_enabled("commands", "ship", True, self.cdir)
+        self.assertTrue((self.cdir / "commands" / "ship.md").is_file())
+
+    def test_disabled_row_is_scanned_with_enabled_false(self):
+        items.item_create("commands", "ship", "body\n", scope=self.cdir)
+        items.set_enabled("commands", "ship", False, self.cdir)
+        rows = items.scan_items("commands", scope=self.cdir)
+        self.assertEqual([(r["name"], r["enabled"]) for r in rows], [("ship", False)])
+
+    def test_prune_tidies_the_parking_area_and_keeps_the_type_dir(self):
+        """A round trip must leave no trace in disabled/, must keep commands/,
+        and must not climb out of .claude/ — the default stop is the config
+        dir, which under a project scope is the repo."""
+        items.item_create("commands", "git/pr", "body\n", scope=self.cdir)
+        items.set_enabled("commands", "git/pr", False, self.cdir)
+        self.assertTrue((self.cdir / "commands").is_dir())
+        items.set_enabled("commands", "git/pr", True, self.cdir)
+        self.assertFalse((self.cdir / "disabled").exists())
+        self.assertTrue((self.cdir / "commands" / "git" / "pr.md").is_file())
+        self.assertTrue(self.cdir.is_dir())
+        self.assertTrue(self.cdir.parent.is_dir())
+
+    def test_delete_keeps_the_type_dir_and_the_project(self):
+        items.item_create("commands", "ship", "body\n", scope=self.cdir)
+        items.item_delete("commands", "ship", True, self.cdir)
+        self.assertFalse((self.cdir / "commands" / "ship.md").exists())
+        self.assertTrue((self.cdir / "commands").is_dir())
+        self.assertTrue(self.cdir.is_dir())
+
+    def test_bad_name_cannot_escape_the_project(self):
+        for name in ("../escape", "a/../../b", ".ssh/key"):
+            with self.assertRaises(ValueError):
+                items.item_create("commands", name, "x\n", scope=self.cdir)
+        self.assertEqual(list(self.out.glob("escape*")), [])
+
+    def test_an_absolute_name_is_confined_not_obeyed(self):
+        """item_rel() drops the leading slash rather than refusing, so the
+        write lands under the project's own commands/ — the same answer the
+        config dir has always given, checked here because the blast radius of
+        getting it wrong is now someone's repo."""
+        items.item_create("commands", "/etc/passwd", "x\n", scope=self.cdir)
+        self.assertTrue((self.cdir / "commands" / "etc" / "passwd.md").is_file())
+
+    def test_agent_model_set_is_scoped(self):
+        items.item_create("agents", "reviewer", AGENT, scope=self.cdir)
+        items.item_set_model("reviewer", "haiku", True, self.cdir)
+        self.assertIn("model: haiku",
+                      (self.cdir / "agents" / "reviewer.md").read_text())
+
+
+class Copy(ProjectBase):
+    """item_copy between the config dir and a project."""
+
+    def test_copies_a_command_into_a_project(self):
+        self.write("commands/ship.md", "body\n")
+        out = items.item_copy("commands", "ship", None, self.cdir)
+        self.assertEqual((self.cdir / "commands" / "ship.md").read_text(), "body\n")
+        self.assertTrue((self.tmp / "commands" / "ship.md").is_file())  # not a move
+        self.assertIn("ship", out["path"])
+
+    def test_copies_a_skill_tree_back_out_to_the_config_dir(self):
+        (self.cdir / "skills" / "pdf" / "ref").mkdir(parents=True)
+        (self.cdir / "skills" / "pdf" / "SKILL.md").write_text("---\nname: pdf\n---\n")
+        (self.cdir / "skills" / "pdf" / "ref" / "notes.md").write_text("notes\n")
+        items.item_copy("skills", "pdf", self.cdir, None)
+        self.assertEqual((self.tmp / "skills" / "pdf" / "ref" / "notes.md").read_text(),
+                         "notes\n")
+
+    def test_a_symlinked_skill_copies_its_contents_not_the_link(self):
+        real = self.out / "checkout" / "pdf"
+        real.mkdir(parents=True)
+        (real / "SKILL.md").write_text("---\nname: pdf\n---\nreal\n")
+        (self.tmp / "skills").mkdir()
+        (self.tmp / "skills" / "pdf").symlink_to(real)
+        items.item_copy("skills", "pdf", None, self.cdir)
+        dst = self.cdir / "skills" / "pdf"
+        self.assertFalse(dst.is_symlink())
+        self.assertEqual((dst / "SKILL.md").read_text(), "---\nname: pdf\n---\nreal\n")
+        # the checkout it pointed at is untouched
+        self.assertTrue((real / "SKILL.md").is_file())
+
+    def test_refuses_a_name_taken_on_either_side_of_the_destination(self):
+        self.write("commands/ship.md", "mine\n")
+        (self.cdir / "disabled" / "commands").mkdir(parents=True)
+        (self.cdir / "disabled" / "commands" / "ship.md").write_text("theirs\n")
+        with self.assertRaises(ValueError):
+            items.item_copy("commands", "ship", None, self.cdir)
+        self.assertFalse((self.cdir / "commands").exists())
+
+    def test_refuses_a_missing_source_and_a_same_place_copy(self):
+        with self.assertRaises(ValueError):
+            items.item_copy("commands", "nope", None, self.cdir)
+        with self.assertRaises(ValueError):
+            items.item_copy("commands", "ship", self.cdir, self.cdir)
+
+    def test_leaves_no_temp_directory_behind(self):
+        (self.tmp / "skills" / "pdf").mkdir(parents=True)
+        (self.tmp / "skills" / "pdf" / "SKILL.md").write_text("x\n")
+        items.item_copy("skills", "pdf", None, self.cdir)
+        self.assertEqual([p.name for p in (self.cdir / "skills").iterdir()], ["pdf"])
 
 
 if __name__ == "__main__":

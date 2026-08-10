@@ -494,8 +494,26 @@ def plugin_set_enabled(pid, enabled):
     settings_set("enabledPlugins", {**cur, pid: bool(enabled)})
 
 def skill_override_set(name, value):
-    """Set (or clear, value=None) one skillOverrides entry — Claude Code's own
-    per-skill switch, the one component kind that does not need splitting."""
+    """Set (or clear, value=None) one skillOverrides entry in your settings.
+
+    Claude Code's own per-skill switch, and it reaches your skills and a
+    project's — not a plugin's:
+
+        "Plugin skills are not affected by skillOverrides. Manage those
+         through /plugin instead."
+        — code.claude.com/docs/en/skills, fetched 2026-08-10
+
+    This lived on the Plugins tab until that was noticed. The key is a bare
+    skill name, while a plugin's skill answers to plugin-name:skill-name, so
+    an entry written for a plugin's skill did not name it — it named whatever
+    skill of your own happened to share the last segment, and turned that off
+    instead. Splitting a plugin component creates a copy under exactly that
+    name, so the two features aimed at each other.
+
+    Kept here, next to the plugin code that motivated it, because the Plugins
+    tab is still where you find out a skill exists; the switch itself now sits
+    on the skill's own row.
+    """
     if not NAME_RE.match(name or ""):
         raise ValueError("bad skill name")
     if value is not None and value not in ("on", "name-only",

@@ -62,8 +62,16 @@ function goTab(t) {
 const currentHash = () => {
   if (!EDITING) return TAB;
   const enc = encodeURIComponent;
+  // A project's item has the same type and name as one of yours, so the root
+  // rides along as a query param — without it the hash names two different
+  // files and the back button opens whichever the config dir happens to hold.
+  // `off` goes with it: which side of disabled/ an item is on is read from
+  // DATA on the way back in, and DATA has never heard of a project's items.
+  const q = EDITING.root
+    ? "?root=" + enc(EDITING.root) + (EDITING.enabled === false ? "&off=1" : "")
+    : "";
   return EDITING.item
-    ? EDITING.type + "/" + enc(EDITING.name) + "/" + enc(EDITING.file || "")
+    ? EDITING.type + "/" + enc(EDITING.name) + "/" + enc(EDITING.file || "") + q
     : "file/" + enc(EDITING.abs || EDITING.path);
 };
 
@@ -77,14 +85,17 @@ function routeFromHash() {
   const segs = head.split("/").filter(Boolean).map((s) => {
     try { return decodeURIComponent(s); } catch (e) { return s; }
   });
-  const line = +new URLSearchParams(query || "").get("line") || 0;
+  const params = new URLSearchParams(query || "");
+  const line = +params.get("line") || 0;
   const locate = line ? { line } : null;
+  const root = params.get("root") || null;
 
   if (segs[0] === "file" && segs[1]) return openPath(segs[1], locate);
   if (ITEM_TABS.includes(segs[0]) && segs.length >= 2) {
-    const it = ((DATA.items || {})[segs[0]] || []).find((i) => i.name === segs[1]);
-    return openItemEditor(segs[0], segs[1], segs[2] || null,
-      it ? it.enabled : true, locate);
+    const it = root ? null
+      : ((DATA.items || {})[segs[0]] || []).find((i) => i.name === segs[1]);
+    const enabled = root ? params.get("off") !== "1" : (it ? it.enabled : true);
+    return openItemEditor(segs[0], segs[1], segs[2] || null, enabled, locate, root);
   }
   if (EDITING) {
     if (!confirmDiscard()) { edSyncHash(); return; }
@@ -1268,12 +1279,13 @@ function pluginRow(p) {
   }
   actions.append(mkbtn("btn-sm" + (p.enabled ? " danger" : ""),
     p.enabled ? "Disable" : "Enable", () => pluginToggle(p.id, !p.enabled)));
+  /* There is no "turn off one of this plugin's skills" here, and there was:
+     it wrote a skillOverrides entry, which the docs say plugin skills ignore,
+     under a bare name that could only ever match a skill of your own. Claude
+     Code offers whole-plugin enablement and nothing finer, so neither does
+     this. See plugins.skill_override_set() for the longer version. */
   const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
     { label: "Copy path", icon: "copy", fn: () => copyText(p.path, "path") },
-    ...p.components.filter((c) => c.kind === "skills").map((c) => ({
-      label: "Turn off skill “" + c.name + "”", icon: "power",
-      fn: () => skillOverride(c.name, "off"),
-    })),
   ]), "More actions");
   more.append(icon("chevronDown"));
   actions.append(more);
@@ -1562,11 +1574,16 @@ async function pluginToggle(id, enabled) {
   } catch (e) { toast(e.message, true); }
 }
 
+/* value is one of Claude Code's four states, or null to remove the entry —
+   which is not a fifth state but the absence of one, and reads as "on". The
+   wording follows that: clearing is not "set to null". */
 async function skillOverride(name, value) {
+  const was = (settingsGet("skillOverrides") || {})[name] || null;
   try {
     await api("/api/skill-override", { name, value });
-    toast("Skill " + name + " set to " + value + " · applies to new sessions",
-      false, { label: "Undo", fn: () => skillOverride(name, null) });
+    toast(value ? "Skill " + name + " set to " + value + " · applies to new sessions"
+                : "Skill " + name + " back on · applies to new sessions",
+      false, { label: "Undo", fn: () => skillOverride(name, was) });
     await refresh();
   } catch (e) { toast(e.message, true); }
 }
@@ -1648,8 +1665,42 @@ let PRESTORE = null;
 // mode -> the live filename inside <project>/.claude/ (projects.py MODES)
 const PROJ_FILES = { replace: "system-prompt.md", append: "append-system-prompt.md" };
 
-// the three types a project's own .claude/ can hold (core.PROJECT_ITEM_TYPES)
-const PROJ_ITEMS = [["skills", "skill"], ["commands", "command"], ["agents", "agent"]];
+// the types a project's own .claude/ can hold (core.PROJECT_MANAGED_TYPES)
+const PROJ_ITEMS = [["skills", "skill"], ["commands", "command"],
+                    ["agents", "agent"], ["output-styles", "output style"]];
+
+// which type sections a card has open, keyed "<root>/<type>". Kept outside
+// PROJECTS so a reload after an edit redraws with the same sections open.
+const POPENITEMS = new Set();
+
+/* The context every project-scoped row and button is built with. One place
+   decides what "this project" means to toggleItem, deleteItem, itemRow and
+   the editor, so a new button cannot forget the root and quietly act on your
+   own config instead. */
+function projCtx(st) {
+  return {
+    root: st.root, tilde: st.tilde,
+    reload: () => renderProjects(true),
+    activeStyle: null,
+  };
+}
+
+/* Types where the docs state precedence across scopes, and which way it goes:
+
+     "When skills share the same name across levels, enterprise overrides
+      personal, and personal overrides project."
+     — code.claude.com/docs/en/skills, fetched 2026-08-10
+
+   Personal wins, which is the opposite of what most tools do with a project
+   directory, and it means a project's copy of a name you also have is dead
+   weight — it applies to nobody until yours is gone. The same paragraph says
+   .claude/commands/ files "work the same way". Agents and output styles say
+   nothing either way, so nothing is claimed about them here. */
+const SHADOWED_TYPES = new Set(["skills", "commands"]);
+
+const shadowedBy = (type, name) =>
+  SHADOWED_TYPES.has(type)
+  && ((DATA.items || {})[type] || []).some((m) => m.name === name && m.enabled);
 
 async function renderProjects(reload) {
   const view = document.getElementById("projectsview");
@@ -1678,7 +1729,7 @@ async function renderProjects(reload) {
   const f = PROJECTS.flags;
   if (!f.cli || !f.system_prompt_file) {
     view.append(el("div.alert.alert-warning", {},
-      el("span.alert-icon", {}, icon("warning")),
+      el("span.alert-icon", {}, icon("warn")),
       el("div.alert-body", { text: !f.cli
         ? "claude CLI not found on PATH — the wrappers will not work until it is installed."
         : "Your installed claude doesn't advertise --system-prompt-file; the wrappers would "
@@ -1839,7 +1890,7 @@ function projCard(st) {
   const tr = PROJTEST[st.root];
   if (tr) {
     body.append(el("div.drow", {},
-      icon(tr.ok ? "check" : "warning"),
+      icon(tr.ok ? "check" : "warn"),
       tr.ok ? badge("prompt reached claude", "success")
             : badge("no match", "destructive"),
       el("span.dmsg", { text: tr.ok
@@ -1854,34 +1905,20 @@ function projCard(st) {
         el("span.dmsg.dmono", { text: tr.matched_line })));
   }
 
-  // what this project holds of its own, and the way to put more there. A skill
-  // in .claude/skills/ applies to this project only — the narrower scope than
-  // the personal ~/.claude/skills/ the rest of this app manages.
-  const items = st.items || {};
-  const held = PROJ_ITEMS
-    .filter(([k]) => (items[k] || []).length)
-    .map(([k, one]) => plural(items[k].length, one) + ": " + items[k].join(", "));
-  const irow = el("div.drow", {},
-    icon("sparkles"),
-    el("span.dmsg", {},
-      el("div", { text: held.length ? held.join(" · ")
-        : "No skills, commands or agents of its own." }),
-      el("div.hint", { text: "In .claude/ — this project only, and committable with it." })),
-    el("div.dactions", {}));
-  if (!st.missing)
-    irow.querySelector(".dactions").append(
-      mkbtn("btn-sm", "Restore from backup…", () => projRestoreOpen(st),
-        "Take a skill, command or agent out of a backup archive into this project"));
-  body.append(irow);
-
-  const styles = st.output_styles.length ? st.output_styles.join(", ") : null;
-  const setting = Object.entries(st.output_style_setting)
-    .map(([f2, v]) => v + " (" + f2 + ")").join(", ");
-  if (styles || setting) {
-    body.append(el("div.drow", {},
-      icon("droplet"),
-      el("span.dmsg", { text: "Output styles in this project: "
-        + (styles || "none") + (setting ? " · outputStyle: " + setting : "") })));
+  // What this project holds of its own, and every way to change it. A skill in
+  // .claude/skills/ applies to this project only — the narrower scope beside
+  // the personal ~/.claude/skills/ the inventory tabs manage.
+  if (!st.missing) {
+    body.append(el("div.drow.drow-head", {},
+      icon("sparkles"),
+      el("span.dmsg", {},
+        el("div", { text: "This project's own skills, commands, agents and styles" }),
+        el("div.hint", { text: "In .claude/ — this project only, and committable "
+          + "with it. Disabling parks a copy in .claude/disabled/." }))));
+    for (const [type, one] of PROJ_ITEMS) body.append(projItemsRow(st, type, one));
+    body.append(projMcpRow(st));
+    body.append(projFilesRow(st));
+    body.append(projRegistryRow(st));
   }
 
   body.append(el("div.drow", {},
@@ -1894,6 +1931,487 @@ function projCard(st) {
     }))));
   card.append(body);
   return card;
+}
+
+/* -------------------------------------------- a project's own MCP servers --
+   .mcp.json sits at the project root, not in .claude/, because that is where
+   Claude Code reads it. It is the file a repo ships to whoever clones it, so
+   approving a server is a separate answer from having one: the repo asks, and
+   this machine decides. Approval goes to .claude/settings.local.json, which
+   is personal and normally gitignored — nobody else inherits your trust. */
+
+const MCP_APPROVAL = {
+  approved: ["approved", "success"],
+  rejected: ["rejected", "destructive"],
+  undecided: ["not answered", "outline"],
+};
+
+function projMcpRow(st) {
+  const m = st.mcp || { servers: [] };
+  const key = st.root + "/mcp";
+  const open = POPENITEMS.has(key);
+  const toggle = mkbtn("btn-sm btn-icon btn-ghost", "", () => {
+    if (open) POPENITEMS.delete(key); else POPENITEMS.add(key);
+    renderProjects();
+  }, m.servers.length ? (open ? "Collapse" : "Show them") : "Nothing here yet");
+  toggle.append(icon("chevronDown"));
+  if (!m.servers.length) toggle.disabled = true;
+
+  const add = mkbtn("btn-sm btn-primary", "Add server…", () => projMcpNew(st));
+  add.prepend(icon("plus"));
+  const head = el("div.drow", {},
+    icon("server"),
+    el("span.dmsg", {},
+      el("div", { text: "MCP servers · " + (m.servers.length || "none") }),
+      el("div.hint", { text: ".mcp.json — beside .claude/, committed with the repo" })),
+    m.error ? badge("unreadable", "destructive") : null,
+    el("div.dactions", {},
+      toggle,
+      m.exists ? openFileBtn(st.root + "/.mcp.json", "Edit file") : null,
+      add));
+  if (m.error)
+    return el("div", {}, head, el("div.drow", {},
+      el("span.dmsg", { text: m.error + " — fix it by hand; claude-ui will not "
+        + "write over a file it cannot read." })));
+  if (!open || !m.servers.length) return head;
+
+  const box = el("div.list", { style: { margin: "0 0 .5rem" } });
+  for (const s of m.servers) {
+    const [label, variant] = MCP_APPROVAL[s.approval] || MCP_APPROVAL.undecided;
+    const b = badge(label, variant);
+    b.title = s.approval === "undecided"
+      ? "Claude Code will ask about this server the first time it is used"
+      : "Recorded in this project's settings";
+    const acts = el("div.li-actions", {},
+      mkbtn("btn-sm", "Edit", () => projMcpEdit(st, s)),
+      s.approval !== "approved"
+        ? mkbtn("btn-sm", "Approve", () => projMcpApprove(st, s.name, true)) : null,
+      s.approval !== "rejected"
+        ? mkbtn("btn-sm danger", "Reject", () => projMcpApprove(st, s.name, false)) : null);
+    const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
+      ...(s.approval === "undecided" ? [] : [{ label: "Clear the answer", icon: "power",
+        fn: () => projMcpApprove(st, s.name, null) }]),
+      { label: "Delete…", icon: "trash", danger: true,
+        fn: () => projMcpDelete(st, s.name) },
+    ]), "More actions");
+    more.append(icon("chevronDown"));
+    acts.append(more);
+    box.append(el("div.list-item", {},
+      el("div.li-main", {}, el("span.li-name", { text: s.name }), b),
+      el("span.li-desc", { text: mcpSummary(s.config) }),
+      acts));
+  }
+  return el("div", {}, head, box);
+}
+
+async function projMcpNew(st) {
+  const r = await modal({ title: "Add an MCP server to " + st.tilde,
+    text: "Written to .mcp.json at the project root — committed, so everyone "
+        + "who clones the repo is offered it. Each of them still gets asked "
+        + "before it runs.",
+    fields: [
+      { id: "n", label: "Server name", mono: true },
+      { id: "k", label: "Transport", type: "select", options: [
+        { value: "stdio", label: "stdio — local command" },
+        { value: "http", label: "http/sse — remote URL" }] }],
+    ok: "Next" });
+  if (!r || !r.n) return;
+  projMcpEdit(st, { name: r.n, config: MCP_TEMPLATE[r.k] }, true);
+}
+
+async function projMcpEdit(st, server, isNew) {
+  const r = await modal({
+    title: (isNew ? "New server " : "Edit ") + server.name,
+    text: "The server's entry in .mcp.json, as JSON.",
+    fields: [{ id: "j", label: "Config", type: "textarea", mono: true, rows: 12,
+               value: JSON.stringify(server.config || {}, null, 2) }],
+    ok: "Save",
+  });
+  if (!r) return;
+  let config;
+  try { config = JSON.parse(r.j); }
+  catch (e) { toast("Invalid JSON: " + e.message, true); return; }
+  projPost("project-mcp-set", { root: st.root, name: server.name, config },
+    server.name + " saved to .mcp.json");
+}
+
+async function projMcpDelete(st, name) {
+  if (await mconfirm("Delete " + name + "?",
+      "Removes it from " + st.tilde + "/.mcp.json. Anyone who has already "
+      + "cloned the repo keeps their copy until they pull.", "Delete"))
+    projPost("project-mcp-delete", { root: st.root, name }, name + " deleted");
+}
+
+const projMcpApprove = (st, name, approved) =>
+  projPost("project-mcp-approve", { root: st.root, name, approved },
+    approved === null ? name + ": answer cleared"
+      : name + (approved ? " approved" : " rejected") + " on this machine");
+
+/* ------------------------------------------------ a project's config files --
+   Read-only display of these was already here; the editor has been able to
+   open them since resolve_editable learned about project roots. This is the
+   button that says so. */
+
+function projFilesRow(st) {
+  const files = [
+    [".claude/settings.json", "shared with everyone who clones the repo"],
+    [".claude/settings.local.json", "yours, normally gitignored"],
+    ["CLAUDE.md", "project instructions, read every session"],
+  ];
+  const acts = el("div.dactions", {});
+  for (const [rel, why] of files)
+    acts.append(openFileBtn(st.root + "/" + rel, rel.replace(".claude/", ""),
+      null, rel + " — " + why));
+  const setting = Object.entries(st.output_style_setting)
+    .map(([f, v]) => v + " (" + f + ")").join(", ");
+  return el("div.drow", {},
+    icon("file"),
+    el("span.dmsg", {},
+      el("div", { text: "Settings and instructions" }),
+      el("div.hint", { text: setting ? "outputStyle: " + setting
+        : "Opens in the editor; a file that isn't there yet is created on save." })),
+    acts);
+}
+
+/* ------------------------------------------------ a project's own items --
+   One collapsed section per type. Collapsed because a card is a summary and
+   a project with twenty commands would bury the prompt controls the tab is
+   named for; the count is on the header, so opening it is a choice you make
+   knowing what is inside. */
+
+/* Two things a project row can be that a config-dir row cannot: overridden
+   off from settings, and shadowed by one of your own. Both are the difference
+   between "this file exists" and "this file does anything", which is the only
+   question the card is really being asked. */
+function projItemBadges(st, type, s) {
+  const out = [];
+  const ov = (st.skill_overrides || {})[s.name];
+  if (ov && ov !== "on") {
+    const b = badge(ov === "off" ? "off for you" : ov, "outline");
+    b.title = "skillOverrides in this project's settings — the file is untouched";
+    out.push(b);
+  }
+  if (s.enabled && shadowedBy(type, s.name)) {
+    const b = badge("shadowed by yours", "warning");
+    b.title = "You have a " + type.replace(/s$/, "") + " called " + s.name
+      + " too, and personal overrides project — this copy does not apply "
+      + "until yours is disabled or renamed";
+    out.push(b);
+  }
+  return out;
+}
+
+function projItemsRow(st, type, one) {
+  const ctx = projCtx(st);
+  const rows = (st.items || {})[type] || [];
+  const key = st.root + "/" + type;
+  const open = POPENITEMS.has(key);
+  // Which style this project's settings select. Read-only at user scope would
+  // be wrong here: outputStyle in a project's settings names a project style.
+  if (type === "output-styles")
+    ctx.activeStyle = st.output_style_setting["settings.local.json"]
+      || st.output_style_setting["settings.json"] || "";
+  ctx.setActive = (name) => projPost("project-setting-set",
+    { root: st.root, key: "outputStyle", value: name },
+    "outputStyle set to " + name + " for this project");
+  ctx.copyTo = [{ label: "Copy to your config", icon: "copy",
+    fn: () => projItemCopyOut(st, type, rows) }];
+  ctx.extraBadges = (s) => projItemBadges(st, type, s);
+  // Claude Code's own per-skill switch, and the only one that leaves a
+  // committed skill's file alone — see project_skill_override().
+  if (type === "skills")
+    ctx.extraMenu = (s) => {
+      const off = (st.skill_overrides || {})[s.name] === "off";
+      return [{ label: off ? "Turn back on for me" : "Turn off for me",
+        icon: "power",
+        fn: () => projPost("project-skill-override",
+          { root: st.root, name: s.name, value: off ? null : "off" },
+          s.name + (off ? " on again" : " off in settings.local.json")) }];
+    };
+
+  const off = rows.filter((r) => !r.enabled).length;
+  const badges = [];
+  if (off) badges.push(badge(off + " disabled", "outline"));
+
+  const toggle = mkbtn("btn-sm btn-icon btn-ghost", "", () => {
+    if (open) POPENITEMS.delete(key); else POPENITEMS.add(key);
+    renderProjects();
+  }, rows.length ? (open ? "Collapse" : "Show them") : "Nothing here yet");
+  toggle.append(icon("chevronDown"));
+  if (!rows.length) toggle.disabled = true;
+
+  const head = el("div.drow", {},
+    icon(TAB_META[type].icon),
+    el("span.dmsg", {},
+      el("div", { text: TAB_META[type].label + " · "
+        + (rows.length ? rows.length : "none") }),
+      el("div.hint", { text: ".claude/" + type + "/" })),
+    ...badges,
+    el("div.dactions", {},
+      toggle,
+      (() => {
+        const b = mkbtn("btn-sm btn-primary", "Add",
+          (e) => openMenu(e.currentTarget, projAddMenu(st, type, one)),
+          "Put a " + one + " in this project");
+        b.prepend(icon("plus"));
+        return b;
+      })()));
+  if (!open || !rows.length) return head;
+
+  const box = el("div.list", { style: { margin: "0 0 .5rem" } });
+  for (const s of rows) box.append(itemRow(type, s, s.enabled, ctx));
+  return el("div", {}, head, box);
+}
+
+function projAddMenu(st, type, one) {
+  const out = [
+    { label: "New " + one + "…", icon: "plus", fn: () => projItemNew(st, type, one) },
+    { label: "Copy from your config…", icon: "copy",
+      fn: () => projItemCopyIn(st, type, one) },
+  ];
+  // Output styles are not in PROJECT_ITEM_TYPES, so an archive has no copy of
+  // one to put here — offering the button would be offering a dead end.
+  if (type !== "output-styles")
+    out.push({ label: "Restore from backup…", icon: "archive",
+               fn: () => projRestoreOpen(st) });
+  return out;
+}
+
+/* New writes a stub and opens it. Deliberately not a builder: the repo already
+   weighed a guided form for these types and chose the terminal over a
+   half-guided one. What is different here is that a project has no terminal
+   equivalent worth preferring — you would be hand-making directories — so
+   this does the two lines of frontmatter and gets out of the way. */
+const projStub = (type, name, desc) =>
+  type === "commands"
+    ? "---\ndescription: " + desc + "\n---\n\n"
+    : "---\nname: " + name + "\ndescription: " + desc + "\n---\n\n";
+
+async function projItemNew(st, type, one) {
+  const r = await modal({
+    title: "New " + one + " in " + st.tilde,
+    text: "Writes .claude/" + type + "/ and opens it in the editor. It applies "
+        + "to this project only, and commits with it.",
+    fields: [
+      { id: "n", label: "Name", mono: true,
+        hint: type === "commands" ? "Slashes nest it: git/pr becomes /git:pr"
+                                  : "Letters, digits, dot, dash, underscore" },
+      { id: "d", label: "Description",
+        hint: "What it is for. Claude reads this to decide when to use it." },
+    ],
+    ok: "Create",
+  });
+  if (!r || !r.n) return;
+  try {
+    await api("/api/item-create", { type, name: r.n, root: st.root,
+      content: projStub(type, r.n, (r.d || "").trim() || "TODO") });
+    toast(r.n + " created in " + st.tilde);
+    PROJECTS = null;
+    openItemEditor(type, r.n, null, true, null, st.root);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function projItemCopyIn(st, type, one) {
+  const mine = ((DATA.items || {})[type] || []).filter((s) => !s.broken);
+  if (!mine.length) {
+    toast("You have no " + type + " to copy", true);
+    return;
+  }
+  const have = new Set(((st.items || {})[type] || []).map((s) => s.name));
+  const r = await modal({
+    title: "Copy a " + one + " into " + st.tilde,
+    text: "Copies the files, leaving yours where they are. The project's copy "
+        + "is then its own — editing it here does not change yours."
+        + (SHADOWED_TYPES.has(type)
+           ? " Note that personal overrides project: while you still have your "
+             + "copy enabled, it is the one that applies, and the project's is "
+             + "inert until you disable yours."
+           : ""),
+    fields: [{ id: "n", label: one[0].toUpperCase() + one.slice(1), type: "select",
+      options: mine.map((s) => ({
+        value: s.name,
+        label: s.name + (have.has(s.name) ? " — already in this project" : "")
+          + (s.enabled ? "" : " (disabled)"),
+      })) }],
+    ok: "Copy",
+  });
+  if (!r || !r.n) return;
+  const src = mine.find((s) => s.name === r.n);
+  await projPost("item-copy", { type, name: r.n, to_root: st.root,
+    enabled: src ? src.enabled : true }, r.n + " copied into " + st.tilde);
+  // The copy landed shadowed. Offer the one action that makes it apply,
+  // rather than leaving a badge to explain why nothing happened.
+  if (src && src.enabled && SHADOWED_TYPES.has(type)
+      && await mconfirm("Disable your own " + r.n + "?",
+        "Personal overrides project, so your " + r.n + " is still the one that "
+        + "applies everywhere, including here. Disabling yours lets this "
+        + "project's copy take effect; it parks in disabled/ and nothing is "
+        + "deleted.", "Disable mine"))
+    await toggleItem(type, r.n, false);
+}
+
+async function projItemCopyOut(st, type, rows) {
+  const r = await modal({
+    title: "Copy out of " + st.tilde,
+    text: "Copies into your own " + (DATA.config_dir || "~/.claude") + "/" + type
+        + "/, where every project sees it. The project keeps its copy.",
+    fields: [{ id: "n", label: "Which", type: "select",
+      options: rows.map((s) => ({ value: s.name,
+        label: s.name + (s.enabled ? "" : " (disabled)") })) }],
+    ok: "Copy",
+  });
+  if (!r || !r.n) return;
+  const src = rows.find((s) => s.name === r.n);
+  try {
+    await api("/api/item-copy", { type, name: r.n, from_root: st.root,
+      enabled: src ? src.enabled : true });
+    toast(r.n + " copied to your config");
+    await refresh();          // it is in DATA now, not just PROJECTS
+    renderProjects(true);
+  } catch (e) { toast(e.message, true); }
+}
+
+/* ------------------------------------------- marketplaces, for one project --
+   The one part of this tab that does not edit a file directly. Adding a
+   marketplace clones a repository and installing a plugin resolves a version
+   into a cache — Claude Code's decisions, made by Claude Code's own CLI, run
+   here in the project's directory with --scope project. What lands in the
+   repo is two keys in .claude/settings.json, so a teammate who clones gets
+   the same tools.
+
+   The plugin's files do not land in the project. They go to
+   ~/.claude/plugins/, shared with every other project on this machine; only
+   the decision to use them is the project's. The hint says so, because a
+   section that let you believe otherwise would be lying about what committing
+   the repo gives away. */
+
+const PREG = {};   // {root: registry_state payload} — fetched on demand
+
+function projRegistryRow(st) {
+  const key = st.root + "/registry";
+  const open = POPENITEMS.has(key);
+  const reg = PREG[st.root];
+  const toggle = mkbtn("btn-sm btn-icon btn-ghost", "", () => {
+    if (open) { POPENITEMS.delete(key); renderProjects(); }
+    else { POPENITEMS.add(key); projRegistryLoad(st); }
+  }, open ? "Collapse" : "Ask claude what this project can install");
+  toggle.append(icon("chevronDown"));
+
+  const head = el("div.drow", {},
+    icon("plug"),
+    el("span.dmsg", {},
+      el("div", { text: "Plugin marketplaces" }),
+      el("div.hint", { text: "Recorded in .claude/settings.json and committed. "
+        + "The plugin's files stay in ~/.claude/plugins/ — only the choice is "
+        + "the project's." })),
+    el("div.dactions", {}, toggle));
+  if (!open) return head;
+  if (!reg) return el("div", {}, head,
+    el("div.drow", {}, el("span.dmsg", { text: "Asking claude…" })));
+
+  const rows = [];
+  if (reg.error)
+    rows.push(el("div.drow", {},
+      icon("warn"), el("span.dmsg", { text: reg.error })));
+
+  for (const m of reg.marketplaces)
+    rows.push(el("div.drow", {},
+      icon("download"),
+      el("span.dmsg.dmono", { text: m.name || String(m) }),
+      el("div.dactions", {}, mkbtn("btn-sm danger", "Remove", () =>
+        projRegistryRun(st, "project-marketplace-remove",
+          { name: m.name }, "Marketplace removed")))));
+
+  for (const s of reg.suggested)
+    if (!reg.marketplaces.some((m) => (m.name || "") === s.source.split("/")[1]))
+      rows.push(el("div.drow", {},
+        icon("download"),
+        el("span.dmsg", {},
+          el("div.dmono", { text: s.source }),
+          el("div.hint", { text: s.desc })),
+        el("div.dactions", {}, mkbtn("btn-sm", "Add", () =>
+          projRegistryRun(st, "project-marketplace-add",
+            { source: s.source }, "Marketplace added")))));
+
+  rows.push(el("div.drow", {},
+    el("span.dmsg", { text: "Any GitHub repo, git URL or local path works too." }),
+    el("div.dactions", {}, mkbtn("btn-sm", "Add marketplace…",
+      () => projMarketAdd(st)))));
+
+  for (const p of reg.installed)
+    rows.push(el("div.drow", {},
+      icon("plug"),
+      el("span.dmsg", {},
+        el("div.dmono", { text: p.id || p.name || "" }),
+        el("div.hint", { text: "scope: " + (p.scope || "?")
+          + (p.version ? " · v" + p.version : "") })),
+      p.scope === "project" ? badge("this project", "success")
+                            : badge(p.scope || "?", "outline"),
+      el("div.dactions", {}, p.scope === "project"
+        ? mkbtn("btn-sm danger", "Uninstall", () => projPluginRemove(st, p))
+        : null)));
+
+  for (const p of reg.available)
+    rows.push(el("div.drow", {},
+      icon("plug"),
+      el("span.dmsg", {},
+        el("div.dmono", { text: p.pluginId || p.name || "" }),
+        el("div.hint", { text: p.description || "" })),
+      el("div.dactions", {}, mkbtn("btn-sm btn-primary", "Install", () =>
+        projRegistryRun(st, "project-plugin-install",
+          { id: p.pluginId }, "Installed for this project")))));
+
+  if (!reg.marketplaces.length && !reg.installed.length)
+    rows.push(el("div.drow", {},
+      el("span.dmsg", { text: "No marketplaces here yet. Adding one only "
+        + "records where to look; nothing runs until you install a plugin." })));
+
+  return el("div", {}, head, ...rows);
+}
+
+async function projRegistryLoad(st) {
+  renderProjects();               // draw the "Asking claude…" line first
+  try { PREG[st.root] = await api("/api/project-registry", { root: st.root }); }
+  catch (e) {
+    PREG[st.root] = { error: e.message, marketplaces: [], installed: [],
+                      available: [], suggested: [] };
+  }
+  if (TAB === "projects") renderProjects();
+}
+
+async function projRegistryRun(st, action, body, msg) {
+  const t = toast({ title: "Running claude…", variant: "loading", duration: 0 });
+  try {
+    const r = await api("/api/" + action, { root: st.root, ...body });
+    t.close();
+    // the CLI's own last line, not our guess at what it did
+    toast(r.ok ? msg + " · " + r.detail : r.detail, !r.ok);
+    delete PREG[st.root];
+    await projRegistryLoad(st);
+  } catch (e) { t.close(); toast(e.message, true); }
+}
+
+async function projMarketAdd(st) {
+  const r = await modal({
+    title: "Add a marketplace to " + st.tilde,
+    text: "Runs `claude plugin marketplace add … --scope project`, which "
+        + "clones the source and records it in .claude/settings.json. Add "
+        + "sources you trust: a plugin can ship hooks, which run commands.",
+    fields: [{ id: "s", label: "Source", mono: true,
+      placeholder: "owner/repo",
+      hint: "A GitHub owner/repo, a git URL, or a path to a local directory" }],
+    ok: "Add",
+  });
+  if (!r || !r.s) return;
+  projRegistryRun(st, "project-marketplace-add", { source: r.s }, "Marketplace added");
+}
+
+async function projPluginRemove(st, p) {
+  const id = p.id || p.name || "";
+  if (await mconfirm("Uninstall " + id + "?",
+      "Removes it from this project's .claude/settings.json. Other projects "
+      + "using it are unaffected.", "Uninstall"))
+    projRegistryRun(st, "project-plugin-uninstall", { id }, "Uninstalled");
 }
 
 async function projInit(st) {
@@ -3038,12 +3556,19 @@ function openPalette() {
 
 // --------------------------------------------------------------- inventory
 
-async function toggleItem(type, name, enabled) {
+/* ctx is how a row says which config it belongs to: absent, or `{root, tilde,
+   reload}` for one of a project's own. `root` rides into every call and
+   `reload` is what redraws afterwards, because the Projects tab holds its
+   payload in PROJECTS and would not see a refresh() of /api/state. */
+const ctxRoot = (ctx) => (ctx && ctx.root) || undefined;
+const ctxReload = (ctx) => (ctx && ctx.reload ? ctx.reload() : refresh());
+
+async function toggleItem(type, name, enabled, ctx) {
   try {
-    await api("/api/item-toggle", { type, name, enabled });
+    await api("/api/item-toggle", { type, name, enabled, root: ctxRoot(ctx) });
     toast(name + (enabled ? " enabled" : " disabled — moved to disabled/") + " · applies to new sessions",
-      false, { label: "Undo", fn: () => toggleItem(type, name, !enabled) });
-    await refresh();
+      false, { label: "Undo", fn: () => toggleItem(type, name, !enabled, ctx) });
+    await ctxReload(ctx);
   } catch (e) { toast(e.message, true); }
 }
 
@@ -3053,7 +3578,7 @@ async function toggleItem(type, name, enabled) {
    disabled/, editing keeps the bytes it replaced in a diff you were shown, a
    backup can be restored. This cannot, so it asks for the name to be typed and
    the toast carries no Undo — there is nothing held to put back. */
-async function deleteItem(type, s, enabled) {
+async function deleteItem(type, s, enabled, ctx) {
   // no file count in the wording: the only list the browser has is the editor's
   // (capped, dotfiles excluded), and a number that understates what is about to
   // go is worse than not giving one
@@ -3068,9 +3593,9 @@ async function deleteItem(type, s, enabled) {
     s.name, "Delete");
   if (!ok) return;
   try {
-    await api("/api/item-delete", { type, name: s.name, enabled });
+    await api("/api/item-delete", { type, name: s.name, enabled, root: ctxRoot(ctx) });
     toast(s.name + " deleted");
-    await refresh();
+    await ctxReload(ctx);
   } catch (e) { toast(e.message, true); }
 }
 
@@ -3102,6 +3627,72 @@ function itemBadges(s) {
     out.push(b);
   }
   return out;
+}
+
+/* One row for one item, wherever it lives.
+
+   The inventory tabs render your config dir's; a project card renders that
+   project's own .claude/. Same badges, same buttons, same wording — a skill
+   is a skill, and the only honest difference is which directory it applies
+   from, which the card around it already says.
+
+   `ctx` carries that difference: `{root, tilde, reload}` for a project's, and
+   nothing at all for yours. It also carries the two things only the inventory
+   knows — which output style is active, and how to set it — because at
+   project scope those answers come from a different settings file. */
+function itemRow(type, s, enabled, ctx) {
+  ctx = ctx || {};
+  const active = ctx.activeStyle;
+  const isActive = active != null && enabled && !s.broken
+    && styleSettingName(s) === active;
+  const actions = el("div.li-actions");
+
+  if (active != null && enabled && !s.broken && !isActive) {
+    const set = ctx.setActive
+      || ((name) => commitSetting("outputStyle", name));
+    actions.append(mkbtn("btn-sm", "Set active",
+      () => set(styleSettingName(s)),
+      "Write outputStyle: " + styleSettingName(s) + " to "
+      + (ctx.root ? ".claude/settings.local.json" : "settings.json")
+      + " — applies to new sessions"));
+  }
+  if (!s.broken) {
+    const eb = mkbtn("btn-sm", "Edit",
+      () => openItemEditor(type, s.name, null, enabled, null, ctxRoot(ctx)));
+    eb.prepend(icon("pencil"));
+    actions.append(eb);
+  }
+  actions.append(mkbtn("btn-sm" + (enabled ? " danger" : ""),
+    enabled ? "Disable" : "Enable", () => toggleItem(type, s.name, !enabled, ctx)));
+  const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
+    { label: "Copy path", icon: "copy", fn: () => copyText(s.path || s.name, "path") },
+    // Broken items have no Edit button (item_read can't follow the dangling
+    // link) but the file itself is still openable by path.
+    ...(s.broken && s.path
+      ? [{ label: "Open by path", icon: "file", fn: () => openPath(s.path) }] : []),
+    ...(ctx.copyTo || []),
+    ...(ctx.extraMenu ? ctx.extraMenu(s) : []),
+    { label: enabled ? "Disable" : "Enable", icon: "power",
+      fn: () => toggleItem(type, s.name, !enabled, ctx), danger: enabled },
+    { label: "Delete…", icon: "trash", danger: true,
+      fn: () => deleteItem(type, s, enabled, ctx) },
+  ]), "More actions");
+  more.append(icon("chevronDown"));
+  actions.append(more);
+
+  let activeBadge = null;
+  if (isActive) {
+    activeBadge = badge("active", "default");
+    activeBadge.title = "outputStyle selects this style";
+  }
+  return el("div.list-item", { class: enabled ? "" : "off" },
+    el("div.li-main", {},
+      el("span.li-name", { title: s.path || "", text: s.name }),
+      activeBadge,
+      ...itemBadges(s),
+      ...(ctx.extraBadges ? ctx.extraBadges(s) : [])),
+    el("span.li-desc", { text: s.description || "" }),
+    actions);
 }
 
 function renderInventory() {
@@ -3163,50 +3754,25 @@ function renderInventory() {
     if (!list.length) return;
     view.append(sectionTitle(label, list.length));
     const box = el("div.list");
-    for (const s of list) {
-      const isActive = activeStyle !== null && enabled && !s.broken
-        && styleSettingName(s) === activeStyle;
-      const actions = el("div.li-actions");
-      if (activeStyle !== null && enabled && !s.broken && !isActive) {
-        actions.append(mkbtn("btn-sm", "Set active",
-          () => commitSetting("outputStyle", styleSettingName(s)),
-          "Write outputStyle: " + styleSettingName(s)
-          + " to settings.json — applies to new sessions"));
-      }
-      if (!s.broken) {
-        const eb = mkbtn("btn-sm", "Edit", () => openItemEditor(TAB, s.name, null, enabled));
-        eb.prepend(icon("pencil"));
-        actions.append(eb);
-      }
-      actions.append(mkbtn("btn-sm" + (enabled ? " danger" : ""),
-        enabled ? "Disable" : "Enable", () => toggleItem(TAB, s.name, !enabled)));
-      const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
-        { label: "Copy path", icon: "copy", fn: () => copyText(s.path || s.name, "path") },
-        // Broken items have no Edit button (item_read can't follow the dangling
-        // link) but the file itself is still openable by path.
-        ...(s.broken && s.path
-          ? [{ label: "Open by path", icon: "file", fn: () => openPath(s.path) }] : []),
-        { label: enabled ? "Disable" : "Enable", icon: "power",
-          fn: () => toggleItem(TAB, s.name, !enabled), danger: enabled },
-        { label: "Delete…", icon: "trash", danger: true,
-          fn: () => deleteItem(TAB, s, enabled) },
-      ]), "More actions");
-      more.append(icon("chevronDown"));
-      actions.append(more);
-
-      let activeBadge = null;
-      if (isActive) {
-        activeBadge = badge("active", "default");
-        activeBadge.title = "outputStyle in settings.json selects this style";
-      }
-      box.append(el("div.list-item", { class: enabled ? "" : "off" },
-        el("div.li-main", {},
-          el("span.li-name", { title: s.path || "", text: s.name }),
-          activeBadge,
-          ...itemBadges(s)),
-        el("span.li-desc", { text: s.description || "" }),
-        actions));
+    const ctx = { activeStyle };
+    if (TAB === "skills") {
+      // skillOverrides is Claude Code's own switch and does something the
+      // file move cannot: it hides a skill from the model while leaving it
+      // typable, and it never touches the file. Both belong on the row.
+      const ov = settingsGet("skillOverrides") || {};
+      ctx.extraBadges = (s) => {
+        if (!ov[s.name] || ov[s.name] === "on") return [];
+        const b = badge(ov[s.name] === "off" ? "off for you" : ov[s.name], "outline");
+        b.title = "skillOverrides in settings.json — the file is untouched";
+        return [b];
+      };
+      ctx.extraMenu = (s) => [{
+        label: ov[s.name] === "off" ? "Turn back on for me" : "Turn off for me",
+        icon: "power",
+        fn: () => skillOverride(s.name, ov[s.name] === "off" ? null : "off"),
+      }];
     }
+    for (const s of list) box.append(itemRow(TAB, s, enabled, ctx));
     view.append(box);
   };
 

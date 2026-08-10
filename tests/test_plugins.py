@@ -312,6 +312,32 @@ class TestRefusals(Base):
 
 
 class TestSkillOverrides(Base):
+    """skillOverrides reaches your own skills, and only those.
+
+    The docs are explicit — "Plugin skills are not affected by skillOverrides.
+    Manage those through /plugin instead." — and a plugin's skill answers to
+    plugin-name:skill-name, a key this cannot even spell. The Plugins tab used
+    to offer this per plugin skill; what it actually wrote was an entry naming
+    a skill of the user's own.
+    """
+
+    def test_a_namespaced_plugin_skill_name_cannot_be_written(self):
+        """The refusal that makes the mistake impossible to repeat: NAME_RE has
+        no colon, so there is no way to spell the key a plugin skill would need
+        even if one worked."""
+        for name in ("myplugin:helper", "myplugin:", ":helper"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    plugins.skill_override_set(name, "off")
+        self.assertFalse((self.tmp / "settings.json").exists())
+
+    def test_an_entry_names_your_skill_not_a_plugins(self):
+        """Written for a plugin's `helper`, the entry is indistinguishable from
+        one written for your own `helper` — which is the whole bug, and why the
+        button that did it is gone."""
+        plugins.skill_override_set("helper", "off")
+        self.assertEqual(self.settings_json()["skillOverrides"], {"helper": "off"})
+
     def test_set_and_clear(self):
         plugins.skill_override_set("helper", "off")
         self.assertEqual(self.settings_json(), {"skillOverrides": {"helper": "off"}})

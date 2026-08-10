@@ -14,18 +14,23 @@ from .backup import (backup_create, backup_delete, backup_inspect, backup_list,
                      backup_plan, backup_restore, fresh_start,
                      project_restore, project_restore_inspect, set_backup_dir)
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
-from .items import (Conflict, config_files_state, item_create, item_delete,
-                    item_read, item_save, item_set_model, path_read, path_save,
-                    scan_items, set_enabled)
+from .items import (Conflict, config_files_state, item_copy, item_create,
+                    item_delete, item_read, item_save, item_scope,
+                    item_set_model, path_read, path_save, scan_items,
+                    set_enabled)
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
 from . import output_styles
 from . import schema
 from .plugins import (adopted_items, plugin_env_set, plugin_env_vars,
                       plugin_resync, plugin_set_enabled, plugins_split,
                       plugins_state, skill_override_set)
-from .projects import (project_init, project_set_mode, project_toggle,
-                       projects_state, registry_add, registry_remove,
-                       wrapper_check, wrapper_test, wrapper_write)
+from .projects import (project_init, project_mcp_approve, project_mcp_set,
+                       project_set_mode, project_setting_set,
+                       project_skill_override, project_toggle, projects_state,
+                       registry_add, registry_remove, wrapper_check,
+                       wrapper_test, wrapper_write)
+from .registry import (marketplace_add, marketplace_remove, plugin_install,
+                       plugin_uninstall, registry_state)
 from .settings import (hook_test, settings_schema, settings_set, settings_state,
                        start_docs_fetch, suggest_state)
 from .statusline import statusline_save, statusline_state
@@ -145,9 +150,13 @@ class Handler(BaseHTTPRequestHandler):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             get = lambda k, d="": (q.get(k) or [d])[0]
             try:
+                # `root` names a registered project when the Projects tab is
+                # reading that project's own copy; absent, this is the config
+                # dir as it has always been.
                 self.send(200, item_read(get("type"), get("name"),
                                          get("file") or None,
-                                         get("enabled", "1") == "1"))
+                                         get("enabled", "1") == "1",
+                                         item_scope(get("root") or None)))
             except (ValueError, OSError) as e:
                 self.send(400, {"error": str(e)})
         elif self.path.startswith("/api/insight"):
@@ -209,7 +218,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, {"ok": True})
             elif action == "item-toggle":
                 path = set_enabled(req.get("type", ""), req.get("name", ""),
-                                   bool(req.get("enabled")))
+                                   bool(req.get("enabled")),
+                                   item_scope(req.get("root")))
                 self.send(200, {"ok": True, "path": path})
             elif action == "settings-set":
                 key, value = req.get("key", ""), req.get("value")
@@ -228,16 +238,27 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, {"ok": True, **item_create(
                     req.get("type", ""), req.get("name", ""),
                     req.get("content", ""),
-                    bool(req.get("enabled", True)))})
+                    bool(req.get("enabled", True)),
+                    item_scope(req.get("root")))})
             elif action == "item-delete":
                 self.send(200, {"ok": True, **item_delete(
                     req.get("type", ""), req.get("name", ""),
-                    bool(req.get("enabled", True)))})
+                    bool(req.get("enabled", True)),
+                    item_scope(req.get("root")))})
             elif action == "item-save":
                 self.send(200, {"ok": True, **item_save(
                     req.get("type", ""), req.get("name", ""), req.get("file"),
                     req.get("content", ""), bool(req.get("enabled", True)),
-                    req.get("base"))})
+                    req.get("base"), item_scope(req.get("root")))})
+            elif action == "item-copy":
+                # Either end may be the config dir: absent `from_root` copies
+                # one of your own items into a project, absent `to_root`
+                # copies a project's back out.
+                self.send(200, {"ok": True, **item_copy(
+                    req.get("type", ""), req.get("name", ""),
+                    item_scope(req.get("from_root")),
+                    item_scope(req.get("to_root")),
+                    bool(req.get("enabled", True)))})
             elif action == "hook-test":
                 self.send(200, hook_test(req.get("command", ""), req.get("event", "")))
             elif action == "statusline-save":
@@ -281,6 +302,43 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, {"ok": True, **project_restore(
                     req.get("root", ""), req.get("name", ""),
                     req.get("paths") or [])})
+            elif action == "project-mcp-set":
+                self.send(200, {"ok": True, **project_mcp_set(
+                    req.get("root", ""), req.get("name", ""),
+                    req.get("config"))})
+            elif action == "project-mcp-delete":
+                self.send(200, {"ok": True, **project_mcp_set(
+                    req.get("root", ""), req.get("name", ""), None)})
+            elif action == "project-mcp-approve":
+                # three answers, so the field is the tri-state itself rather
+                # than a bool: absent means "un-answer", not "reject"
+                self.send(200, {"ok": True, **project_mcp_approve(
+                    req.get("root", ""), req.get("name", ""),
+                    req.get("approved"))})
+            elif action == "project-registry":
+                # a POST like project-restore-inspect above, and for the same
+                # reason: it names a project root, and it shells out
+                self.send(200, registry_state(req.get("root", "")))
+            elif action == "project-marketplace-add":
+                self.send(200, marketplace_add(req.get("root", ""),
+                                               req.get("source", "")))
+            elif action == "project-marketplace-remove":
+                self.send(200, marketplace_remove(req.get("root", ""),
+                                                  req.get("name", "")))
+            elif action == "project-plugin-install":
+                self.send(200, plugin_install(req.get("root", ""),
+                                              req.get("id", "")))
+            elif action == "project-plugin-uninstall":
+                self.send(200, plugin_uninstall(req.get("root", ""),
+                                                req.get("id", "")))
+            elif action == "project-skill-override":
+                self.send(200, {"ok": True, **project_skill_override(
+                    req.get("root", ""), req.get("name", ""),
+                    req.get("value"))})
+            elif action == "project-setting-set":
+                self.send(200, {"ok": True, **project_setting_set(
+                    req.get("root", ""), req.get("key", ""), req.get("value"),
+                    bool(req.get("local", True)))})
             elif action == "mcp-save":
                 mcp_machine_set(req.get("name", ""), req.get("config"),
                                 bool(req.get("enabled", True)))
@@ -308,7 +366,8 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "item-model-set":
                 self.send(200, {"ok": True, **item_set_model(
                     req.get("name", ""), req.get("model", ""),
-                    bool(req.get("enabled", True)))})
+                    bool(req.get("enabled", True)),
+                    item_scope(req.get("root")))})
             elif action == "plugin-resync":
                 self.send(200, {"ok": True, **plugin_resync(
                     req.get("type", ""), req.get("name", ""))})

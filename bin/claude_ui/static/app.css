@@ -241,6 +241,20 @@ main {
 .drow .dmono { font-family: var(--font-mono); font-size: 0.75rem; }
 .drow .dactions { display: flex; gap: 0.375rem; margin-left: auto; }
 
+/* A heading inside a card body: the rows under it are one subject, not the
+   next item in a flat list. Weight and a quiet fill do the grouping, so the
+   card needs no second border to say the same thing. */
+.drow-head {
+  background: color-mix(in oklab, var(--muted) 45%, transparent);
+  font-weight: 600;
+}
+.drow-head:hover { background: color-mix(in oklab, var(--muted) 45%, transparent); }
+.drow-head .hint { font-weight: 400; }
+
+/* A .list nested in a card body indents to sit under the row that opened it,
+   rather than running edge to edge like the card's own rows. */
+.card-content .list { margin: 0 0.875rem 0.625rem 2rem; }
+
 /* ================================================================= backup === */
 /* A restore preview diff. Coloured by the leading +/- the way a terminal does,
    because that is the only place most people have read one. */

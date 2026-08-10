@@ -143,10 +143,36 @@ def project_claude_dir(raw):
                          "refusing to write through it")
     return cdir
 
+def project_root_file(raw, name):
+    """<registered root>/<name> for one of PROJECT_ROOT_FILES, refusing a
+    symlink — project_claude_dir()'s rule applied one level up.
+
+    These sit beside a project's .claude/ rather than inside it because that
+    is where Claude Code reads them, so they need their own gate: the name is
+    checked against the closed list, never joined from the request."""
+    if name not in PROJECT_ROOT_FILES:
+        raise ValueError(f"{name}: not a project file this app opens")
+    p = project_root(raw) / name
+    if p.exists() and p.resolve() != p:
+        raise ValueError(f"this project's {name} is a symlink — "
+                         "refusing to write through it")
+    return p
+
 # What a project's own .claude/ can hold that the config dir holds too, and
 # that a backup archive therefore has a copy of. Output styles are left out:
-# the Projects tab already reports them separately, read-only.
+# a backup's copy of one belongs to the config dir, and restoring it into a
+# project would change what PROJECT_ITEM_TYPES has always meant to backup.py.
 PROJECT_ITEM_TYPES = ("skills", "commands", "agents")
+
+# Every type the Projects tab manages in a project's own .claude/. Wider than
+# PROJECT_ITEM_TYPES above, which answers a different question — what a backup
+# archive may put there — and is left alone so backup.py's meaning doesn't move.
+PROJECT_MANAGED_TYPES = PROJECT_ITEM_TYPES + ("output-styles",)
+
+# The only files this app will open outside a project's .claude/. Each is one
+# Claude Code documents at the project root, so the list is a closed set rather
+# than a rule: nothing else up there is ours to touch.
+PROJECT_ROOT_FILES = ("CLAUDE.md", "CLAUDE.local.md", ".mcp.json")
 
 def project_items(cdir, type_):
     """Item names already in <project>/.claude/<type>/. Derived by looking,
@@ -169,8 +195,9 @@ def project_items(cdir, type_):
 def resolve_editable(raw):
     """Expand a user-supplied path and decide whether we'll open it at all.
 
-    Editable: the config dir, ~/.claude.json, and the .claude/ subtree of each
-    registered project root. Installed plugins are readable only. Returns
+    Editable: the config dir, ~/.claude.json, and — for each registered
+    project root — its .claude/ subtree plus the PROJECT_ROOT_FILES beside it.
+    Installed plugins are readable only. Returns
     (resolved Path, readonly bool); raises ValueError otherwise. The check
     runs against the *resolved* path, so a symlink sitting in the config dir
     is judged by where it points, not by where it lives — and a project whose
@@ -188,7 +215,15 @@ def resolve_editable(raw):
     if _within(p, config_dir().resolve()) or p == CLAUDE_JSON.resolve():
         return p, False
     for root in project_roots():
-        croot = root.resolve() / ".claude"
+        rroot = root.resolve()
+        # CLAUDE.md and .mcp.json live beside .claude/, not in it. The
+        # equality is against the *resolved* path, so a symlinked CLAUDE.md
+        # resolves elsewhere, fails to match, and is refused — the same
+        # protection the containment test below gives the subtree, with no
+        # branch of its own.
+        if any(p == rroot / n for n in PROJECT_ROOT_FILES):
+            return p, False
+        croot = rroot / ".claude"
         if croot.resolve() != croot:
             continue
         if _within(p, croot):

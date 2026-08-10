@@ -6,8 +6,9 @@ import os
 import shutil
 
 from .core import (CONFIG_FILES, ITEM_TYPES, SOURCE_KEY, atomic_write,
-                   config_dir, disabled_dir, item_rel, parse_frontmatter,
-                   resolve_editable, set_frontmatter_key, tilde)
+                   atomic_write_bytes, config_dir, disabled_dir, item_rel,
+                   parse_frontmatter, project_claude_dir, resolve_editable,
+                   set_frontmatter_key, tilde)
 
 
 MAX_EDIT = 2 * 1024 * 1024
@@ -18,12 +19,33 @@ def _todo_line(text):
     i = text.find("TODO")
     return text.count("\n", 0, i) + 1 if i >= 0 else 0
 
-def item_root(type_, enabled=True):
-    """Directory holding a type's items: live, or the disabled parking area."""
-    base = config_dir() if enabled else disabled_dir()
-    return base / type_
+def item_scope(root):
+    """The directory an item op works under: the config dir when no project
+    root was named, that project's gated .claude/ when one was.
 
-def resolve_item(type_, name, enabled=True):
+    Every project-scoped op resolves its scope here, so the registry check is
+    not something a new endpoint can forget to make. `None` in, `None` out —
+    every function below reads that as "the config dir", which leaves the
+    user-scope call sites exactly as they were.
+
+    Called `scope`, not `base`, throughout this module: `base` was already
+    taken by the mtime a save started from."""
+    return project_claude_dir(root) if root else None
+
+def item_root(type_, enabled=True, scope=None):
+    """Directory holding a type's items: live, or the disabled parking area.
+
+    `scope` is the config dir by default, and a registered project's gated
+    .claude/ when the Projects tab is managing that project's own copy. The
+    parking area keeps its shape either way, so a project's disabled items sit
+    in <project>/.claude/disabled/<type>/ — somewhere Claude Code does not
+    scan, legible in a plain `ls`, and committed with the repo like everything
+    else in there."""
+    if scope is None:
+        return (config_dir() if enabled else disabled_dir()) / type_
+    return (scope if enabled else scope / "disabled") / type_
+
+def resolve_item(type_, name, enabled=True, scope=None):
     if type_ not in ITEM_TYPES:
         raise ValueError("unknown type")
     rel = item_rel(name)
@@ -31,7 +53,7 @@ def resolve_item(type_, name, enabled=True):
         rel = rel.with_suffix(".md")
     elif len(rel.parts) != 1:
         raise ValueError("bad name")
-    return item_root(type_, enabled) / rel
+    return item_root(type_, enabled, scope) / rel
 
 def _dir_item(entry, enabled):
     skill_md = entry / "SKILL.md"
@@ -109,11 +131,12 @@ def _scan_md_type(root, enabled):
         })
     return items
 
-def scan_items(type_):
-    """Every item of a type on this machine: live first, then disabled."""
+def scan_items(type_, scope=None):
+    """Every item of a type in one scope: live first, then disabled. `scope`
+    is the config dir by default, a project's .claude/ when given."""
     scan = _scan_dir_type if ITEM_TYPES[type_]["kind"] == "dir" else _scan_md_type
-    return (scan(item_root(type_, True), True)
-            + scan(item_root(type_, False), False))
+    return (scan(item_root(type_, True, scope), True)
+            + scan(item_root(type_, False, scope), False))
 
 def config_files_state():
     """The single config files present in the config dir."""
@@ -126,13 +149,13 @@ def config_files_state():
                         "broken": p.is_symlink() and not p.exists()})
     return out
 
-def set_enabled(type_, name, enabled):
+def set_enabled(type_, name, enabled, scope=None):
     """Move an item between the live type dir and disabled/<type>/. `enabled`
     is the desired end state. Returns the item's new location string."""
     if type_ not in ITEM_TYPES:
         raise ValueError("unknown type")
-    src = resolve_item(type_, name, enabled=not enabled)
-    dst = resolve_item(type_, name, enabled=enabled)
+    src = resolve_item(type_, name, not enabled, scope)
+    dst = resolve_item(type_, name, enabled, scope)
     if not (src.exists() or src.is_symlink()):
         raise ValueError(f"{name}: not {'enabled' if not enabled else 'disabled'}")
     if dst.exists() or dst.is_symlink():
@@ -141,9 +164,20 @@ def set_enabled(type_, name, enabled):
             f"{'enabled' if enabled else 'disabled'} side — resolve by hand")
     dst.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dst)  # same filesystem: atomic, content untouched
-    # tidy now-empty dirs in the disabled area so it doesn't accrete cruft
-    disabled_side = src if not enabled else dst
-    _prune_empty_up(disabled_side.parent)
+    # Tidy the empty directories the move left behind, each side with its own
+    # floor. The parking area is ours alone, so it may empty out completely —
+    # not accreting cruft is the whole reason to prune it. The live side stops
+    # at the type dir: commands/ is a directory Claude Code scans, and
+    # disabling the last command is not a request to remove it, the rule
+    # item_delete() states below.
+    #
+    # Which end is which follows the direction of travel, and the stops are
+    # given rather than defaulted — the default climbs to the config dir,
+    # which under a project scope means walking out of .claude/ and into the
+    # repo.
+    live, parked = (dst, src) if enabled else (src, dst)
+    _prune_empty_up(parked.parent, stop=scope or config_dir())
+    _prune_empty_up(live.parent, stop=item_root(type_, True, scope))
     return tilde(dst)
 
 def _prune_empty_up(d, stop=None):
@@ -197,8 +231,8 @@ def _check_base(path, base):
         # choice, and the two run together badly if both editorialise.
         raise Conflict(f"{path.name} changed on disk since you opened it.")
 
-def item_read(type_, name, fname=None, enabled=True):
-    root = resolve_item(type_, name, enabled)
+def item_read(type_, name, fname=None, enabled=True, scope=None):
+    root = resolve_item(type_, name, enabled, scope)
     if ITEM_TYPES[type_]["kind"] == "md":
         if not root.is_file():
             raise ValueError(f"{name}: not found")
@@ -225,10 +259,10 @@ def _reject_bad_json(path, content):
         except json.JSONDecodeError as e:
             raise ValueError(f"invalid JSON: {e}") from None
 
-def item_save(type_, name, fname, content, enabled=True, base=None):
+def item_save(type_, name, fname, content, enabled=True, base=None, scope=None):
     if not isinstance(content, str) or len(content) > MAX_EDIT:
         raise ValueError("bad content")
-    root = resolve_item(type_, name, enabled)
+    root = resolve_item(type_, name, enabled, scope)
     if ITEM_TYPES[type_]["kind"] == "md":
         if not root.is_file():
             raise ValueError(f"{name}: not found")
@@ -243,7 +277,7 @@ def item_save(type_, name, fname, content, enabled=True, base=None):
     atomic_write(target, content)
     return {"path": tilde(target), **_stamp(target)}
 
-def item_create(type_, name, content, enabled=True):
+def item_create(type_, name, content, enabled=True, scope=None):
     """Write a brand-new item and hand back the same shape item_read returns.
 
     A name that exists on *either* side of disabled/ is a conflict, not just one
@@ -257,18 +291,56 @@ def item_create(type_, name, content, enabled=True):
         raise ValueError("nothing to write")
     if len(content) > MAX_EDIT:
         raise ValueError("bad content")
-    for side in (True, False):
-        p = resolve_item(type_, name, side)
-        if p.exists() or p.is_symlink():
-            raise ValueError(f"{name}: already exists at {tilde(p)}")
-    target = resolve_item(type_, name, enabled)
+    _need_free(type_, name, scope)
+    target = resolve_item(type_, name, enabled, scope)
     if ITEM_TYPES[type_]["kind"] == "dir":
         target = target / "SKILL.md"
     _reject_bad_json(target, content)
     atomic_write(target, content)
-    return item_read(type_, name, None, enabled)
+    return item_read(type_, name, None, enabled, scope)
 
-def item_delete(type_, name, enabled=True):
+def _need_free(type_, name, scope):
+    """Refuse a name already taken on either side of disabled/ — see
+    item_create() for why both sides count."""
+    for side in (True, False):
+        p = resolve_item(type_, name, side, scope)
+        if p.exists() or p.is_symlink():
+            raise ValueError(f"{name}: already exists at {tilde(p)}")
+
+def item_copy(type_, name, from_scope=None, to_scope=None, enabled=True):
+    """Copy an item between scopes: your config dir and a project's .claude/.
+
+    The contents, not the link. A skill symlinked in from a checkout copies the
+    files it points at, because the copy has to go on working when that
+    checkout moves — the mirror of item_delete() below, which unlinks and
+    leaves the target alone. Both rules come from the same place: neither may
+    reach into a directory we were never invited to write.
+
+    Nothing is removed at the source. Moving an item is a copy and then a
+    delete, two decisions the caller makes separately, because one of them
+    cannot be undone and the other can.
+    """
+    if from_scope == to_scope:
+        raise ValueError("source and destination are the same place")
+    src = resolve_item(type_, name, enabled, from_scope)
+    if not (src.is_dir() or src.is_file()):  # follows a symlink to its target
+        raise ValueError(f"{name}: not found")
+    _need_free(type_, name, to_scope)
+    dst = resolve_item(type_, name, enabled, to_scope)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_dir():
+        # temp-then-rename, the shape core._atomic uses: a copytree that dies
+        # half way leaves its mess under a dot-name, not a skill with three of
+        # its five files that Claude Code would happily load
+        tmp = dst.with_name(f".{dst.name}.claude-ui-tmp")
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.copytree(src, tmp, symlinks=False)
+        tmp.replace(dst)
+    else:
+        atomic_write_bytes(dst, src.read_bytes())
+    return {"path": tilde(dst), "name": name, "type": type_}
+
+def item_delete(type_, name, enabled=True, scope=None):
     """Remove an item for good. The one call in this module that destroys.
 
     A symlinked item loses the link and nothing else: a skill symlinked in from
@@ -281,8 +353,8 @@ def item_delete(type_, name, enabled=True):
     at the type root: `commands/` is a directory Claude Code scans, and
     deleting the last command in it is not a request to remove it.
     """
-    root = item_root(type_, enabled)
-    p = resolve_item(type_, name, enabled)
+    root = item_root(type_, enabled, scope)
+    p = resolve_item(type_, name, enabled, scope)
     if not (p.exists() or p.is_symlink()):
         raise ValueError(f"{name}: not found")
     files = 1
@@ -296,13 +368,13 @@ def item_delete(type_, name, enabled=True):
     _prune_empty_up(p.parent, stop=root)
     return {"deleted": tilde(p), "files": files}
 
-def item_set_model(name, model, enabled=True):
+def item_set_model(name, model, enabled=True, scope=None):
     """Rewrite an agent's `model:` frontmatter line; blank model removes it.
 
     Only agents: no other item type has a model. Goes through resolve_item, so
     this can never reach outside the config dir into a plugin's own copy.
     """
-    p = resolve_item("agents", name, enabled)
+    p = resolve_item("agents", name, enabled, scope)
     if not p.is_file():
         raise ValueError(f"{name}: not found")
     text = p.read_text(errors="replace")

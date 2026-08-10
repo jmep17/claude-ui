@@ -4,12 +4,14 @@ resolve_editable extension that lets the editor into <project>/.claude/.
 Stdlib unittest, no dependencies — `python3 -m unittest discover tests` from
 the repo root, or just `python3 tests/test_projects.py`.
 
-The ResolveEditable cases are the security battery: registering a project must
-open exactly its real .claude/ subtree and nothing else — not the rest of the
+The ResolveEditable and ItemScope cases are the security battery: registering a
+project must open exactly its real .claude/ subtree, the handful of files
+Claude Code documents beside it, and nothing else — not the rest of the
 project, not a symlink target outside it, and not anything reached through a
 .claude that is itself a symlink. The template cases pin the other load-bearing
 property: generated shell code never executes or sources repo content."""
 
+import json
 import os
 import pathlib
 import subprocess
@@ -20,7 +22,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "bin"))
 
-from claude_ui import core, projects  # noqa: E402
+from claude_ui import core, items, projects  # noqa: E402
 
 
 class Base(unittest.TestCase):
@@ -39,10 +41,18 @@ class Base(unittest.TestCase):
         # No — it imports the function itself; patch both to be explicit.
         self._p_config_dir = projects.config_dir
         projects.config_dir = core.config_dir
+        # items.py reaches the filesystem too, now that project_state scans a
+        # project's own .claude/ through it. Every scan here passes an explicit
+        # scope, so config_dir is not consulted — patched anyway, because a
+        # module that can read the developer's real ~/.claude is exactly how a
+        # suite starts passing for the wrong reason (see test_editor.py).
+        self._i_config_dir = items.config_dir
+        items.config_dir = core.config_dir
 
     def tearDown(self):
         core.config_dir = self._config_dir
         projects.config_dir = self._p_config_dir
+        items.config_dir = self._i_config_dir
         self.tmp.cleanup()
 
     def cdir(self):
@@ -354,6 +364,32 @@ class ResolveEditable(Base):
         with self.assertRaises(ValueError):
             self.ok(evil / ".claude" / "x.md")
 
+    def test_project_root_files_are_editable(self):
+        self.add()
+        for name in core.PROJECT_ROOT_FILES:
+            with self.subTest(name=name):
+                p, readonly = self.ok(self.proj / name)
+                self.assertFalse(readonly)
+                self.assertEqual(p, (self.proj / name).resolve())
+
+    def test_a_symlinked_project_root_file_is_rejected(self):
+        """The equality is against the resolved path, so a CLAUDE.md pointing
+        anywhere else stops matching and falls through to the refusal — the
+        containment test's protection, without a branch of its own."""
+        self.add()
+        outside = pathlib.Path(self.tmp.name) / "outside.md"
+        outside.write_text("x")
+        (self.proj / "CLAUDE.md").symlink_to(outside)
+        with self.assertRaises(ValueError):
+            self.ok(self.proj / "CLAUDE.md")
+
+    def test_a_neighbouring_file_is_still_rejected(self):
+        self.add()
+        for name in ("CLAUDE.md.bak", "package.json", ".mcp.json.orig"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    self.ok(self.proj / name)
+
     def test_config_dir_and_claude_json_behavior_unchanged(self):
         (self.cfg / "CLAUDE.md").write_text("x")
         p, readonly = self.ok(self.cfg / "CLAUDE.md")
@@ -365,6 +401,357 @@ class ResolveEditable(Base):
         plug.write_text("x")
         p, readonly = self.ok(plug)
         self.assertTrue(readonly)
+
+
+class ItemScope(Base):
+    """The gate between a request naming a project and an item op writing one.
+
+    Everything the Projects tab does to a project's skills, commands, agents
+    and output styles resolves its directory here first, so these are the
+    cases that decide whether an endpoint can be pointed at somewhere it was
+    never invited: the refusals belong to this one function, not to each of
+    the eight operations behind it.
+    """
+
+    def test_no_root_means_the_config_dir(self):
+        self.assertIsNone(items.item_scope(None))
+        self.assertIsNone(items.item_scope(""))
+
+    def test_registered_root_gives_its_claude_dir(self):
+        self.add()
+        self.assertEqual(items.item_scope(str(self.proj)), self.cdir().resolve())
+
+    def test_unregistered_root_is_refused(self):
+        with self.assertRaises(ValueError) as cm:
+            items.item_scope(str(self.proj))
+        self.assertIn("not a registered project", str(cm.exception))
+
+    def test_unregistering_closes_the_door_again(self):
+        self.add()
+        items.item_scope(str(self.proj))
+        projects.registry_remove(str(self.proj))
+        with self.assertRaises(ValueError):
+            items.item_scope(str(self.proj))
+
+    def test_a_claude_dir_that_is_a_symlink_is_refused(self):
+        evil = pathlib.Path(self.tmp.name) / "evil-proj"
+        evil.mkdir()
+        target = pathlib.Path(self.tmp.name) / "elsewhere"
+        target.mkdir()
+        (evil / ".claude").symlink_to(target)
+        projects.registry_add(str(evil))
+        with self.assertRaises(ValueError):
+            items.item_scope(str(evil))
+        # and nothing reached the directory it pointed at
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_a_sibling_of_a_registered_root_is_refused(self):
+        self.add()
+        sibling = self.proj.parent / "proj-evil"
+        (sibling / ".claude").mkdir(parents=True)
+        for raw in (str(sibling), str(self.proj) + "-evil",
+                    str(self.proj / ".." / "proj-evil")):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError):
+                    items.item_scope(raw)
+
+    def test_a_create_through_the_gate_lands_in_the_project(self):
+        self.add()
+        items.item_create("commands", "ship", "body\n",
+                          scope=items.item_scope(str(self.proj)))
+        self.assertEqual((self.cdir() / "commands" / "ship.md").read_text(),
+                         "body\n")
+        self.assertFalse((self.cfg / "commands").exists())
+
+
+class ProjectStateItems(Base):
+    """What the card reads: full rows, per scope, never raising."""
+
+    def test_items_are_scanned_rows_for_every_managed_type(self):
+        self.add()
+        (self.cdir() / "skills" / "pdf").mkdir(parents=True)
+        (self.cdir() / "skills" / "pdf" / "SKILL.md").write_text(
+            "---\nname: pdf\ndescription: reads pdfs\n---\nx\n")
+        st = projects.project_state(self.proj)
+        self.assertEqual(sorted(st["items"]), sorted(core.PROJECT_MANAGED_TYPES))
+        self.assertEqual(st["items"]["skills"][0]["description"], "reads pdfs")
+        self.assertTrue(st["items"]["skills"][0]["enabled"])
+        self.assertEqual(st["items"]["commands"], [])
+
+    def test_the_disabled_side_shows_up_too(self):
+        self.add()
+        (self.cdir() / "disabled" / "commands").mkdir(parents=True)
+        (self.cdir() / "disabled" / "commands" / "old.md").write_text("x\n")
+        rows = projects.project_state(self.proj)["items"]["commands"]
+        self.assertEqual([(r["name"], r["enabled"]) for r in rows], [("old", False)])
+
+    def test_a_project_that_vanished_still_reports(self):
+        st = projects.project_state(self.proj.parent / "gone")
+        self.assertTrue(st["missing"])
+        self.assertEqual(st["items"]["skills"], [])
+
+    def test_two_projects_do_not_see_each_others_items(self):
+        other = self.proj.parent / "other"
+        (other / ".claude" / "commands").mkdir(parents=True)
+        (other / ".claude" / "commands" / "theirs.md").write_text("x\n")
+        (self.cdir() / "commands").mkdir(parents=True)
+        (self.cdir() / "commands" / "mine.md").write_text("x\n")
+        self.assertEqual(
+            [r["name"] for r in projects.project_state(self.proj)["items"]["commands"]],
+            ["mine"])
+        self.assertEqual(
+            [r["name"] for r in projects.project_state(other)["items"]["commands"]],
+            ["theirs"])
+
+
+class ProjectSettings(Base):
+    """The second, deliberately small write path into settings files."""
+
+    def test_writes_local_by_default_and_keeps_the_other_keys(self):
+        self.add()
+        (self.cdir() / "settings.local.json").write_text(
+            '{"model": "opus", "outputStyle": "old"}')
+        projects.project_setting_set(self.proj, "outputStyle", "new")
+        data = json.loads((self.cdir() / "settings.local.json").read_text())
+        self.assertEqual(data, {"model": "opus", "outputStyle": "new"})
+        self.assertFalse((self.cdir() / "settings.json").exists())
+
+    def test_none_removes_the_key_rather_than_storing_null(self):
+        self.add()
+        projects.project_setting_set(self.proj, "outputStyle", "x")
+        projects.project_setting_set(self.proj, "outputStyle", None)
+        data = json.loads((self.cdir() / "settings.local.json").read_text())
+        self.assertEqual(data, {})
+
+    def test_shared_file_when_asked(self):
+        self.add()
+        projects.project_setting_set(self.proj, "outputStyle", "x", local=False)
+        self.assertTrue((self.cdir() / "settings.json").is_file())
+        self.assertFalse((self.cdir() / "settings.local.json").exists())
+
+    def test_refuses_a_key_outside_the_allowlist(self):
+        self.add()
+        for key in ("permissions", "hooks", "env", ""):
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError):
+                    projects.project_setting_set(self.proj, key, {"x": 1})
+        self.assertFalse((self.cdir() / "settings.local.json").exists())
+
+    def test_requires_registration(self):
+        with self.assertRaises(ValueError):
+            projects.project_setting_set(self.proj, "outputStyle", "x")
+
+    def test_refuses_a_settings_file_that_does_not_parse(self):
+        self.add()
+        (self.cdir() / "settings.local.json").write_text("{not json")
+        with self.assertRaises(ValueError):
+            projects.project_setting_set(self.proj, "outputStyle", "x")
+        self.assertEqual((self.cdir() / "settings.local.json").read_text(),
+                         "{not json")
+
+
+class SkillOverrides(Base):
+    """Claude Code's own per-skill switch, applied to a project.
+
+    The reason this exists beside the file move: a skill committed by someone
+    else must be switchable off without the repo showing a deletion. The docs
+    name settings.local.json for exactly that case, so that is where it goes
+    and the shared file stays untouched.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add()
+
+    def local(self):
+        return json.loads((self.cdir() / "settings.local.json").read_text())
+
+    def test_off_lands_in_settings_local_and_the_file_is_untouched(self):
+        (self.cdir() / "skills" / "shared").mkdir(parents=True)
+        skill = self.cdir() / "skills" / "shared" / "SKILL.md"
+        skill.write_text("---\nname: shared\n---\nx\n")
+        projects.project_skill_override(self.proj, "shared", "off")
+        self.assertEqual(self.local()["skillOverrides"], {"shared": "off"})
+        self.assertTrue(skill.is_file())
+        self.assertFalse((self.cdir() / "disabled").exists())
+        self.assertFalse((self.cdir() / "settings.json").exists())
+
+    def test_clearing_removes_the_entry_and_then_the_key(self):
+        projects.project_skill_override(self.proj, "a", "off")
+        projects.project_skill_override(self.proj, "b", "name-only")
+        projects.project_skill_override(self.proj, "a", None)
+        self.assertEqual(self.local()["skillOverrides"], {"b": "name-only"})
+        projects.project_skill_override(self.proj, "b", None)
+        self.assertNotIn("skillOverrides", self.local())
+
+    def test_other_entries_and_other_keys_survive(self):
+        (self.cdir() / "settings.local.json").write_text(
+            '{"model": "opus", "skillOverrides": {"keep": "off"}}')
+        projects.project_skill_override(self.proj, "new", "off")
+        d = self.local()
+        self.assertEqual(d["skillOverrides"], {"keep": "off", "new": "off"})
+        self.assertEqual(d["model"], "opus")
+
+    def test_only_the_four_documented_states(self):
+        for bad in ("disabled", "hidden", "OFF", ""):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    projects.project_skill_override(self.proj, "a", bad)
+        self.assertFalse((self.cdir() / "settings.local.json").exists())
+
+    def test_bad_names_and_unregistered_roots_are_refused(self):
+        with self.assertRaises(ValueError):
+            projects.project_skill_override(self.proj, "../evil", "off")
+        with self.assertRaises(ValueError):
+            projects.project_skill_override(self.proj.parent / "nope", "a", "off")
+
+    def test_state_reports_both_files_with_local_winning(self):
+        (self.cdir() / "settings.json").write_text(
+            '{"skillOverrides": {"a": "off", "b": "off"}}')
+        (self.cdir() / "settings.local.json").write_text(
+            '{"skillOverrides": {"b": "on"}}')
+        st = projects.project_state(self.proj)
+        self.assertEqual(st["skill_overrides"], {"a": "off", "b": "on"})
+
+    def test_no_overrides_is_an_empty_map_not_a_missing_key(self):
+        self.assertEqual(projects.project_state(self.proj)["skill_overrides"], {})
+
+
+class ProjectMcp(Base):
+    """<project>/.mcp.json — the servers a repo ships to whoever clones it."""
+
+    SERVER = {"command": "npx", "args": ["-y", "server"]}
+
+    def mcpfile(self):
+        return self.proj / ".mcp.json"
+
+    def test_add_edit_and_remove_one_server(self):
+        self.add()
+        projects.project_mcp_set(self.proj, "docs", self.SERVER)
+        data = json.loads(self.mcpfile().read_text())
+        self.assertEqual(data["mcpServers"]["docs"], self.SERVER)
+        projects.project_mcp_set(self.proj, "docs", {"url": "https://x/mcp"})
+        data = json.loads(self.mcpfile().read_text())
+        self.assertEqual(data["mcpServers"]["docs"], {"url": "https://x/mcp"})
+        projects.project_mcp_set(self.proj, "docs", None)
+        self.assertFalse(self.mcpfile().exists())
+
+    def test_removing_one_of_two_leaves_the_other(self):
+        self.add()
+        projects.project_mcp_set(self.proj, "a", self.SERVER)
+        projects.project_mcp_set(self.proj, "b", self.SERVER)
+        projects.project_mcp_set(self.proj, "a", None)
+        data = json.loads(self.mcpfile().read_text())
+        self.assertEqual(list(data["mcpServers"]), ["b"])
+
+    def test_other_keys_in_the_file_survive_and_keep_it_alive(self):
+        self.add()
+        self.mcpfile().write_text('{"note": "ours", "mcpServers": {}}')
+        projects.project_mcp_set(self.proj, "docs", self.SERVER)
+        projects.project_mcp_set(self.proj, "docs", None)
+        self.assertEqual(json.loads(self.mcpfile().read_text()), {"note": "ours"})
+
+    def test_a_config_with_neither_command_nor_url_is_refused(self):
+        self.add()
+        with self.assertRaises(ValueError):
+            projects.project_mcp_set(self.proj, "docs", {"args": []})
+        self.assertFalse(self.mcpfile().exists())
+
+    def test_bad_json_is_reported_and_never_overwritten(self):
+        self.add()
+        self.mcpfile().write_text("{not json")
+        st = projects.project_mcp_state(self.proj)
+        self.assertTrue(st["error"])
+        self.assertEqual(st["servers"], [])
+        with self.assertRaises(ValueError):
+            projects.project_mcp_set(self.proj, "docs", self.SERVER)
+        self.assertEqual(self.mcpfile().read_text(), "{not json")
+
+    def test_a_symlinked_mcp_file_is_refused(self):
+        self.add()
+        outside = pathlib.Path(self.tmp.name) / "outside.json"
+        outside.write_text("{}")
+        self.mcpfile().symlink_to(outside)
+        with self.assertRaises(ValueError):
+            projects.project_mcp_set(self.proj, "docs", self.SERVER)
+        self.assertEqual(outside.read_text(), "{}")
+        # and the card reports it instead of taking the payload down
+        self.assertIn("symlink", projects.project_state(self.proj)["mcp"]["error"])
+
+    def test_requires_registration(self):
+        with self.assertRaises(ValueError):
+            projects.project_mcp_set(self.proj, "docs", self.SERVER)
+        with self.assertRaises(ValueError):
+            projects.project_mcp_state(self.proj)
+        self.assertFalse(self.mcpfile().exists())
+
+    def test_bad_server_names_are_refused(self):
+        self.add()
+        for name in ("", "../evil", "a b", ".hidden"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    projects.project_mcp_set(self.proj, name, self.SERVER)
+
+
+class McpApproval(Base):
+    """Approved / rejected / undecided, and where the answer is recorded."""
+
+    def setUp(self):
+        super().setUp()
+        self.add()
+        projects.project_mcp_set(self.proj, "docs", {"command": "npx"})
+
+    def approval(self):
+        return projects.project_mcp_state(self.proj)["servers"][0]["approval"]
+
+    def test_starts_undecided(self):
+        self.assertEqual(self.approval(), "undecided")
+
+    def test_approve_reject_and_clear_round_trip(self):
+        projects.project_mcp_approve(self.proj, "docs", True)
+        self.assertEqual(self.approval(), "approved")
+        projects.project_mcp_approve(self.proj, "docs", False)
+        self.assertEqual(self.approval(), "rejected")
+        projects.project_mcp_approve(self.proj, "docs", None)
+        self.assertEqual(self.approval(), "undecided")
+
+    def test_the_answer_lands_in_settings_local_only(self):
+        projects.project_mcp_approve(self.proj, "docs", True)
+        local = json.loads((self.cdir() / "settings.local.json").read_text())
+        self.assertEqual(local["enabledMcpjsonServers"], ["docs"])
+        self.assertNotIn("disabledMcpjsonServers", local)
+        self.assertFalse((self.cdir() / "settings.json").exists())
+
+    def test_approving_removes_a_previous_rejection(self):
+        projects.project_mcp_approve(self.proj, "docs", False)
+        projects.project_mcp_approve(self.proj, "docs", True)
+        local = json.loads((self.cdir() / "settings.local.json").read_text())
+        self.assertEqual(local["enabledMcpjsonServers"], ["docs"])
+        self.assertNotIn("disabledMcpjsonServers", local)
+
+    def test_other_servers_answers_are_left_alone(self):
+        (self.cdir() / "settings.local.json").write_text(
+            '{"enabledMcpjsonServers": ["other"], "model": "opus"}')
+        projects.project_mcp_approve(self.proj, "docs", True)
+        local = json.loads((self.cdir() / "settings.local.json").read_text())
+        self.assertEqual(local["enabledMcpjsonServers"], ["docs", "other"])
+        self.assertEqual(local["model"], "opus")
+
+    def test_the_shared_file_is_read_even_though_it_is_not_written(self):
+        (self.cdir() / "settings.json").write_text(
+            '{"enabledMcpjsonServers": ["docs"]}')
+        self.assertEqual(self.approval(), "approved")
+
+    def test_enable_all_approves_the_undecided(self):
+        (self.cdir() / "settings.json").write_text(
+            '{"enableAllProjectMcpServers": true}')
+        self.assertEqual(self.approval(), "approved")
+
+    def test_an_explicit_rejection_beats_enable_all(self):
+        (self.cdir() / "settings.json").write_text(
+            '{"enableAllProjectMcpServers": true}')
+        projects.project_mcp_approve(self.proj, "docs", False)
+        self.assertEqual(self.approval(), "rejected")
 
 
 class _Result:

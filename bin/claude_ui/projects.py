@@ -12,15 +12,19 @@ change a claude invocation just by containing files.
 """
 
 from pathlib import Path
+import json
 import os
 import re
 import shutil
 import subprocess
 
 from .assist import _cli_flags
-from .core import (PROJECT_ITEM_TYPES, PROJECTS_REGISTRY, _read_json_object,
-                   atomic_write, config_dir, project_items, project_root,
+from .core import (NAME_RE, PROJECT_MANAGED_TYPES, PROJECTS_REGISTRY,
+                   _read_json_object, atomic_write, config_dir,
+                   project_claude_dir, project_root, project_root_file,
                    project_roots, tilde)
+from .items import scan_items
+from .mcp import validate_mcp_config
 
 
 # ---- registry (the read half, project_roots, lives in core.py) ----
@@ -212,10 +216,34 @@ def project_state(root):
         "output_styles": (sorted(p.name for p in styles_dir.glob("*.md"))
                           if styles_dir.is_dir() else []),
         "output_style_setting": _output_style_setting(cdir),
-        # read-only, like output_styles above: what this project already holds
-        # of the three types a backup can restore into it
-        "items": {t: project_items(cdir, t) for t in PROJECT_ITEM_TYPES},
+        # the same rows the inventory tabs render, scoped to this project's
+        # own .claude/ — descriptions, badges and the disabled side included,
+        # because the card manages these now rather than just naming them
+        "items": {t: _scan(cdir, t) for t in PROJECT_MANAGED_TYPES},
+        "mcp": _mcp(root),
+        "skill_overrides": _skill_overrides(cdir),
     }
+
+def _mcp(root):
+    """project_mcp_state() for the card, never raising. It goes through the
+    gates, and a gate's job is to refuse — an unregistered or symlinked
+    project must show up as a message on its card, not as a 400 that takes
+    every other project's card down with it."""
+    try:
+        return project_mcp_state(root)
+    except (ValueError, OSError) as e:
+        return {"path": "", "exists": False, "error": str(e),
+                "servers": [], "approval": {"all": False, "enabled": [],
+                                            "disabled": [], "files": {}}}
+
+def _scan(cdir, type_):
+    """scan_items() for a project, never raising. project_state() promises a
+    broken project reports rather than blows up, and a scan reads files: an
+    unreadable one must cost that type's list, not the whole card."""
+    try:
+        return scan_items(type_, scope=cdir)
+    except OSError:
+        return []
 
 def _wrapper_state(cdir):
     p = cdir / WRAPPER_NAME
@@ -384,6 +412,198 @@ def wrapper_test(root):
                 break
     return {"ok": bool(matched_line), "mode": st["mode"],
             "matched_line": matched_line, "answer": answer[:500]}
+
+
+# ---- a project's own settings keys, and its own MCP servers ----
+
+# The keys the Projects tab writes into a project's settings files. An
+# allowlist rather than a rule: settings.settings_set() validates against the
+# schema and knows only the config dir, so this is a second, much smaller
+# write path, and a small one is only safe while it stays small.
+PROJECT_SETTING_KEYS = ("outputStyle", "enabledMcpjsonServers",
+                        "disabledMcpjsonServers", "enableAllProjectMcpServers",
+                        "skillOverrides")
+
+SETTINGS_LOCAL = "settings.local.json"
+SETTINGS_SHARED = "settings.json"
+
+def project_setting_set(root, key, value, local=True):
+    """Merge one key into a project's settings file, leaving the rest alone.
+
+    `local` picks settings.local.json — personal and normally gitignored,
+    which is where a decision about this machine belongs; settings.json is the
+    one the team clones. A value of None removes the key rather than storing a
+    null, so a cleared setting reads as absent to Claude Code, which is not
+    the same thing.
+    """
+    if key not in PROJECT_SETTING_KEYS:
+        raise ValueError(f"{key}: not a setting the Projects tab writes")
+    cdir = project_claude_dir(root)
+    path = cdir / (SETTINGS_LOCAL if local else SETTINGS_SHARED)
+    data, err = _read_json_object(path)
+    if err:
+        raise ValueError(f"{tilde(path)}: {err} — fix it by hand first")
+    if value is None:
+        data.pop(key, None)
+    else:
+        data[key] = value
+    atomic_write(path, json.dumps(data, indent=2) + "\n")
+    return {"path": tilde(path), "key": key, "value": value}
+
+SKILL_OVERRIDE_VALUES = ("on", "name-only", "user-invocable-only", "off")
+
+def project_skill_override(root, name, value):
+    """Set (or clear, value=None) one skillOverrides entry for a project.
+
+    The other way to switch a project's skill off, and the right one when the
+    skill is not yours: moving the file parks it in .claude/disabled/, which
+    for a skill committed by a teammate is a deletion in the next diff. This
+    changes nothing in the repo — the entry goes to settings.local.json, the
+    file Claude Code's own /skills menu writes and the one a project normally
+    gitignores.
+
+    Claude Code reads this per skill name, not per scope, so an entry here
+    also silences a personal skill of the same name while you are in this
+    project. That is Claude Code's model, not a choice this makes.
+    """
+    if not NAME_RE.match(name or ""):
+        raise ValueError("bad skill name")
+    if value is not None and value not in SKILL_OVERRIDE_VALUES:
+        raise ValueError("bad override value")
+    cdir = project_claude_dir(root)
+    data, err = _read_json_object(cdir / SETTINGS_LOCAL)
+    if err:
+        raise ValueError(f"{tilde(cdir / SETTINGS_LOCAL)}: {err} — "
+                         "fix it by hand first")
+    cur = data.get("skillOverrides")
+    cur = dict(cur) if isinstance(cur, dict) else {}
+    if value is None:
+        cur.pop(name, None)
+    else:
+        cur[name] = value
+    project_setting_set(root, "skillOverrides", cur or None)
+    return {"name": name, "value": value}
+
+def _skill_overrides(cdir):
+    """Every skillOverrides entry in force for this project, both files."""
+    out = {}
+    for fname in (SETTINGS_SHARED, SETTINGS_LOCAL):
+        data, _ = _read_json_object(cdir / fname)
+        val = data.get("skillOverrides")
+        if isinstance(val, dict):
+            out.update({k: v for k, v in val.items() if isinstance(v, str)})
+    return out
+
+def _mcp_approval(cdir):
+    """How each named server stands, read from both project settings files.
+
+    Claude Code prompts about a .mcp.json server the first time it is used and
+    records the answer in these lists, so a name in neither is not "off" — it
+    is undecided, and saying so is the difference between a badge that informs
+    and one that lies."""
+    out = {"all": False, "enabled": [], "disabled": [], "files": {}}
+    for name in (SETTINGS_SHARED, SETTINGS_LOCAL):
+        data, _ = _read_json_object(cdir / name)
+        seen = {}
+        if data.get("enableAllProjectMcpServers") is True:
+            out["all"] = True
+            seen["enableAllProjectMcpServers"] = True
+        for key, bucket in (("enabledMcpjsonServers", "enabled"),
+                            ("disabledMcpjsonServers", "disabled")):
+            vals = [v for v in (data.get(key) or []) if isinstance(v, str)]
+            if vals:
+                out[bucket] += vals
+                seen[key] = vals
+        if seen:
+            out["files"][name] = seen
+    return out
+
+def _approval_of(name, ap):
+    # disabled wins over enabled and over the blanket approval: a rejection is
+    # a specific answer about one server, the others are defaults
+    if name in ap["disabled"]:
+        return "rejected"
+    if name in ap["enabled"] or ap["all"]:
+        return "approved"
+    return "undecided"
+
+def project_mcp_state(root):
+    """The servers in a project's .mcp.json, and where each one stands.
+
+    A project's file wraps them in "mcpServers", like ~/.claude.json and
+    unlike a plugin's flat .mcp.json (plugins.py). Bad JSON is reported rather
+    than swallowed — an empty list and an unreadable file must not look the
+    same, because one of them means every server in the repo is silently
+    absent."""
+    cdir = project_claude_dir(root)
+    path = project_root_file(root, ".mcp.json")
+    data, err = _read_json_object(path)
+    servers = data.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        servers, err = {}, err or "mcpServers is not an object"
+    ap = _mcp_approval(cdir)
+    return {
+        "path": tilde(path), "exists": path.is_file(), "error": err,
+        "servers": [{"name": n, "config": c, "approval": _approval_of(n, ap)}
+                    for n, c in sorted(servers.items())],
+        "approval": ap,
+    }
+
+def project_mcp_set(root, name, config):
+    """Add, replace (config=…) or remove (config=None) one server.
+
+    Only the named server changes: the rest of .mcp.json is read, merged and
+    written back, because that file is committed and everything else in it
+    belongs to whoever wrote it."""
+    if not NAME_RE.match(name or ""):
+        raise ValueError("bad server name")
+    path = project_root_file(root, ".mcp.json")
+    data, err = _read_json_object(path)
+    if err:
+        raise ValueError(f"{tilde(path)}: {err} — refusing to touch it")
+    servers = data.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise ValueError(f"{tilde(path)}: mcpServers is not an object")
+    if config is None:
+        if name not in servers:
+            raise ValueError(f"{name}: not in {tilde(path)}")
+        servers.pop(name)
+    else:
+        validate_mcp_config(config)
+        servers[name] = config
+    if servers:
+        data["mcpServers"] = servers
+        atomic_write(path, json.dumps(data, indent=2) + "\n")
+    else:
+        data.pop("mcpServers", None)
+        # a file holding nothing else has nothing left to say; leaving an
+        # empty {} behind would commit a puzzle to the repo
+        if data:
+            atomic_write(path, json.dumps(data, indent=2) + "\n")
+        else:
+            path.unlink(missing_ok=True)
+    return {"path": tilde(path), "name": name}
+
+def project_mcp_approve(root, name, approved):
+    """Approve (True), reject (False) or un-answer (None) one server.
+
+    Written to settings.local.json: the answer is about this machine trusting
+    this server, not about what the repo asks of everyone who clones it."""
+    if not NAME_RE.match(name or ""):
+        raise ValueError("bad server name")
+    cdir = project_claude_dir(root)
+    data, err = _read_json_object(cdir / SETTINGS_LOCAL)
+    if err:
+        raise ValueError(f"{tilde(cdir / SETTINGS_LOCAL)}: {err} — "
+                         "fix it by hand first")
+    for key, wanted in (("enabledMcpjsonServers", True),
+                        ("disabledMcpjsonServers", False)):
+        vals = [v for v in (data.get(key) or [])
+                if isinstance(v, str) and v != name]
+        if approved is wanted:
+            vals.append(name)
+        project_setting_set(root, key, sorted(set(vals)) or None)
+    return {"name": name, "approval": _approval_of(name, _mcp_approval(cdir))}
 
 
 # ---- assembled payload for GET /api/projects ----

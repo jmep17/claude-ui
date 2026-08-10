@@ -60,13 +60,19 @@ function edKeep() {
   return false;
 }
 
-async function openItemEditor(type, name, file, enabled, locate) {
+/* `root` names a registered project when the item is that project's own
+   rather than one of yours. It is the only difference: the same endpoint, the
+   same payload, so everything downstream — the file tabs, the conflict
+   handling, the doctor strip — works on a project's skill without knowing it
+   is one. It is kept on EDITING so the save can send it back. */
+async function openItemEditor(type, name, file, enabled, locate, root) {
   if (EDITING && !confirmDiscard()) return edKeep();
   try {
     const q = "type=" + encodeURIComponent(type) + "&name=" + encodeURIComponent(name)
       + "&enabled=" + (enabled ? "1" : "0")
-      + (file ? "&file=" + encodeURIComponent(file) : "");
-    EDITING = { item: true, ...(await api("/api/item?" + q)) };
+      + (file ? "&file=" + encodeURIComponent(file) : "")
+      + (root ? "&root=" + encodeURIComponent(root) : "");
+    EDITING = { item: true, root: root || null, ...(await api("/api/item?" + q)) };
     ED.locate = locate || null;
     edOpened();
   } catch (e) { toast(e.message, true); }
@@ -179,7 +185,7 @@ async function saveFile() {
       ? await api("/api/item-save", {
           type: EDITING.type, name: EDITING.name, file: EDITING.file,
           content: EDITING.content, enabled: EDITING.enabled,
-          base: EDITING.mtime })
+          base: EDITING.mtime, root: EDITING.root })
       : await api("/api/path-save", {
           path: EDITING.abs || EDITING.path, content: EDITING.content,
           base: EDITING.mtime });
@@ -216,7 +222,8 @@ async function edConflict(msg) {
   await copyText(mine, "your version to the clipboard");
   EDITING.dirty = false;
   if (EDITING.item)
-    await openItemEditor(EDITING.type, EDITING.name, EDITING.file, EDITING.enabled);
+    await openItemEditor(EDITING.type, EDITING.name, EDITING.file,
+                         EDITING.enabled, null, EDITING.root);
   else
     await openPath(EDITING.abs || EDITING.path);
   // The file provably changed, so the cached findings describe a version that
@@ -405,6 +412,10 @@ function edLocalLint() {
 /* Doctor findings whose target is this exact file. */
 function edDoctorFindings() {
   if (!DOCTOR || !EDITING) return [];
+  // The doctor only ever inspects the config dir, and its item targets carry
+  // a type and a name — which a project's own skill can match exactly while
+  // being a different file. Nothing here belongs to one of those.
+  if (EDITING.root) return [];
   return DOCTOR.findings.filter((f) => {
     const t = f.target;
     if (!t) return false;
@@ -898,7 +909,7 @@ function renderEditor() {
       tabs.append(el("button.btn.btn-sm", {
         class: name === f.file ? "on" : "",
         text: name,
-        onclick: () => { edSync(); openItemEditor(f.type, f.name, name, f.enabled); },
+        onclick: () => { edSync(); openItemEditor(f.type, f.name, name, f.enabled, null, f.root); },
       }));
     shell.append(tabs);
   }
