@@ -1943,12 +1943,36 @@ function localModelBody(p) {
     value: p.config.api_key || "" });
   const sel = el("select");
   const models = LOCALPROBE && LOCALPROBE.ok ? LOCALPROBE.models : [];
+  // per-model size + the server's live memory ceiling (probe best-effort);
+  // 1024-based GB so the numbers match what oMLX itself prints
+  const minfo = (LOCALPROBE && LOCALPROBE.info) || {};
+  const gb = (b) => (b / (1024 ** 3)).toFixed(1);
   sel.append(opt("", models.length ? "Pick a model…" : "Fetch models first…"));
-  for (const m of models) sel.append(opt(m));
+  for (const m of models) {
+    const i = minfo[m];
+    sel.append(opt(m, m + (i && i.size ? " · " + gb(i.size) + " GB" : "")
+      + (i && i.fits === false ? " — won't fit" : "")));
+  }
   // keep a saved model visible even when it's not in (or there is no) fetch
   if (p.config.model && !models.includes(p.config.model))
     sel.append(opt(p.config.model, p.config.model + " (saved)"));
   if (p.config.model) sel.value = p.config.model;
+  // the "this model cannot load right now" warning, kept in step with the
+  // selection so it is on screen before Save, not after claude-local dies
+  const fitrow = el("div.lmrow");
+  const fitsync = () => {
+    fitrow.replaceChildren();
+    const i = minfo[sel.value];
+    if (i && i.fits === false)
+      fitrow.append(icon("warn"), el("span.li-desc", { text:
+        "needs " + gb(i.size) + " GB but the server's memory ceiling is "
+        + gb(LOCALPROBE.ceiling) + " GB right now — quit memory-heavy apps, "
+        + "or raise it in the oMLX admin page: Settings → Resource Management "
+        + "→ Reserve level (aggressive, or custom + a GB value), then restart "
+        + "oMLX" }));
+  };
+  sel.addEventListener("change", fitsync);
+  fitsync();
 
   const save = async (probe) => {
     try {
@@ -1974,6 +1998,7 @@ function localModelBody(p) {
     el("span.lmlbl", { text: "model" }), filterSelect(sel),
     mkbtn("btn-sm btn-primary", "Save", () => save(false),
       "Store the choice and, if installed, regenerate claude-local.sh")));
+  box.append(fitrow);
   if (LOCALPROBE && !(LOCALPROBE.ok && LOCALPROBE.models.length))
     box.append(el("div.lmrow", {}, icon("warn"),
       el("span.li-desc", { text: (LOCALPROBE.detail || "no models")
@@ -1985,12 +2010,16 @@ function localModelBody(p) {
         "One real generation through claude-local — free, but runs on this machine"),
       mkbtn("btn-sm btn-ghost", "Copy run command",
         () => copyText("claude-local", "run command"))));
-  if (LOCALTEST)
+  if (LOCALTEST) {
     box.append(el("div.lmrow", {},
       icon(LOCALTEST.ok ? "check" : "warn"),
       LOCALTEST.ok ? badge("local model answered", "success")
                    : badge("unexpected answer", "destructive"),
       el("span.li-desc.dmono", { text: LOCALTEST.answer || "(no output)" })));
+    if (LOCALTEST.hint)
+      box.append(el("div.lmrow", {},
+        el("span.li-desc", { text: LOCALTEST.hint.replace(/^ — /, "") })));
+  }
   return box;
 }
 

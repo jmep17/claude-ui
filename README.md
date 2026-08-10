@@ -67,7 +67,9 @@ owns, links, tracks, or syncs anything:
   server (Anthropic-compatible, so no proxy). A generated `claude-local.sh`
   exports `ANTHROPIC_BASE_URL` and the model names and execs `claude`; plain
   `claude` stays on the Anthropic API. The model picker lists what the server
-  actually serves (`GET /v1/models`). Applying also adds the model to every
+  actually serves (`GET /v1/models`), each with its size and a "won't fit"
+  flag against the server's live memory ceiling, so a model that cannot load
+  on this machine is flagged before it is saved. Applying also adds the model to every
   session's `/model` picker via `env.ANTHROPIC_CUSTOM_MODEL_OPTION` in
   `settings.json` (additive — nothing is restricted) and a `$0` pricing
   override so local sessions stay visible on the Costs tab.

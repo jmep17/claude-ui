@@ -353,40 +353,83 @@ def local_remove():
 
 # ---- probes: a free reachability check and a live generation ----
 
+def _get_json(url, api_key, timeout=5):
+    req = urllib.request.Request(url)
+    if api_key:
+        req.add_header("Authorization", "Bearer " + api_key)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
 def local_probe(base_url=None):
     """Free: GET /v1/models off the server. An unreachable server is the
     expected 'oMLX not running' answer, so this returns ok: False rather than
-    raising."""
+    raising.
+
+    Also asks /v1/models/status (best-effort) for each model's on-disk size
+    and the pool's memory ceiling — oMLX refuses to load a model bigger than
+    the ceiling, and the ceiling is recomputed from reclaimable RAM at load
+    time, so a model can list fine and still fail to run. Knowing both numbers
+    here lets the picker say "won't fit" before the model is saved instead of
+    after claude-local dies on it. Any failure (older oMLX, endpoint missing)
+    just means no annotations."""
     base = (base_url or "").strip().rstrip("/") or local_cfg().get("base_url") \
         or DEFAULT_BASE_URL
     if not _URL_RE.match(base):
-        return {"ok": False, "models": [],
+        return {"ok": False, "models": [], "ceiling": 0, "info": {},
                 "detail": "base URL must be http(s)://… with no spaces or quotes"}
     url = base + "/v1/models"
-    req = urllib.request.Request(url)
     key = local_cfg().get("api_key")
-    if key:
-        req.add_header("Authorization", "Bearer " + key)
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
+        data = _get_json(url, key)
     except urllib.error.HTTPError as e:
         hint = " — set the API key" if e.code in (401, 403) else ""
-        return {"ok": False, "models": [],
+        return {"ok": False, "models": [], "ceiling": 0, "info": {},
                 "detail": f"server reachable but HTTP {e.code}{hint}"}
     except (urllib.error.URLError, OSError) as e:
-        return {"ok": False, "models": [],
+        return {"ok": False, "models": [], "ceiling": 0, "info": {},
                 "detail": str(getattr(e, "reason", e) or e)}
     except json.JSONDecodeError:
-        return {"ok": False, "models": [],
+        return {"ok": False, "models": [], "ceiling": 0, "info": {},
                 "detail": f"{url} did not return JSON — is that really oMLX?"}
     rows = data.get("data") if isinstance(data, dict) else None
     models = sorted(r["id"] for r in rows or []
                     if isinstance(r, dict) and isinstance(r.get("id"), str))
-    return {"ok": True, "models": models,
+    ceiling, info = 0, {}
+    try:
+        status = _get_json(base + "/v1/models/status", key)
+        c = status.get("final_ceiling")
+        ceiling = int(c) if isinstance(c, (int, float)) and c > 0 else 0
+        for m in status.get("models") or []:
+            if not isinstance(m, dict):
+                continue
+            size = m.get("estimated_size")
+            size = int(size) if isinstance(size, (int, float)) and size > 0 else 0
+            row = {"size": size,
+                   "fits": (size <= ceiling) if size and ceiling else None,
+                   "loaded": bool(m.get("loaded"))}
+            # /v1/models lists a model under its alias when one is set; the
+            # status row carries both names, so file the info under each
+            for mid in (m.get("id"), m.get("model_alias")):
+                if isinstance(mid, str) and mid:
+                    info[mid] = row
+    except Exception:
+        pass
+    return {"ok": True, "models": models, "ceiling": ceiling, "info": info,
             "detail": f"{len(models)} model{'s' if len(models) != 1 else ''} at {base}"}
 
 LOCAL_TEST_PROMPT = "Reply with exactly: LOCAL OK"
+
+# Every oMLX refuse-to-load message contains "memory ceiling" (its
+# ModelTooLargeError). Without this mapping the user sees a raw API error and
+# has to work out on their own that the fix lives in oMLX's settings.
+CEILING_HINT = (" — the model is bigger than oMLX's memory ceiling, which is "
+                "recomputed from free RAM at load time. Quit memory-heavy "
+                "apps, or raise the ceiling in the oMLX admin page: Settings "
+                "→ Resource Management → Reserve level (aggressive, or custom "
+                "with an explicit GB value), then restart the oMLX server.")
+
+def _ceiling_hint(text):
+    return CEILING_HINT if "memory ceiling" in (text or "") else ""
 
 def local_test():
     """One real generation through the wrapper. Free in dollars, but it runs
@@ -407,9 +450,12 @@ def local_test():
                          "(first load can be slow)") from None
     except (OSError, subprocess.SubprocessError) as e:
         raise ValueError(f"could not run the wrapper: {e}") from None
+    blob = (r.stdout or "") + (r.stderr or "")
     if r.returncode != 0:
         raise ValueError("claude failed: "
-                         + (r.stderr.strip() or f"exit {r.returncode}")[:500])
+                         + (r.stderr.strip() or f"exit {r.returncode}")[:500]
+                         + _ceiling_hint(blob))
     answer = r.stdout.strip()
     ok = "local ok" in re.sub(r"[^a-z0-9]+", " ", answer.lower())
-    return {"ok": ok, "answer": answer[:500]}
+    return {"ok": ok, "answer": answer[:500],
+            "hint": "" if ok else _ceiling_hint(blob)}

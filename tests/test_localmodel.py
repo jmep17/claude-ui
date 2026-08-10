@@ -456,6 +456,68 @@ class Probe(Base):
         r = localmodel.local_probe("ftp://nope")
         self.assertFalse(r["ok"])
 
+    def test_fit_info_from_status_endpoint(self):
+        gib = 1024 ** 3
+        by_url = {
+            "/v1/models": {"data": [{"id": "small"}, {"id": "nice-name"}]},
+            "/v1/models/status": {
+                "final_ceiling": 20 * gib,
+                "models": [
+                    {"id": "small", "estimated_size": 8 * gib, "loaded": True},
+                    {"id": "big/one", "model_alias": "nice-name",
+                     "estimated_size": 25 * gib, "loaded": False},
+                ]},
+        }
+        def route(req, timeout=None):
+            path = req.full_url.split("8000", 1)[1]
+            return _Resp(json.dumps(by_url[path]).encode())
+        with mock.patch("urllib.request.urlopen", side_effect=route):
+            r = localmodel.local_probe()
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["ceiling"], 20 * gib)
+        self.assertTrue(r["info"]["small"]["fits"])
+        self.assertTrue(r["info"]["small"]["loaded"])
+        # the oversized model is filed under both its id and its alias — the
+        # /v1/models list shows the alias, so the picker looks it up by that
+        self.assertFalse(r["info"]["nice-name"]["fits"])
+        self.assertFalse(r["info"]["big/one"]["fits"])
+        self.assertEqual(r["info"]["nice-name"]["size"], 25 * gib)
+
+    def test_status_endpoint_failure_is_soft(self):
+        body = json.dumps({"data": [{"id": "m"}]}).encode()
+        def route(req, timeout=None):
+            if req.full_url.endswith("/v1/models"):
+                return _Resp(body)
+            raise urllib.error.HTTPError("u", 404, "nope", {}, None)
+        with mock.patch("urllib.request.urlopen", side_effect=route):
+            r = localmodel.local_probe()
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["models"], ["m"])
+        self.assertEqual(r["ceiling"], 0)
+        self.assertEqual(r["info"], {})
+
+    def test_no_fit_verdict_without_a_ceiling(self):
+        by_url = {
+            "/v1/models": {"data": [{"id": "m"}]},
+            "/v1/models/status": {
+                "final_ceiling": 0,
+                "models": [{"id": "m", "estimated_size": 5, "loaded": False}]},
+        }
+        def route(req, timeout=None):
+            path = req.full_url.split("8000", 1)[1]
+            return _Resp(json.dumps(by_url[path]).encode())
+        with mock.patch("urllib.request.urlopen", side_effect=route):
+            r = localmodel.local_probe()
+        self.assertIsNone(r["info"]["m"]["fits"])
+
+    def test_ceiling_error_maps_to_a_hint(self):
+        # the exact phrasing of oMLX's ModelTooLargeError
+        err = ("API Error: Model 'big' (21.40GB) does not fit under the "
+               "dynamic memory ceiling (18.00GB). Close other apps.")
+        self.assertIn("Resource Management", localmodel._ceiling_hint(err))
+        self.assertEqual(localmodel._ceiling_hint("connection refused"), "")
+        self.assertEqual(localmodel._ceiling_hint(""), "")
+
 
 if __name__ == "__main__":
     unittest.main()
