@@ -11,7 +11,8 @@ import urllib.parse
 import webbrowser
 
 from .backup import (backup_create, backup_delete, backup_inspect, backup_list,
-                     backup_plan, backup_restore, fresh_start, set_backup_dir)
+                     backup_plan, backup_restore, fresh_start,
+                     project_restore, project_restore_inspect, set_backup_dir)
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
 from .items import (Conflict, config_files_state, item_create, item_delete,
                     item_read, item_save, item_set_model, path_read, path_save,
@@ -170,6 +171,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, {**plugins_state(), "adopted": adopted_items()})
         elif self.path == "/api/backup":
             self.send(200, {**backup_list(), "plan": backup_plan()})
+        elif self.path == "/api/archives":
+            # the archive list alone, for the Projects tab's picker. /api/backup
+            # would also compute backup_plan(), a full walk of the config dir
+            # including transcripts — none of it relevant to restoring one skill
+            self.send(200, backup_list())
         elif self.path.startswith("/api/backup-inspect?"):
             # the dry run: every file in the archive against what's on disk now
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -265,6 +271,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, wrapper_check(req.get("root", "")))
             elif action == "project-test":
                 self.send(200, wrapper_test(req.get("root", "")))
+            elif action == "project-restore-inspect":
+                # a POST, not a GET, for the same reason project-check is one:
+                # it names a project root, and the registry check that guards
+                # that belongs behind the token like every other write path
+                self.send(200, project_restore_inspect(
+                    req.get("root", ""), req.get("name", "")))
+            elif action == "project-restore":
+                self.send(200, {"ok": True, **project_restore(
+                    req.get("root", ""), req.get("name", ""),
+                    req.get("paths") or [])})
             elif action == "mcp-save":
                 mcp_machine_set(req.get("name", ""), req.get("config"),
                                 bool(req.get("enabled", True)))

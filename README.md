@@ -47,6 +47,16 @@ owns, links, tracks, or syncs anything:
   repo can never change your invocation just by containing files; prompt files
   are passed as data, never executed. bash users source the same function file
   with one line; the registry lives at `<config>/claude-ui-projects.txt`.
+  A project card can also **restore a skill from a backup into that project
+  alone** — into its own `.claude/skills/<name>/`, the scope Claude Code
+  documents beside the personal `~/.claude/skills/`, meaning this project and
+  nothing else. Commands and agents come the same way. It is the Backup tab's
+  dry run with a different destination: *new* / *identical* / *differs* with a
+  diff, one tick per item, nothing deleted — restoring over something already
+  there writes the archived files and leaves the rest of that folder alone. A
+  skill archived while disabled comes back as an ordinary project skill,
+  because a project has no `disabled/` area, and an item the project already
+  has starts unticked and says so.
 - **Token saver** — a setup piece that points eight `settings.json` keys at
   cheaper defaults for pay-per-token API use: Sonnet main model, Haiku
   subagents, medium effort, smaller workflows, and fewer model-generated
@@ -152,7 +162,11 @@ Three things are worth knowing:
   Nothing is ever deleted, and MCP servers are merged into `~/.claude.json` one
   at a time so the rest of that file is untouched. A member that would land
   outside the config dir — including one whose target is a symlink pointing out
-  of it — is refused rather than followed.
+  of it — is refused rather than followed. The same rule guards a restore into
+  a project (the Projects tab), with two more gates: the project must be in the
+  registry, and a `.claude` that is itself a symlink is refused outright rather
+  than written through — a containment check cannot catch that one on its own,
+  because both the target and the base resolve through the same link.
 
 Reinstalling: restore the archive, restart Claude Code, and reinstall plugins
 from their marketplaces (`claude plugin install`). Costs come back with the

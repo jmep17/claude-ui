@@ -113,6 +113,59 @@ def project_roots():
     return [Path(s) for s in (l.strip() for l in text.splitlines())
             if s and not s.startswith("#")]
 
+def project_root(raw):
+    """The registered root `raw` names, or a refusal.
+
+    The gate every write into a project passes through: the path from the
+    request is matched against the registry, never trusted. Both the exact
+    recorded path and its resolved form count, because macOS hands /var/...
+    and /private/var/... around interchangeably. Lives here for the same
+    reason project_roots() does — projects.py and backup.py both need it and
+    neither should have to import the other."""
+    p = Path(str(raw or "").strip()).expanduser()
+    hits = (p, p.resolve())
+    for r in project_roots():
+        if r in hits:
+            return r
+    raise ValueError("not a registered project")
+
+def project_claude_dir(raw):
+    """<registered root>/.claude, refusing a .claude that is itself a symlink.
+
+    The same rule resolve_editable() applies below, for the same reason: a
+    checkout must not be able to point a write at an arbitrary directory. It
+    has to be a check of its own — a containment test that resolves both the
+    target and the base cannot see this, because both sides resolve *through*
+    the symlink and agree."""
+    cdir = project_root(raw) / ".claude"
+    if cdir.exists() and cdir.resolve() != cdir:
+        raise ValueError("this project's .claude is a symlink — "
+                         "refusing to write through it")
+    return cdir
+
+# What a project's own .claude/ can hold that the config dir holds too, and
+# that a backup archive therefore has a copy of. Output styles are left out:
+# the Projects tab already reports them separately, read-only.
+PROJECT_ITEM_TYPES = ("skills", "commands", "agents")
+
+def project_items(cdir, type_):
+    """Item names already in <project>/.claude/<type>/. Derived by looking,
+    like everything else about a project, and never raises — an unreadable or
+    absent directory is simply no items.
+
+    Names are the ones Claude Code uses: a skill directory's name, and a
+    command or agent file's path without the .md, nesting included, the same
+    shape item_rel() reads."""
+    root = cdir / type_
+    try:
+        if ITEM_TYPES[type_]["kind"] == "dir":
+            return sorted(p.name for p in root.iterdir()
+                          if p.is_dir() and not p.name.startswith("."))
+        return sorted(p.relative_to(root).with_suffix("").as_posix()
+                      for p in root.rglob("*.md") if p.is_file())
+    except (OSError, KeyError):
+        return []
+
 def resolve_editable(raw):
     """Expand a user-supplied path and decide whether we'll open it at all.
 

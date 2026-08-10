@@ -1636,9 +1636,15 @@ async function setupAct(action, p) {
 
 let PROJECTS = null;
 let PROJTEST = {};  // root -> last live-test result, shown inline on the card
+// the restore-into-this-project flow, which takes over the view while it runs:
+// {root, tilde, step, archives, rep, picked, open, showSame}
+let PRESTORE = null;
 
 // mode -> the live filename inside <project>/.claude/ (projects.py MODES)
 const PROJ_FILES = { replace: "system-prompt.md", append: "append-system-prompt.md" };
+
+// the three types a project's own .claude/ can hold (core.PROJECT_ITEM_TYPES)
+const PROJ_ITEMS = [["skills", "skill"], ["commands", "command"], ["agents", "agent"]];
 
 async function renderProjects(reload) {
   const view = document.getElementById("projectsview");
@@ -1657,6 +1663,7 @@ async function renderProjects(reload) {
     if (TAB !== "projects") return;
   }
   view.innerHTML = "";
+  if (PRESTORE) { view.append(projRestorePanel()); return; }
   view.append(el("div.view-head", {
     text: "Per-project system prompts. Each project keeps its prompt in its own .claude/ "
         + "directory: system-prompt.md replaces Claude Code's entire default system prompt, "
@@ -1842,6 +1849,26 @@ function projCard(st) {
         el("span.dmsg.dmono", { text: tr.matched_line })));
   }
 
+  // what this project holds of its own, and the way to put more there. A skill
+  // in .claude/skills/ applies to this project only — the narrower scope than
+  // the personal ~/.claude/skills/ the rest of this app manages.
+  const items = st.items || {};
+  const held = PROJ_ITEMS
+    .filter(([k]) => (items[k] || []).length)
+    .map(([k, one]) => plural(items[k].length, one) + ": " + items[k].join(", "));
+  const irow = el("div.drow", {},
+    icon("sparkles"),
+    el("span.dmsg", {},
+      el("div", { text: held.length ? held.join(" · ")
+        : "No skills, commands or agents of its own." }),
+      el("div.hint", { text: "In .claude/ — this project only, and committable with it." })),
+    el("div.dactions", {}));
+  if (!st.missing)
+    irow.querySelector(".dactions").append(
+      mkbtn("btn-sm", "Restore from backup…", () => projRestoreOpen(st),
+        "Take a skill, command or agent out of a backup archive into this project"));
+  body.append(irow);
+
   const styles = st.output_styles.length ? st.output_styles.join(", ") : null;
   const setting = Object.entries(st.output_style_setting)
     .map(([f2, v]) => v + " (" + f2 + ")").join(", ");
@@ -1929,6 +1956,179 @@ async function projTest(st) {
     toast(r.ok ? "Prompt reached claude" : "Answer didn't match — details on the card", !r.ok);
     renderProjects();
   } catch (e) { t.close(); toast(e.message, true); }
+}
+
+/* -------------------------------------------- restore into one project --
+   The Backup tab puts a skill back where it came from: ~/.claude/skills/,
+   which every project sees. This puts it in <project>/.claude/skills/
+   instead — the scope Claude Code documents beside the personal one, meaning
+   this project and nothing else. Same dry run, same rows, same promise that
+   nothing is deleted; only the destination differs. */
+
+async function projRestoreOpen(st) {
+  const t = toast({ title: "Reading archives…", variant: "loading", duration: 0 });
+  try {
+    const b = await api("/api/archives");
+    t.close();
+    PRESTORE = { root: st.root, tilde: st.tilde, step: "archives",
+                 dir: b.dir, archives: b.archives || [] };
+    renderProjects();
+  } catch (e) { t.close(); toast(e.message, true); }
+}
+
+async function projRestorePick(name) {
+  const t = toast({ title: "Comparing with this project…", variant: "loading", duration: 0 });
+  try {
+    const rep = await api("/api/project-restore-inspect", { root: PRESTORE.root, name });
+    t.close();
+    // "already here" is the fact worth leading with, so it goes on the unit's
+    // own line rather than into a legend somewhere
+    const here = new Set();
+    for (const [type] of PROJ_ITEMS)
+      for (const n of (rep.present || {})[type] || []) here.add(type + "/" + n);
+    for (const e of rep.entries)
+      if (here.has(e.unit)) e.unit_desc = (e.unit_desc || "") + " · already in this project";
+    // an item the project already has starts unticked: restoring your own
+    // config back is not the same decision as importing over something that
+    // is already working here
+    PRESTORE = { ...PRESTORE, step: "review", rep, showSame: false,
+      open: new Set(),
+      picked: new Set(rep.entries
+        .filter((e) => !here.has(e.unit) && (e.status === "new" || e.status === "differs"))
+        .map((e) => e.path)) };
+    renderProjects();
+  } catch (e) { t.close(); toast(e.message, true); }
+}
+
+function projRestorePanel() {
+  return PRESTORE.step === "review" ? projRestoreReview() : projRestoreArchives();
+}
+
+function projRestoreArchives() {
+  const wrap = el("div", {});
+  wrap.append(el("div.toolbar", {},
+    mkbtn("btn-sm", "← Back to projects", () => { PRESTORE = null; renderProjects(); }),
+    el("div.toolbar-end", {}, el("span.hint", { text: "into " + PRESTORE.tilde + "/.claude/" }))));
+  const card = el("div.card");
+  card.append(el("div.card-header", {},
+    el("div", {},
+      el("div.card-title", { text: "Restore into " + PRESTORE.tilde }),
+      el("div.card-description", {
+        text: "Pick an archive. Its skills, commands and agents can land in this project's "
+            + "own .claude/, where they apply to this project only — nothing is written "
+            + "until you tick files on the next step. Archives live in " + PRESTORE.dir + "." }))));
+  const body = el("div.card-content.flush");
+  if (!PRESTORE.archives.length) {
+    body.append(el("div.drow", {},
+      el("span.dmsg", { text: "No archives yet. The Backup tab writes them." }),
+      el("div.dactions", {}, mkbtn("btn-sm", "Go to Backup", () => {
+        PRESTORE = null; goTab("backup");
+      }))));
+  }
+  for (const a of PRESTORE.archives) {
+    const row = el("div.drow", {},
+      icon("archive"),
+      el("span.dmsg", {},
+        el("div.li-name", { text: a.name }),
+        el("div.hint", { text: a.error ? a.error
+          : [a.created_at, a.note, plural(a.files || 0, "file"), fbytes(a.bytes || 0)]
+            .filter(Boolean).join(" · ") })),
+      el("div.dactions", {}));
+    if (a.error) row.insertBefore(icon("warn"), row.firstChild);
+    else row.querySelector(".dactions").append(
+      mkbtn("btn-sm btn-primary", "Choose", () => projRestorePick(a.name)));
+    body.append(row);
+  }
+  card.append(body);
+  wrap.append(card);
+  return wrap;
+}
+
+function projRestoreReview() {
+  const s = PRESTORE, rep = s.rep, c = rep.counts || {};
+  const wrap = el("div", {});
+  wrap.append(el("div.toolbar", {},
+    mkbtn("btn-sm", "← Back to archives", () => {
+      PRESTORE = { ...PRESTORE, step: "archives", rep: null };
+      renderProjects();
+    }),
+    el("div.toolbar-end", {},
+      el("span.hint", { text: "restoring into " + rep.claude_dir + "/" }))));
+
+  wrap.append(el("div.stat-grid", { style: { marginBottom: "1rem" } },
+    statCard(String(c.new || 0), "new", { accent: true, hint: "not in this project" }),
+    statCard(String(c.differs || 0), "differs", { hint: "here but not identical" }),
+    statCard(String(c.same || 0), "identical", { hint: "writing them changes nothing" }),
+    statCard(String((c.refused || 0) + (c.missing || 0)), "unusable",
+      { hint: "listed but unreadable or unsafe" })));
+
+  const card = el("div.card");
+  card.append(el("div.card-header", {},
+    el("div", {},
+      el("div.card-title", { text: rep.name }),
+      el("div.card-description", {
+        text: "Only skills, commands and agents are shown — the rest of an archive has no "
+            + "project form. Nothing is deleted: restoring over an item already here writes "
+            + "the archived files and leaves any other file in that folder alone." }))));
+
+  const body = el("div.card-content.flush");
+  const rows = rep.entries.filter((e) => s.showSame || e.status !== "same");
+  const count = el("span.hint", {});
+  const sync = () => { count.textContent = s.picked.size + " selected"; };
+
+  card.append(el("div.card-content",
+    { style: { display: "flex", gap: ".5rem", alignItems: "center" } },
+    count,
+    el("span.spring", { style: { flex: "1" } }),
+    switchToggle("Show identical", s.showSame,
+      (v) => { PRESTORE.showSame = v; renderProjects(); }),
+    mkbtn("btn-sm btn-ghost", "All", () => {
+      const usable = rows.filter((e) => e.status !== "refused" && e.status !== "missing");
+      const on = !usable.every((e) => s.picked.has(e.path));
+      for (const e of usable) {
+        if (on) s.picked.add(e.path); else s.picked.delete(e.path);
+      }
+      renderProjects();
+    })));
+
+  if (!rep.entries.length)
+    body.append(el("div.drow", {},
+      el("span.dmsg", { text: "This archive holds no skills, commands or agents." })));
+  for (const node of unitRows(rows, s, sync)) body.append(node);
+  card.append(body);
+
+  const apply = mkbtn("btn btn-primary", "Restore selected", () => projRestoreApply());
+  apply.prepend(icon("upload"));
+  card.append(el("div.card-content",
+    { style: { display: "flex", justifyContent: "flex-end" } }, apply));
+  sync();
+  wrap.append(card);
+  return wrap;
+}
+
+async function projRestoreApply() {
+  const s = PRESTORE;
+  const paths = [...s.picked];
+  if (!paths.length) { toast("Nothing selected", true); return; }
+  const over = s.rep.entries.filter((e) => s.picked.has(e.path) && e.status === "differs").length;
+  const ok = await mconfirm("Restore " + plural(paths.length, "file") + " into " + s.tilde + "?",
+    (over ? plural(over, "file") + " already in this project will be overwritten with the "
+          + "backup's version, and that cannot be undone from here. " : "")
+    + "Files land in " + s.rep.claude_dir + ", so they apply to this project only — and "
+    + "they are ordinary files you can commit. Nothing is deleted, and your personal "
+    + "~/.claude is not touched.",
+    over ? "Overwrite and restore" : "Restore");
+  if (!ok) return;
+  try {
+    const r = await api("/api/project-restore",
+      { root: s.root, name: s.rep.name, paths });
+    if (r.failed_count)
+      toast(r.count + " restored, " + r.failed_count + " failed: " + r.failed[0].error, true);
+    else
+      toast(plural(r.count, "file") + " restored into " + s.tilde);
+    PRESTORE = null;
+    renderProjects(true);
+  } catch (e) { toast(e.message, true); }
 }
 
 // -------------------------------------------------------------- statusline
@@ -3510,19 +3710,8 @@ function restorePanel() {
       setAll(!selectable.every((e) => BREPORT.picked.has(e.path)));
     })));
 
-  // a skill is one tick, not the eleven files inside it — the same unit rows
-  // the create pick list showed. Archives from before units were recorded
-  // have no unit on their rows and fall back to one row per file.
-  const units = new Map();
-  for (const e of rows) {
-    const key = e.group + " " + (e.unit || e.path);
-    if (!units.has(key)) units.set(key, { key, entries: [] });
-    units.get(key).entries.push(e);
-  }
-  for (const u of units.values()) {
-    if (u.entries.length === 1) body.append(restoreRow(u.entries[0], sync));
-    else body.append(unitRestoreRows(u, sync));
-  }
+  for (const node of unitRows(rows, { picked: BREPORT.picked, open: BOPEN }, sync))
+    body.append(node);
   card.append(body);
 
   const apply = mkbtn("btn btn-primary", "Restore selected", () => applyRestore());
@@ -3541,27 +3730,47 @@ const BSTATUS = { new: ["new", "success"], differs: ["differs", "warning"],
 // re-clones them from the marketplaces the restored list names
 const PLUGIN_REFETCH = "plugins re-download on next Claude Code start";
 
+/* Group inspect rows into the things a person would name and render one node
+   each. A skill is one tick, not the eleven files inside it — the same rows the
+   create pick list showed. Archives from before units were recorded have no
+   unit and fall back to one row per file.
+
+   `sess` is {picked, open}: the two Sets a panel keeps for itself, so the
+   Backup tab and the Projects tab can render the same rows over different
+   selections. */
+function unitRows(rows, sess, sync) {
+  const units = new Map();
+  for (const e of rows) {
+    const key = e.group + "\u0000" + (e.unit || e.path);
+    if (!units.has(key)) units.set(key, { key, entries: [] });
+    units.get(key).entries.push(e);
+  }
+  return [...units.values()].map((u) => u.entries.length === 1
+    ? restoreRow(u.entries[0], sess, sync)
+    : unitRestoreRows(u, sess, sync));
+}
+
 /* One row for a whole unit — a skill folder, a project's transcripts. The
    checkbox is the unit's verdict on all its usable files (indeterminate when
    they disagree), and the files themselves sit behind an expander. */
-function unitRestoreRows(u, sync) {
+function unitRestoreRows(u, sess, sync) {
   const first = u.entries[0];
   const usable = u.entries.filter((e) => e.status !== "refused" && e.status !== "missing");
-  const files = el("div", { hidden: !BOPEN.has(u.key),
+  const files = el("div", { hidden: !sess.open.has(u.key),
     style: { paddingLeft: "1.75rem" } });
 
   const row = el("div.drow", {});
   const cb = el("input", { type: "checkbox" });
   const syncBox = () => {
-    const on = usable.filter((e) => BREPORT.picked.has(e.path)).length;
+    const on = usable.filter((e) => sess.picked.has(e.path)).length;
     cb.checked = on > 0 && on === usable.length;
     cb.indeterminate = on > 0 && on < usable.length;
     sync();
   };
   cb.onchange = () => {
     for (const e of usable) {
-      if (cb.checked) BREPORT.picked.add(e.path);
-      else BREPORT.picked.delete(e.path);
+      if (cb.checked) sess.picked.add(e.path);
+      else sess.picked.delete(e.path);
     }
     fill();
     syncBox();
@@ -3585,30 +3794,30 @@ function unitRestoreRows(u, sync) {
 
   const toggle = mkbtn("btn-sm btn-ghost", "Files", () => {
     files.hidden = !files.hidden;
-    if (files.hidden) BOPEN.delete(u.key); else BOPEN.add(u.key);
+    if (files.hidden) sess.open.delete(u.key); else sess.open.add(u.key);
   }, "Show the files inside");
   toggle.prepend(icon("chevronDown"));
   row.append(el("div.dactions", {}, toggle));
 
   const fill = () => {
     files.innerHTML = "";
-    for (const e of u.entries) files.append(restoreRow(e, syncBox));
+    for (const e of u.entries) files.append(restoreRow(e, sess, syncBox));
   };
   fill();
   syncBox();
   return el("div", {}, row, files);
 }
 
-function restoreRow(e, sync) {
+function restoreRow(e, sess, sync) {
   const [label, variant] = BSTATUS[e.status] || [e.status, "secondary"];
   const usable = e.status !== "refused" && e.status !== "missing";
   const row = el("div.drow", {});
   if (usable) {
     row.append(el("input", {
-      type: "checkbox", checked: BREPORT.picked.has(e.path),
+      type: "checkbox", checked: sess.picked.has(e.path),
       onchange: (ev) => {
-        if (ev.currentTarget.checked) BREPORT.picked.add(e.path);
-        else BREPORT.picked.delete(e.path);
+        if (ev.currentTarget.checked) sess.picked.add(e.path);
+        else sess.picked.delete(e.path);
         sync();
       },
     }));

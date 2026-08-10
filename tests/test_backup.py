@@ -457,6 +457,232 @@ class TestSafety(Base):
         self.assertTrue(outside.is_file())
 
 
+class TestProjectRestore(Base):
+    """Restoring into <project>/.claude/ instead of the config dir.
+
+    Two properties carry the feature: only a registered project can be written
+    to at all, and only the three item types a project directory can hold are
+    ever offered — decided from the member's own path, never from what the
+    manifest claims the member is.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.proj = self.tmp / "proj"
+        (self.proj / ".claude").mkdir(parents=True)
+        self.other = self.tmp / "other"
+        self.other.mkdir()
+        self.register(self.proj)
+        write(self.cfg / "skills" / "pdf" / "scripts" / "run.sh", "#!/bin/sh\necho hi\n")
+        (self.cfg / "skills" / "pdf" / "scripts" / "run.sh").chmod(0o755)
+        write(self.cfg / "commands" / "git" / "pr.md", "---\n---\nopen a pr\n")
+
+    def register(self, *roots):
+        # the registry is a plain file in the config dir, which Base already
+        # patches — no need to pull projects.py into this harness
+        (self.cfg / core.PROJECTS_REGISTRY).write_text(
+            "".join(f"{r.resolve()}\n" for r in roots))
+
+    def cdir(self):
+        return self.proj / ".claude"
+
+    def rows(self, name, root=None):
+        rep = backup.project_restore_inspect(str(root or self.proj), name)
+        return {e["path"]: e for e in rep["entries"]}, rep
+
+    def restore_all(self, name):
+        rows, _ = self.rows(name)
+        return backup.project_restore(str(self.proj), name, list(rows))
+
+    def test_a_skill_lands_in_the_project_not_the_config_dir(self):
+        name = self.create("items")["name"]
+        before = sorted(p.name for p in self.cfg.iterdir())
+        self.restore_all(name)
+        self.assertEqual((self.cdir() / "skills" / "pdf" / "SKILL.md").read_text(),
+                         (self.cfg / "skills" / "pdf" / "SKILL.md").read_text())
+        self.assertEqual(sorted(p.name for p in self.cfg.iterdir()), before)
+
+    def test_an_archived_disabled_item_becomes_an_ordinary_project_item(self):
+        """A project has no disabled/ area — that is this app's own parking
+        place inside the config dir, and it must not be recreated in a repo."""
+        name = self.create("items")["name"]
+        self.restore_all(name)
+        self.assertTrue((self.cdir() / "commands" / "old.md").is_file())
+        self.assertFalse((self.cdir() / "disabled").exists())
+
+    def test_a_nested_command_keeps_its_path_and_its_own_unit(self):
+        name = self.create("items")["name"]
+        rows, _ = self.rows(name)
+        self.assertEqual(rows["files/commands/git/pr.md"]["unit"], "commands/git/pr")
+        self.assertEqual(rows["files/disabled/commands/old.md"]["unit"], "commands/old")
+        self.restore_all(name)
+        self.assertTrue((self.cdir() / "commands" / "git" / "pr.md").is_file())
+
+    def test_the_executable_bit_survives_into_a_project(self):
+        name = self.create("items")["name"]
+        self.restore_all(name)
+        p = self.cdir() / "skills" / "pdf" / "scripts" / "run.sh"
+        self.assertTrue(os.access(p, os.X_OK))
+
+    def test_only_skills_commands_and_agents_are_offered(self):
+        name = self.create()["name"]                     # every group
+        rows, _ = self.rows(name)
+        self.assertTrue(rows)
+        for path in rows:
+            self.assertRegex(path, r"^files/(disabled/)?(skills|commands|agents)/")
+        self.assertNotIn("files/settings.json", rows)
+        self.assertNotIn(backup.MCP_PREFIX + "gh.json", rows)
+
+    def test_a_non_item_member_is_never_written(self):
+        name = self.create()["name"]
+        res = backup.project_restore(str(self.proj), name, [
+            "files/settings.json", "files/CLAUDE.md", backup.MCP_PREFIX + "gh.json"])
+        self.assertEqual(res["count"], 0, res)
+        self.assertEqual(res["failed_count"], 3)
+        self.assertFalse((self.cdir() / "settings.json").exists())
+        self.assertEqual(json.loads(self.claude_json.read_text())["mcpServers"]["gh"]
+                         ["env"]["TOKEN"], "sekrit")
+
+    def test_an_unregistered_project_is_refused(self):
+        name = self.create("items")["name"]
+        for call in (lambda: backup.project_restore_inspect(str(self.other), name),
+                     lambda: backup.project_restore(str(self.other), name,
+                                                    ["files/skills/pdf/SKILL.md"])):
+            with self.assertRaises(ValueError) as cm:
+                call()
+            self.assertIn("not a registered project", str(cm.exception))
+        self.assertFalse((self.other / ".claude").exists())
+
+    def test_a_claude_dir_that_is_a_symlink_is_refused(self):
+        """The case containment cannot catch: resolving the target and the base
+        both go through the symlink, so they agree. It has to be its own rule."""
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (self.cdir()).rmdir()
+        self.cdir().symlink_to(elsewhere)
+        name = self.create("items")["name"]
+        with self.assertRaises(ValueError) as cm:
+            backup.project_restore(str(self.proj), name, ["files/skills/pdf/SKILL.md"])
+        self.assertIn("symlink", str(cm.exception))
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_a_symlink_inside_the_project_is_not_written_through(self):
+        outside = self.tmp / "outside.txt"
+        outside.write_text("original\n")
+        d = self.cdir() / "skills" / "pdf"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").symlink_to(outside)
+        name = self.create("items")["name"]
+        rows, _ = self.rows(name)
+        self.assertEqual(rows["files/skills/pdf/SKILL.md"]["status"], "refused")
+        backup.project_restore(str(self.proj), name, ["files/skills/pdf/SKILL.md"])
+        self.assertEqual(outside.read_text(), "original\n")
+
+    def test_traversal_and_absolute_members_are_refused(self):
+        victim = self.tmp / "victim.txt"
+        for member in ("files/skills/../../../victim.txt", "files/skills",
+                       "files/skills/pdf", "/files/skills/pdf/x.md",
+                       "files/commands/notes.txt", "files/output-styles/x.md"):
+            with self.subTest(member=member):
+                with self.assertRaises(ValueError):
+                    backup._project_member(member)
+                self.assertFalse(victim.exists())
+
+    def test_a_crafted_unit_label_cannot_redirect_the_write(self):
+        """The unit comes from the path. An archive we did not write gets to
+        claim settings.json is the pdf skill; it does not get to land there."""
+        data = b"pwned"
+        self.dest.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(self.dest / "evil.zip", "w") as z:
+            z.writestr("files/settings.json", data)
+            z.writestr("manifest.json", json.dumps({
+                "format": 2, "entries": [
+                    {"path": "files/settings.json", "group": "items",
+                     "size": len(data), "mode": 0o644, "sha256": backup._sha(data),
+                     "unit": "skills/pdf", "unit_label": "pdf",
+                     "unit_desc": "skill"}]}))
+        rows, _ = self.rows("evil.zip")
+        self.assertEqual(rows, {})
+        res = backup.project_restore(str(self.proj), "evil.zip", ["files/settings.json"])
+        self.assertEqual(res["count"], 0, res)
+
+    def test_inspect_reports_new_same_and_differs_with_a_diff(self):
+        name = self.create("items")["name"]
+        _, rep = self.rows(name)
+        self.assertEqual(set(rep["counts"]), {"new"})
+        self.assertEqual(rep["present"]["skills"], [])
+
+        self.restore_all(name)
+        rows, rep = self.rows(name)
+        self.assertEqual(set(rep["counts"]), {"same"})
+        self.assertEqual(rep["present"]["skills"], ["pdf"])
+        self.assertEqual(rep["present"]["commands"], ["git/pr", "old"])
+
+        (self.cdir() / "skills" / "pdf" / "SKILL.md").write_text("edited\n")
+        rows, rep = self.rows(name)
+        row = rows["files/skills/pdf/SKILL.md"]
+        self.assertEqual(row["status"], "differs")
+        self.assertIn("edited", row["diff"])
+
+    def test_a_file_in_the_way_is_refused_before_writing(self):
+        write(self.cdir() / "skills", "not a directory\n")
+        name = self.create("items")["name"]
+        rows, _ = self.rows(name)
+        row = rows["files/skills/pdf/SKILL.md"]
+        self.assertEqual(row["status"], "refused")
+        self.assertIn("is a file", row["error"])
+        self.assertEqual((self.cdir() / "skills").read_text(), "not a directory\n")
+
+    def test_restore_never_deletes_what_the_archive_does_not_carry(self):
+        name = self.create("items")["name"]
+        self.restore_all(name)
+        notes = self.cdir() / "skills" / "pdf" / "notes.md"
+        notes.write_text("mine\n")
+        self.restore_all(name)
+        self.assertEqual(notes.read_text(), "mine\n")
+
+    def test_only_the_picked_members_are_written(self):
+        name = self.create("items")["name"]
+        backup.project_restore(str(self.proj), name, ["files/skills/pdf/SKILL.md"])
+        self.assertTrue((self.cdir() / "skills" / "pdf" / "SKILL.md").is_file())
+        self.assertFalse((self.cdir() / "commands").exists())
+
+    def test_an_archive_without_units_still_offers_its_items(self):
+        """Units are derived from the path here, so an archive written before
+        they were recorded restores into a project exactly the same."""
+        data = b"---\nname: pdf\n---\nbody\n"
+        self.dest.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(self.dest / "old.zip", "w") as z:
+            z.writestr("files/skills/pdf/SKILL.md", data)
+            z.writestr("manifest.json", json.dumps({
+                "format": 1, "entries": [
+                    {"path": "files/skills/pdf/SKILL.md", "group": "items",
+                     "size": len(data), "mode": 0o644, "sha256": backup._sha(data)}]}))
+        rows, _ = self.rows("old.zip")
+        self.assertEqual(rows["files/skills/pdf/SKILL.md"]["unit"], "skills/pdf")
+        self.assertEqual(rows["files/skills/pdf/SKILL.md"]["unit_label"], "pdf")
+        backup.project_restore(str(self.proj), "old.zip", ["files/skills/pdf/SKILL.md"])
+        self.assertEqual((self.cdir() / "skills" / "pdf" / "SKILL.md").read_bytes(), data)
+
+    def test_two_projects_do_not_see_each_others_restores(self):
+        second = self.tmp / "second"
+        (second / ".claude").mkdir(parents=True)
+        self.register(self.proj, second)
+        name = self.create("items")["name"]
+        self.restore_all(name)
+        self.assertTrue((self.cdir() / "skills" / "pdf").is_dir())
+        self.assertFalse((second / ".claude" / "skills").exists())
+
+    def test_the_archive_name_gate_still_applies(self):
+        with self.assertRaises(ValueError):
+            backup.project_restore_inspect(str(self.proj), "../../evil.zip")
+
+    def test_an_empty_selection_is_refused(self):
+        name = self.create("items")["name"]
+        with self.assertRaises(ValueError):
+            backup.project_restore(str(self.proj), name, [])
+
+
 class TestDestination(unittest.TestCase):
     """backup_dir() is the one path in this app that must not be inside the
     config dir — a backup that an uninstall deletes is not a backup."""

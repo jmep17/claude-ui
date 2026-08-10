@@ -18,8 +18,9 @@ import shutil
 import subprocess
 
 from .assist import _cli_flags
-from .core import (PROJECTS_REGISTRY, _read_json_object, atomic_write,
-                   config_dir, project_roots, tilde)
+from .core import (PROJECT_ITEM_TYPES, PROJECTS_REGISTRY, _read_json_object,
+                   atomic_write, config_dir, project_items, project_root,
+                   project_roots, tilde)
 
 
 # ---- registry (the read half, project_roots, lives in core.py) ----
@@ -211,6 +212,9 @@ def project_state(root):
         "output_styles": (sorted(p.name for p in styles_dir.glob("*.md"))
                           if styles_dir.is_dir() else []),
         "output_style_setting": _output_style_setting(cdir),
+        # read-only, like output_styles above: what this project already holds
+        # of the three types a backup can restore into it
+        "items": {t: project_items(cdir, t) for t in PROJECT_ITEM_TYPES},
     }
 
 def _wrapper_state(cdir):
@@ -235,13 +239,8 @@ def _output_style_setting(cdir):
 # ---- operations (all re-check registration: these must never become a way
 # ---- to write into a directory the user did not register) ----
 
-def _checked_root(raw):
-    p = Path(str(raw or "").strip()).expanduser()
-    hits = (p, p.resolve())
-    for r in project_roots():
-        if r in hits:
-            return r
-    raise ValueError("not a registered project")
+def checked_root(raw):
+    return project_root(raw)
 
 def _need_mode(mode):
     if mode not in MODES:
@@ -253,7 +252,7 @@ def _pair(cdir, mode):
 
 def project_init(root, mode):
     """Starter prompt file (unless either form already exists) + wrapper."""
-    root = _checked_root(root)
+    root = checked_root(root)
     _need_mode(mode)
     live, off = _pair(root / ".claude", mode)
     if not live.exists() and not off.exists():
@@ -265,7 +264,7 @@ def project_toggle(root, enabled):
 
     Refuses conflicted layouts rather than guessing: a rename would clobber
     one of two files that both hold user-written prompt text."""
-    root = _checked_root(root)
+    root = checked_root(root)
     st = project_state(root)
     if st["mode"] is None:
         raise ValueError("no prompt file to toggle — initialise first")
@@ -280,7 +279,7 @@ def project_toggle(root, enabled):
 def project_set_mode(root, mode):
     """Make `mode` the live file; the other mode's live file goes to .off.
     A missing target is revived from its .off form, else from the starter."""
-    root = _checked_root(root)
+    root = checked_root(root)
     _need_mode(mode)
     cdir = root / ".claude"
     live, off = _pair(cdir, mode)
@@ -303,7 +302,7 @@ def project_set_mode(root, mode):
 def wrapper_write(root, force=False):
     """Write (or refresh) <root>/.claude/claude.sh. A claude.sh we did not
     write (no marker) is refused without force — it is the user's file."""
-    root = _checked_root(root)
+    root = checked_root(root)
     p = root / ".claude" / WRAPPER_NAME
     if p.is_file() and not force:
         if WRAPPER_MARKER not in p.read_text(errors="replace"):
@@ -323,7 +322,7 @@ def _wrapper_runnable(root):
     """The wrapper we're willing to execute: ours (marker present), for a
     registered root. A foreign claude.sh is the user's own script — we never
     run someone's code for them from a button."""
-    root = _checked_root(root)
+    root = checked_root(root)
     p = root / ".claude" / WRAPPER_NAME
     if not p.is_file():
         raise ValueError("no claude.sh here — initialise or create the wrapper first")

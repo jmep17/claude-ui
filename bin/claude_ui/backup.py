@@ -40,8 +40,9 @@ import shutil
 import zipfile
 
 from .core import (CLAUDE_JSON, CONFIG_FILES, ITEM_TYPES, MCP_FILE, NAME_RE,
-                   _read_json_object, _within, atomic_write, atomic_write_bytes,
-                   config_dir, disabled_dir, read_cfg, tilde, write_cfg)
+                   PROJECT_ITEM_TYPES, _read_json_object, _within, atomic_write,
+                   atomic_write_bytes, config_dir, disabled_dir,
+                   project_claude_dir, project_items, read_cfg, tilde, write_cfg)
 from .insight import MAX_TRANSCRIPT, projects_dir
 from .items import resolve_item, scan_items
 from .mcp import mcp_machine_set, mcp_state
@@ -538,6 +539,20 @@ def backup_list():
 
 # ------------------------------------------------------------------- restore
 
+def _member_parts(member):
+    """The shape half of the two checks below: a members's path segments, or a
+    refusal. Nothing here looks at the filesystem — this only decides whether
+    the string is the sort of thing a restore may consider at all."""
+    if not isinstance(member, str) or _is_mcp(member):
+        raise ValueError("bad member")
+    if not member.startswith(FILES_PREFIX):
+        raise ValueError(f"{member}: not a restorable path")
+    rel = member[len(FILES_PREFIX):]
+    parts = [p for p in rel.split("/") if p]
+    if not parts or any(p == ".." for p in parts) or rel.startswith("/"):
+        raise ValueError(f"{member}: unsafe path")
+    return parts
+
 def _target(member):
     """Archive member -> the absolute file it restores to.
 
@@ -547,14 +562,7 @@ def _target(member):
     plugins carve-out is an editor rule, and this needs plugins/config.json to
     be writable while still refusing anything outside the config dir.
     """
-    if not isinstance(member, str) or _is_mcp(member):
-        raise ValueError("bad member")
-    if not member.startswith(FILES_PREFIX):
-        raise ValueError(f"{member}: not a restorable path")
-    rel = member[len(FILES_PREFIX):]
-    parts = [p for p in rel.split("/") if p]
-    if not parts or any(p == ".." for p in parts) or rel.startswith("/"):
-        raise ValueError(f"{member}: unsafe path")
+    parts = _member_parts(member)
     cfg = config_dir()
     p = cfg.joinpath(*parts)
     # strict=False: the file usually does not exist yet on a fresh machine
@@ -604,6 +612,22 @@ def _live_mcp_bytes(only=None):
         servers = {k: v for k, v in servers.items() if k == only}
     return _mcp_blob(servers) if servers else None
 
+def _verdict(z, e, row, live):
+    """Fill in new / same / differs (+ a diff) for one entry against the bytes
+    already on disk. Shared so a restore into a project judges a file by
+    exactly the rule a restore into the config dir does."""
+    if live is None:
+        row["status"] = "new"
+    elif _sha(live) == e.get("sha256"):
+        row["status"] = "same"
+    else:
+        row["status"] = "differs"
+        new = z.read(row["path"])
+        if (len(live) <= DIFF_MAX_BYTES and len(new) <= DIFF_MAX_BYTES
+                and _is_text(live) and _is_text(new)):
+            row["diff"] = _diff(live, new, row["target"])
+    return row
+
 def backup_inspect(name):
     """The dry run: what restoring this archive would do to each file."""
     p = archive_path(name)
@@ -644,16 +668,7 @@ def backup_inspect(name):
                     continue
                 row["target"] = tilde(target)
                 live = target.read_bytes() if target.is_file() else None
-            if live is None:
-                row["status"] = "new"
-            elif _sha(live) == e.get("sha256"):
-                row["status"] = "same"
-            else:
-                row["status"] = "differs"
-                new = z.read(member)
-                if (len(live) <= DIFF_MAX_BYTES and len(new) <= DIFF_MAX_BYTES
-                        and _is_text(live) and _is_text(new)):
-                    row["diff"] = _diff(live, new, row["target"])
+            _verdict(z, e, row, live)
             rows.append(row)
     counts = {}
     for r in rows:
@@ -677,42 +692,190 @@ def _restore_mcp(blob):
         mcp_machine_set(sname, cfg, enabled=True)
     return len(servers)
 
-def backup_restore(name, paths):
-    """Write back exactly the members in `paths`. Never deletes anything."""
-    p = archive_path(name)
+def _restore_members(z, want, known, write):
+    """The write loop both restores share: only members the manifest names,
+    one `write` call each, and a failure is collected rather than raised — one
+    unwritable file must not abandon the rest of the selection."""
+    written, failed = [], []
+    for member in want:
+        if member not in known:
+            failed.append({"path": member, "error": "not in this archive"})
+            continue
+        try:
+            written.append(write(member, z.read(member)))
+        except (ValueError, OSError, KeyError, json.JSONDecodeError) as e:
+            failed.append({"path": member, "error": str(e)})
+    return {"written": written, "failed": failed,
+            "count": len(written), "failed_count": len(failed)}
+
+def _wanted(paths):
     want = [x for x in (paths or []) if isinstance(x, str)]
     if not want:
         raise ValueError("nothing selected")
-    written, failed = [], []
+    return want
+
+def backup_restore(name, paths):
+    """Write back exactly the members in `paths`. Never deletes anything."""
+    p = archive_path(name)
+    want = _wanted(paths)
     with zipfile.ZipFile(p) as z:
         m = _manifest_of(z)
         modes = {e.get("path"): e.get("mode") for e in m["entries"]}
-        known = set(modes)
-        for member in want:
-            if member not in known:
-                failed.append({"path": member, "error": "not in this archive"})
-                continue
-            try:
-                data = z.read(member)
-                if _is_mcp(member):
-                    if member != MCP_MEMBER:
-                        _mcp_name(member)   # refuse a member we could not write
-                    n = _restore_mcp(data)
-                    written.append({"path": member,
-                                    "target": tilde(CLAUDE_JSON),
-                                    "detail": f"{n} server(s) merged"})
-                else:
-                    target = _target(member)
-                    atomic_write_bytes(target, data, modes.get(member))
-                    written.append({"path": member, "target": tilde(target)})
-            except (ValueError, OSError, KeyError, json.JSONDecodeError) as e:
-                failed.append({"path": member, "error": str(e)})
-    return {"written": written, "failed": failed,
-            "count": len(written), "failed_count": len(failed)}
+
+        def write(member, data):
+            if _is_mcp(member):
+                if member != MCP_MEMBER:
+                    _mcp_name(member)       # refuse a member we could not write
+                n = _restore_mcp(data)
+                return {"path": member, "target": tilde(CLAUDE_JSON),
+                        "detail": f"{n} server(s) merged"}
+            target = _target(member)
+            atomic_write_bytes(target, data, modes.get(member))
+            return {"path": member, "target": tilde(target)}
+
+        return _restore_members(z, want, set(modes), write)
 
 def backup_delete(name):
     archive_path(name).unlink()
     return {"deleted": name}
+
+
+# --------------------------------------------- restore into one project only
+
+# Claude Code reads a skill from three places, and they are different scopes:
+# ~/.claude/skills/<name>/ applies to all your projects, <project>/.claude/
+# skills/<name>/ to that project only. Commands and agents follow the same
+# split. An archive holds the personal copies; this puts one back as the
+# narrower thing instead — the reason to restore into a project at all.
+
+def _project_member(member):
+    """Archive member -> (unit id, path segments under <project>/.claude/).
+
+    Two rules live here. Only the three item types a project directory can
+    hold are restorable — a settings.json or a transcript has no project form.
+    And a leading ``disabled/`` is dropped: that is this app's own parking
+    area inside the config dir, and a project has no such place, so a skill
+    archived while disabled comes back as an ordinary project skill.
+
+    The unit is derived from the path, never read from the manifest's unit
+    field. A hand-built archive gets to say whatever it likes about its
+    entries; what it cannot do is make ``files/settings.json`` end in a
+    skills directory by labelling it one.
+    """
+    parts = _member_parts(member)
+    if parts[0] == "disabled":
+        parts = parts[1:]
+    if len(parts) < 2 or parts[0] not in PROJECT_ITEM_TYPES:
+        raise ValueError(f"{member}: not a project skill, command or agent")
+    type_, rest = parts[0], parts[1:]
+    if ITEM_TYPES[type_]["kind"] == "dir":
+        # a skill is a directory of files: the item is the directory, and
+        # everything below it rides along under the same unit
+        if len(rest) < 2 or not NAME_RE.match(rest[0]):
+            raise ValueError(f"{member}: not a file inside a skill")
+        name = rest[0]
+    else:
+        # a command or agent is one file, and may be nested: commands/git/pr.md
+        # is the item git/pr, exactly as items.item_rel() reads it
+        if not rest[-1].endswith(".md"):
+            raise ValueError(f"{member}: not a {type_[:-1]} file")
+        rel = rest[:-1] + [rest[-1][:-3]]
+        if not all(NAME_RE.match(s) for s in rel):
+            raise ValueError(f"{member}: bad item name")
+        name = "/".join(rel)
+    return type_ + "/" + name, parts
+
+def _project_target(member, cdir):
+    """Where `member` lands inside a project's .claude/, checked the same two
+    ways _target() checks its own: for shape, then for where it actually
+    resolves to. The caller must have obtained `cdir` from
+    core.project_claude_dir(), which is what rules out a symlinked .claude —
+    the containment test below cannot see that on its own."""
+    unit, parts = _project_member(member)
+    p = cdir.joinpath(*parts)
+    if not _within(p.resolve(strict=False), cdir.resolve(strict=False)):
+        raise ValueError(f"{member}: escapes {tilde(cdir)}")
+    return unit, p
+
+def _blocked_by_file(target, cdir):
+    """The one failure worth catching before the write rather than during it:
+    a plain file sitting where a directory has to go. atomic_write_bytes would
+    raise FileExistsError from mkdir; saying so in the dry run turns a
+    confusing per-file failure into a verdict you can see coming."""
+    for parent in target.parents:
+        if not _within(parent, cdir):   # stops at .claude itself, which counts
+            break
+        if parent.exists() and not parent.is_dir():
+            return f"{tilde(parent)} is a file, not a directory"
+    return ""
+
+def project_restore_inspect(root, name):
+    """The dry run for restoring into one project: every skill, command and
+    agent the archive holds, judged against what is in <root>/.claude/ now.
+
+    Row shape matches backup_inspect's, so the same UI renders both.
+    """
+    cdir = project_claude_dir(root)          # registry + symlink gate, first
+    p = archive_path(name)
+    rows = []
+    with zipfile.ZipFile(p) as z:
+        m = _manifest_of(z)
+        names = set(z.namelist())
+        for e in m["entries"]:
+            member = e.get("path") or ""
+            try:
+                unit, _ = _project_member(member)
+            except ValueError:
+                continue    # not an error to show: most of an archive is not this
+            row = {"path": member, "group": e.get("group", ""),
+                   "size": int(e.get("size") or 0), "unit": unit,
+                   # the manifest's labels are for reading only; the unit above
+                   # is the one anything is decided by
+                   "unit_label": e.get("unit_label") or unit.split("/", 1)[1],
+                   "unit_desc": e.get("unit_desc") or unit.split("/", 1)[0]}
+            if member not in names:
+                rows.append({**row, "status": "missing",
+                             "error": "listed in the manifest but not in the zip"})
+                continue
+            try:
+                _, target = _project_target(member, cdir)
+            except ValueError as err:
+                rows.append({**row, "status": "refused", "error": str(err)})
+                continue
+            row["target"] = tilde(target)
+            blocked = _blocked_by_file(target, cdir)
+            if blocked:
+                rows.append({**row, "status": "refused", "error": blocked})
+                continue
+            live = target.read_bytes() if target.is_file() else None
+            _verdict(z, e, row, live)
+            rows.append(row)
+    counts = {}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return {"name": name, "root": str(cdir.parent), "tilde": tilde(cdir.parent),
+            "claude_dir": tilde(cdir), "entries": rows, "counts": counts,
+            "manifest": {k: v for k, v in m.items() if k != "entries"},
+            # which item names are already here, so the panel can say that a
+            # tick lands on top of something rather than beside it
+            "present": {t: project_items(cdir, t) for t in PROJECT_ITEM_TYPES}}
+
+def project_restore(root, name, paths):
+    """Write the listed members into <root>/.claude/. Never deletes: an item
+    already there is merged into, so a file the archive does not carry stays."""
+    cdir = project_claude_dir(root)
+    p = archive_path(name)
+    want = _wanted(paths)
+    with zipfile.ZipFile(p) as z:
+        m = _manifest_of(z)
+        modes = {e.get("path"): e.get("mode") for e in m["entries"]}
+
+        def write(member, data):
+            _, target = _project_target(member, cdir)
+            atomic_write_bytes(target, data, modes.get(member))
+            return {"path": member, "target": tilde(target)}
+
+        return _restore_members(z, want, set(modes), write)
 
 
 # --------------------------------------------------------------- fresh start
