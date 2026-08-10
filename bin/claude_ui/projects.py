@@ -19,12 +19,12 @@ import shutil
 import subprocess
 
 from .assist import _cli_flags
-from .core import (NAME_RE, PROJECT_MANAGED_TYPES, PROJECTS_REGISTRY,
-                   _read_json_object, atomic_write, config_dir,
-                   project_claude_dir, project_root, project_root_file,
-                   project_roots, tilde)
+from .core import (CLAUDE_JSON, NAME_RE, PROJECT_MANAGED_TYPES,
+                   PROJECTS_REGISTRY, _read_json_object, atomic_write,
+                   config_dir, project_claude_dir, project_root,
+                   project_root_file, project_roots, tilde)
 from .items import scan_items
-from .mcp import validate_mcp_config
+from .mcp import _disabled_servers, mcp_machine_set, validate_mcp_config
 
 
 # ---- registry (the read half, project_roots, lives in core.py) ----
@@ -422,7 +422,7 @@ def wrapper_test(root):
 # write path, and a small one is only safe while it stays small.
 PROJECT_SETTING_KEYS = ("outputStyle", "enabledMcpjsonServers",
                         "disabledMcpjsonServers", "enableAllProjectMcpServers",
-                        "skillOverrides")
+                        "skillOverrides", "enabledPlugins")
 
 SETTINGS_LOCAL = "settings.local.json"
 SETTINGS_SHARED = "settings.json"
@@ -542,11 +542,17 @@ def project_mcp_state(root):
     if not isinstance(servers, dict):
         servers, err = {}, err or "mcpServers is not an object"
     ap = _mcp_approval(cdir)
+    local, lerr = _local_mcp_servers(root)
     return {
         "path": tilde(path), "exists": path.is_file(), "error": err,
         "servers": [{"name": n, "config": c, "approval": _approval_of(n, ap)}
                     for n, c in sorted(servers.items())],
         "approval": ap,
+        # the third scope: `claude mcp add` lands here by default, and a card
+        # that hid it would claim the project has fewer servers than it runs
+        "local_servers": [{"name": n, "config": c}
+                          for n, c in sorted(local.items())],
+        "local_error": lerr,
     }
 
 def project_mcp_set(root, name, config):
@@ -604,6 +610,166 @@ def project_mcp_approve(root, name, approved):
             vals.append(name)
         project_setting_set(root, key, sorted(set(vals)) or None)
     return {"name": name, "approval": _approval_of(name, _mcp_approval(cdir))}
+
+
+# ---- MCP scope moves ----
+#
+# Claude Code keeps MCP servers in three places. "user" is ~/.claude.json's
+# top-level mcpServers: every project, this machine. "project" is the repo's
+# .mcp.json: committed, everyone who clones. "local" is ~/.claude.json's
+# projects.<root>.mcpServers: one project, this machine — and the place
+# `claude mcp add` writes by default, so real configs accumulate there.
+
+def _local_mcp_servers(root):
+    """The local-scope map for one project, read-only.
+
+    The projects key is the exact cwd string the CLI recorded, which for a
+    registered project is its resolved root — the same string project_root
+    returns, so that is the lookup."""
+    data, err = _read_json_object(CLAUDE_JSON)
+    projs = data.get("projects")
+    entry = projs.get(str(project_root(root))) if isinstance(projs, dict) else None
+    servers = entry.get("mcpServers") if isinstance(entry, dict) else None
+    return (servers if isinstance(servers, dict) else {}), err
+
+def _cj_maps(data, scope, root):
+    """The (holder, servers) pair for a user- or local-scope end inside an
+    already-read ~/.claude.json object, created on the way in."""
+    box = data
+    if scope == "local":
+        projs = data.setdefault("projects", {})
+        if not isinstance(projs, dict):
+            raise ValueError("~/.claude.json: projects is not an object")
+        box = projs.setdefault(str(project_root(root)), {})
+        if not isinstance(box, dict):
+            raise ValueError("~/.claude.json: this project's entry is not an object")
+    servers = box.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise ValueError("~/.claude.json: mcpServers is not an object")
+    return box, servers
+
+def _local_mcp_set(root, name, config):
+    """Set (or remove, config=None) one local-scope server.
+
+    Removal prunes an emptied mcpServers map but never the project entry
+    itself: session state lives in there, and it is Claude Code's, not ours."""
+    data, err = _read_json_object(CLAUDE_JSON)
+    if err:
+        raise ValueError(f"~/.claude.json: {err} — refusing to touch it")
+    box, servers = _cj_maps(data, "local", root)
+    if config is None:
+        servers.pop(name, None)
+    else:
+        validate_mcp_config(config)
+        servers[name] = config
+    if not servers:
+        box.pop("mcpServers", None)
+    atomic_write(CLAUDE_JSON, json.dumps(data, indent=2) + "\n")
+
+def _move_end(d):
+    """One end of a move: {"scope": "user"} or
+    {"scope": "project"|"local", "root": …}. The root goes through
+    project_root, so registration and the symlink gates apply before any file
+    is named."""
+    scope = (d or {}).get("scope") if isinstance(d, dict) else None
+    if scope not in ("user", "project", "local"):
+        raise ValueError("scope must be user, project or local")
+    root = project_root((d or {}).get("root")) if scope != "user" else None
+    return scope, root
+
+def _end_desc(scope, root):
+    if scope == "user":
+        return "user scope (~/.claude.json)"
+    if scope == "project":
+        return tilde(project_root_file(root, ".mcp.json"))
+    return f"local scope for {tilde(root)}"
+
+def _end_servers(scope, root):
+    """Read-only view of one end's server map, with its read error."""
+    if scope == "project":
+        data, err = _read_json_object(project_root_file(root, ".mcp.json"))
+        servers = data.get("mcpServers", {})
+    elif scope == "user":
+        data, err = _read_json_object(CLAUDE_JSON)
+        servers = data.get("mcpServers", {})
+    else:
+        return _local_mcp_servers(root)
+    return (servers if isinstance(servers, dict) else {}), err
+
+def mcp_move(name, src, dst):
+    """Move one server's config verbatim between scopes.
+
+    Verbatim is the contract: whatever ran at the source runs at the
+    destination, headers, env and all. When both ends live in ~/.claude.json
+    (user and local) the move is a single atomic write; across files the
+    destination is written first, so the failure window holds a duplicate,
+    never nothing. Moving into a project auto-approves the server on this
+    machine — it was already trusted and running here — and moving out
+    un-answers the approval, so the lists in settings.local.json do not
+    accrete names the file no longer serves."""
+    if not NAME_RE.match(name or ""):
+        raise ValueError("bad server name")
+    s_scope, s_root = _move_end(src)
+    d_scope, d_root = _move_end(dst)
+    if (s_scope, s_root) == (d_scope, d_root):
+        raise ValueError("source and destination are the same place")
+
+    servers, err = _end_servers(s_scope, s_root)
+    if err:
+        raise ValueError(f"{_end_desc(s_scope, s_root)}: {err} — fix it by hand")
+    cfg = servers.get(name)
+    if cfg is None:
+        raise ValueError(f"{name}: not in {_end_desc(s_scope, s_root)}")
+    try:
+        validate_mcp_config(cfg)
+    except ValueError as e:
+        raise ValueError(f"{name} in {_end_desc(s_scope, s_root)}: {e}") from None
+    taken, err = _end_servers(d_scope, d_root)
+    if err:
+        raise ValueError(f"{_end_desc(d_scope, d_root)}: {err} — fix it by hand")
+    if name in taken:
+        raise ValueError(f"{name}: already in {_end_desc(d_scope, d_root)} "
+                         "— resolve by hand")
+    if d_scope == "user":
+        parked, _ = _disabled_servers()
+        if name in parked:
+            # landing next to a parked twin builds the both-sides trap
+            # mcp_set_enabled refuses to create
+            raise ValueError(f"{name}: a disabled server of that name is "
+                             "already parked at user scope — resolve by hand")
+
+    if "project" not in (s_scope, d_scope):
+        # both ends are ~/.claude.json: one read, one atomic write, no window
+        data, err = _read_json_object(CLAUDE_JSON)
+        if err:
+            raise ValueError(f"~/.claude.json: {err} — refusing to touch it")
+        s_box, s_servers = _cj_maps(data, s_scope, s_root)
+        d_box, d_servers = _cj_maps(data, d_scope, d_root)
+        if name not in s_servers:
+            raise ValueError(f"{name}: not in {_end_desc(s_scope, s_root)}")
+        d_servers[name] = s_servers.pop(name)
+        if not s_servers:
+            s_box.pop("mcpServers", None)
+        atomic_write(CLAUDE_JSON, json.dumps(data, indent=2) + "\n")
+    else:
+        # two files: destination first, so a failure in between leaves a
+        # duplicate to clean up rather than a server that is nowhere
+        def write(scope, root, config):
+            if scope == "user":
+                mcp_machine_set(name, config)
+            elif scope == "project":
+                project_mcp_set(root, name, config)
+            else:
+                _local_mcp_set(root, name, config)
+        write(d_scope, d_root, cfg)
+        write(s_scope, s_root, None)
+
+    if s_scope == "project":
+        project_mcp_approve(s_root, name, None)
+    if d_scope == "project":
+        project_mcp_approve(d_root, name, True)
+    return {"name": name, "from": _end_desc(s_scope, s_root),
+            "to": _end_desc(d_scope, d_root)}
 
 
 # ---- assembled payload for GET /api/projects ----

@@ -44,6 +44,8 @@ class Base(unittest.TestCase):
         core.config_dir = lambda: self.cfg
         self._p_config_dir = projects.config_dir
         projects.config_dir = core.config_dir
+        self._r_config_dir = registry.config_dir
+        registry.config_dir = core.config_dir
         self.calls = []
         self.result = _Done()
         self._run = registry.subprocess.run
@@ -53,6 +55,7 @@ class Base(unittest.TestCase):
         registry.subprocess.run = self._run
         core.config_dir = self._config_dir
         projects.config_dir = self._p_config_dir
+        registry.config_dir = self._r_config_dir
         self.tmp.cleanup()
 
     def fake_run(self, argv, **kw):
@@ -147,6 +150,84 @@ class Refusals(Base):
                 with self.assertRaises(ValueError):
                     registry.marketplace_add(self.proj, bad)
         self.assertEqual(self.calls, [])
+
+
+class UserScope(Base):
+    """The user-scope entry points: same transport, no project required."""
+
+    def test_runs_from_home_with_user_scope(self):
+        registry.user_plugin_install("hello@mkt")
+        argv, kw = self.calls[0]
+        self.assertEqual(argv, ["claude", "plugin", "install", "hello@mkt",
+                                "--scope", "user"])
+        self.assertEqual(kw["cwd"], str(pathlib.Path.home()))
+
+    def test_every_user_call_says_its_scope(self):
+        registry.user_marketplace_add("owner/repo")
+        registry.user_marketplace_remove("mkt")
+        registry.user_plugin_install("hello@mkt")
+        registry.user_plugin_uninstall("hello@mkt")
+        for argv, _ in self.calls:
+            with self.subTest(argv=argv):
+                self.assertIn("--scope", argv)
+                self.assertEqual(argv[argv.index("--scope") + 1], "user")
+
+    def test_no_registered_project_is_needed(self):
+        # the inverse of Refusals: an empty registry refuses project calls
+        # but must not refuse user ones
+        registry.user_plugin_install("hello@mkt")
+        self.assertEqual(len(self.calls), 1)
+
+    def test_uninstall_answers_the_prune_confirmation(self):
+        registry.user_plugin_uninstall("hello@mkt")
+        self.assertIn("-y", self.calls[0][0])
+
+    def test_an_argument_cannot_become_an_option(self):
+        for bad in ("--scope", "-y", "--help", "", "   "):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    registry.user_plugin_install(bad)
+                with self.assertRaises(ValueError):
+                    registry.user_marketplace_add(bad)
+        self.assertEqual(self.calls, [])
+
+    def test_stdin_closed_and_timeout_pinned(self):
+        registry.user_plugin_install("hello@mkt")
+        self.assertEqual(self.calls[0][1]["stdin"], subprocess.DEVNULL)
+        self.assertEqual(self.calls[0][1]["timeout"], registry.TIMEOUT)
+
+    def test_the_config_dir_reaches_the_cli(self):
+        """The app's config dir can be redirected by .claude-ui.json; the CLI
+        only hears about that through CLAUDE_CONFIG_DIR."""
+        registry.user_plugin_install("hello@mkt")
+        self.add()
+        registry.plugin_install(self.proj, "hello@mkt")
+        for argv, kw in self.calls:
+            with self.subTest(argv=argv):
+                self.assertEqual(kw["env"]["CLAUDE_CONFIG_DIR"], str(self.cfg))
+
+    def test_user_registry_state_reports_both_lists(self):
+        outs = [json.dumps([{"name": "mkt"}]),
+                json.dumps({"installed": [{"id": "hello@mkt", "scope": "user"}],
+                            "available": [{"pluginId": "other@mkt"}]})]
+        def fake(argv, **kw):
+            self.calls.append((argv, kw))
+            return _Done(0, outs[len(self.calls) - 1])
+        registry.subprocess.run = fake
+        st = registry.user_registry_state()
+        self.assertIsNone(st["error"])
+        self.assertNotIn("root", st)
+        self.assertEqual([m["name"] for m in st["marketplaces"]], ["mkt"])
+        self.assertEqual(st["installed"][0]["scope"], "user")
+        self.assertEqual(st["available"][0]["pluginId"], "other@mkt")
+        self.assertTrue(st["suggested"])
+
+    def test_a_failing_cli_becomes_an_error_string_not_an_exception(self):
+        self.result = _Done(1, "", "claude: something went wrong")
+        st = registry.user_registry_state()
+        self.assertEqual(st["error"], "claude: something went wrong")
+        self.assertEqual(st["marketplaces"], [])
+        self.assertEqual(st["available"], [])
 
 
 class State(Base):

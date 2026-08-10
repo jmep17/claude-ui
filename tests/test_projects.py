@@ -693,6 +693,145 @@ class ProjectMcp(Base):
                     projects.project_mcp_set(self.proj, name, self.SERVER)
 
 
+class McpMove(Base):
+    """mcp_move between the three scopes: user, project, local."""
+
+    SERVER = {"command": "npx", "args": ["-y", "server"], "env": {"K": "v"}}
+
+    def setUp(self):
+        super().setUp()
+        from claude_ui import mcp
+        self.claude_json = pathlib.Path(self.tmp.name) / "claude.json"
+        self._saved_json = [(m, m.CLAUDE_JSON) for m in (core, mcp, projects)]
+        for m, _ in self._saved_json:
+            m.CLAUDE_JSON = self.claude_json
+        self.add()
+
+    def tearDown(self):
+        for m, p in self._saved_json:
+            m.CLAUDE_JSON = p
+        super().tearDown()
+
+    def user_end(self):
+        return {"scope": "user"}
+
+    def end(self, scope):
+        return {"scope": scope, "root": str(self.proj)}
+
+    def cj(self):
+        return json.loads(self.claude_json.read_text())
+
+    def seed_user(self, name="docs"):
+        self.claude_json.write_text(json.dumps({"mcpServers": {name: self.SERVER}}))
+
+    def seed_local(self, name="docs", extra=None):
+        entry = {"mcpServers": {name: self.SERVER}, **(extra or {})}
+        self.claude_json.write_text(json.dumps(
+            {"projects": {str(self.proj.resolve()): entry}}))
+
+    def test_user_to_project_moves_verbatim_and_approves(self):
+        self.seed_user()
+        projects.mcp_move("docs", self.user_end(), self.end("project"))
+        data = json.loads((self.proj / ".mcp.json").read_text())
+        self.assertEqual(data["mcpServers"]["docs"], self.SERVER)
+        self.assertNotIn("mcpServers", self.cj())
+        local = json.loads((self.cdir() / "settings.local.json").read_text())
+        self.assertIn("docs", local["enabledMcpjsonServers"])
+
+    def test_project_to_user_cleans_the_approval_lists(self):
+        (self.proj / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"docs": self.SERVER}}))
+        projects.project_mcp_approve(self.proj, "docs", True)
+        projects.mcp_move("docs", self.end("project"), self.user_end())
+        self.assertEqual(self.cj()["mcpServers"]["docs"], self.SERVER)
+        self.assertFalse((self.proj / ".mcp.json").exists())  # emptied file goes
+        local = json.loads((self.cdir() / "settings.local.json").read_text())
+        self.assertNotIn("enabledMcpjsonServers", local)
+
+    def test_user_and_local_swap_in_one_file(self):
+        self.seed_user()
+        projects.mcp_move("docs", self.user_end(), self.end("local"))
+        data = self.cj()
+        self.assertNotIn("mcpServers", data)
+        key = str(self.proj.resolve())
+        self.assertEqual(data["projects"][key]["mcpServers"]["docs"], self.SERVER)
+        projects.mcp_move("docs", self.end("local"), self.user_end())
+        data = self.cj()
+        self.assertEqual(data["mcpServers"]["docs"], self.SERVER)
+        # the emptied map goes, but the project entry itself stays: session
+        # state lives in there
+        self.assertIn(key, data["projects"])
+        self.assertNotIn("mcpServers", data["projects"][key])
+
+    def test_local_to_project_and_back(self):
+        self.seed_local(extra={"history": ["kept"]})
+        projects.mcp_move("docs", self.end("local"), self.end("project"))
+        data = json.loads((self.proj / ".mcp.json").read_text())
+        self.assertEqual(data["mcpServers"]["docs"], self.SERVER)
+        key = str(self.proj.resolve())
+        self.assertEqual(self.cj()["projects"][key], {"history": ["kept"]})
+        projects.mcp_move("docs", self.end("project"), self.end("local"))
+        self.assertEqual(self.cj()["projects"][key]["mcpServers"]["docs"],
+                         self.SERVER)
+        self.assertFalse((self.proj / ".mcp.json").exists())
+
+    def test_local_servers_show_in_project_mcp_state(self):
+        self.seed_local()
+        st = projects.project_mcp_state(self.proj)
+        self.assertEqual(st["local_servers"],
+                         [{"name": "docs", "config": self.SERVER}])
+
+    def test_a_destination_collision_refuses_and_moves_nothing(self):
+        self.seed_user()
+        (self.proj / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"docs": {"url": "https://x/mcp"}}}))
+        with self.assertRaises(ValueError):
+            projects.mcp_move("docs", self.user_end(), self.end("project"))
+        self.assertEqual(self.cj()["mcpServers"]["docs"], self.SERVER)
+        data = json.loads((self.proj / ".mcp.json").read_text())
+        self.assertEqual(data["mcpServers"]["docs"], {"url": "https://x/mcp"})
+
+    def test_a_parked_twin_at_user_scope_also_refuses(self):
+        (self.proj / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"docs": self.SERVER}}))
+        (self.cfg / "disabled").mkdir()
+        (self.cfg / "disabled" / "mcp-servers.json").write_text(
+            json.dumps({"mcpServers": {"docs": {"url": "https://x/mcp"}}}))
+        with self.assertRaises(ValueError):
+            projects.mcp_move("docs", self.end("project"), self.user_end())
+        self.assertTrue((self.proj / ".mcp.json").exists())
+
+    def test_a_config_with_neither_command_nor_url_is_refused(self):
+        self.claude_json.write_text(json.dumps({"mcpServers": {"docs": {"args": []}}}))
+        with self.assertRaises(ValueError) as cm:
+            projects.mcp_move("docs", self.user_end(), self.end("project"))
+        self.assertIn("~", str(cm.exception))  # names the source file
+
+    def test_refusals_missing_same_place_bad_scope_unregistered(self):
+        self.seed_user()
+        with self.assertRaises(ValueError):
+            projects.mcp_move("nope", self.user_end(), self.end("project"))
+        with self.assertRaises(ValueError):
+            projects.mcp_move("docs", self.user_end(), self.user_end())
+        with self.assertRaises(ValueError):
+            projects.mcp_move("docs", self.user_end(), {"scope": "global"})
+        other = pathlib.Path(self.tmp.name) / "elsewhere"
+        other.mkdir()
+        with self.assertRaises(ValueError):
+            projects.mcp_move("docs", self.user_end(),
+                              {"scope": "project", "root": str(other)})
+        self.assertEqual(self.cj()["mcpServers"]["docs"], self.SERVER)
+
+    def test_bad_json_in_claude_json_refuses_before_any_write(self):
+        self.claude_json.write_text("{not json")
+        (self.proj / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"docs": self.SERVER}}))
+        with self.assertRaises(ValueError):
+            projects.mcp_move("docs", self.end("project"), self.user_end())
+        self.assertEqual(self.claude_json.read_text(), "{not json")
+        self.assertTrue((self.proj / ".mcp.json").exists())
+
+
 class McpApproval(Base):
     """Approved / rejected / undecided, and where the answer is recorded."""
 

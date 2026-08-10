@@ -15,22 +15,24 @@ from .backup import (backup_create, backup_delete, backup_inspect, backup_list,
                      project_restore, project_restore_inspect, set_backup_dir)
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
 from .items import (Conflict, config_files_state, item_copy, item_create,
-                    item_delete, item_read, item_save, item_scope,
+                    item_delete, item_move, item_read, item_save, item_scope,
                     item_set_model, path_read, path_save, scan_items,
                     set_enabled)
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
 from . import output_styles
 from . import schema
 from .plugins import (adopted_items, plugin_env_set, plugin_env_vars,
-                      plugin_resync, plugin_set_enabled, plugins_split,
-                      plugins_state, skill_override_set)
-from .projects import (project_init, project_mcp_approve, project_mcp_set,
-                       project_set_mode, project_setting_set,
+                      plugin_resync, plugin_scope_move, plugin_set_enabled,
+                      plugins_split, plugins_state, skill_override_set)
+from .projects import (mcp_move, project_init, project_mcp_approve,
+                       project_mcp_set, project_set_mode, project_setting_set,
                        project_skill_override, project_toggle, projects_state,
                        registry_add, registry_remove, wrapper_check,
                        wrapper_test, wrapper_write)
 from .registry import (marketplace_add, marketplace_remove, plugin_install,
-                       plugin_uninstall, registry_state)
+                       plugin_uninstall, registry_state, user_marketplace_add,
+                       user_marketplace_remove, user_plugin_install,
+                       user_plugin_uninstall, user_registry_state)
 from .settings import (hook_test, settings_schema, settings_set, settings_state,
                        start_docs_fetch, suggest_state)
 from .statusline import statusline_save, statusline_state
@@ -261,6 +263,13 @@ class Handler(BaseHTTPRequestHandler):
                     item_scope(req.get("from_root")),
                     item_scope(req.get("to_root")),
                     bool(req.get("enabled", True)))})
+            elif action == "item-move":
+                # same ends as item-copy above, but the source is removed
+                self.send(200, {"ok": True, **item_move(
+                    req.get("type", ""), req.get("name", ""),
+                    item_scope(req.get("from_root")),
+                    item_scope(req.get("to_root")),
+                    bool(req.get("enabled", True)))})
             elif action == "hook-test":
                 self.send(200, hook_test(req.get("command", ""), req.get("event", "")))
             elif action == "statusline-save":
@@ -333,6 +342,18 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "project-plugin-uninstall":
                 self.send(200, plugin_uninstall(req.get("root", ""),
                                                 req.get("id", "")))
+            elif action == "user-registry":
+                # a POST although it only reads: it shells out, like
+                # project-registry above
+                self.send(200, user_registry_state())
+            elif action == "user-marketplace-add":
+                self.send(200, user_marketplace_add(req.get("source", "")))
+            elif action == "user-marketplace-remove":
+                self.send(200, user_marketplace_remove(req.get("name", "")))
+            elif action == "user-plugin-install":
+                self.send(200, user_plugin_install(req.get("id", "")))
+            elif action == "user-plugin-uninstall":
+                self.send(200, user_plugin_uninstall(req.get("id", "")))
             elif action == "project-skill-override":
                 self.send(200, {"ok": True, **project_skill_override(
                     req.get("root", ""), req.get("name", ""),
@@ -341,6 +362,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, {"ok": True, **project_setting_set(
                     req.get("root", ""), req.get("key", ""), req.get("value"),
                     bool(req.get("local", True)))})
+            elif action == "mcp-move":
+                self.send(200, {"ok": True, **mcp_move(
+                    req.get("name", ""), req.get("from"), req.get("to"))})
             elif action == "mcp-save":
                 mcp_machine_set(req.get("name", ""), req.get("config"),
                                 bool(req.get("enabled", True)))
@@ -357,6 +381,9 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "plugin-toggle":
                 plugin_set_enabled(req.get("id", ""), bool(req.get("enabled")))
                 self.send(200, {"ok": True})
+            elif action == "plugin-scope-move":
+                self.send(200, {"ok": True, **plugin_scope_move(
+                    req.get("id", ""), req.get("from"), req.get("to"))})
             elif action == "plugin-split":
                 self.send(200, {"ok": True, **plugins_split(
                     req.get("id", ""), req.get("picks") or [],

@@ -368,5 +368,62 @@ class Copy(ProjectBase):
         self.assertEqual([p.name for p in (self.cdir / "skills").iterdir()], ["pdf"])
 
 
+class Move(ProjectBase):
+    """item_move between the config dir and a project: copy, then delete."""
+
+    def test_moves_a_command_into_a_project(self):
+        self.write("commands/ship.md", "body\n")
+        out = items.item_move("commands", "ship", None, self.cdir)
+        self.assertEqual((self.cdir / "commands" / "ship.md").read_text(), "body\n")
+        # the type root stays (delete's rule); the item itself is gone
+        self.assertFalse((self.tmp / "commands" / "ship.md").exists())
+        self.assertTrue(out["moved"])
+
+    def test_moves_a_skill_tree_back_out_to_the_config_dir(self):
+        (self.cdir / "skills" / "pdf" / "ref").mkdir(parents=True)
+        (self.cdir / "skills" / "pdf" / "SKILL.md").write_text("---\nname: pdf\n---\n")
+        (self.cdir / "skills" / "pdf" / "ref" / "notes.md").write_text("notes\n")
+        items.item_move("skills", "pdf", self.cdir, None)
+        self.assertEqual((self.tmp / "skills" / "pdf" / "ref" / "notes.md").read_text(),
+                         "notes\n")
+        self.assertFalse((self.cdir / "skills" / "pdf").exists())
+
+    def test_a_disabled_item_moves_and_stays_disabled(self):
+        self.write("disabled/commands/ship.md", "parked\n")
+        items.item_move("commands", "ship", None, self.cdir, enabled=False)
+        self.assertEqual((self.cdir / "disabled" / "commands" / "ship.md").read_text(),
+                         "parked\n")
+        self.assertFalse((self.tmp / "disabled" / "commands" / "ship.md").exists())
+
+    def test_a_collision_refuses_and_leaves_the_source_alone(self):
+        self.write("commands/ship.md", "mine\n")
+        (self.cdir / "disabled" / "commands").mkdir(parents=True)
+        (self.cdir / "disabled" / "commands" / "ship.md").write_text("theirs\n")
+        with self.assertRaises(ValueError):
+            items.item_move("commands", "ship", None, self.cdir)
+        self.assertEqual((self.tmp / "commands" / "ship.md").read_text(), "mine\n")
+        self.assertFalse((self.cdir / "commands").exists())
+
+    def test_a_symlinked_skill_moves_its_contents_and_only_unlinks(self):
+        real = self.out / "checkout" / "pdf"
+        real.mkdir(parents=True)
+        (real / "SKILL.md").write_text("---\nname: pdf\n---\nreal\n")
+        (self.tmp / "skills").mkdir()
+        (self.tmp / "skills" / "pdf").symlink_to(real)
+        items.item_move("skills", "pdf", None, self.cdir)
+        dst = self.cdir / "skills" / "pdf"
+        self.assertFalse(dst.is_symlink())
+        self.assertEqual((dst / "SKILL.md").read_text(), "---\nname: pdf\n---\nreal\n")
+        # the link is gone; the checkout it pointed at is untouched
+        self.assertFalse((self.tmp / "skills" / "pdf").is_symlink())
+        self.assertTrue((real / "SKILL.md").is_file())
+
+    def test_refuses_a_missing_source_and_a_same_place_move(self):
+        with self.assertRaises(ValueError):
+            items.item_move("commands", "nope", None, self.cdir)
+        with self.assertRaises(ValueError):
+            items.item_move("commands", "ship", self.cdir, self.cdir)
+
+
 if __name__ == "__main__":
     unittest.main()

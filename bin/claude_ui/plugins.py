@@ -20,8 +20,10 @@ import shutil
 from . import schema
 from .core import (NAME_RE, SOURCE_KEY, _read_json_object, atomic_write,
                    config_dir, disabled_dir, item_rel, parse_frontmatter,
+                   project_claude_dir, project_root, project_roots,
                    set_frontmatter_key, tilde)
 from .mcp import mcp_machine_set, validate_mcp_config
+from .projects import project_setting_set
 from .settings import ENV_READONLY, settings_set, settings_state
 
 
@@ -292,6 +294,7 @@ def plugins_state():
     """Every plugin on this machine, its components, and whether it is on."""
     root = plugins_root()
     enabled, serr = enabled_plugins()
+    entries = _plugin_scope_entries()
     try:
         found, merr = _plugin_dirs()
     except OSError as e:
@@ -309,9 +312,13 @@ def plugins_state():
         out.append({
             "id": pid, "name": name, "marketplace": market,
             "description": desc, "path": tilde(pdir),
+            # state and enabled are the user store's answer, unchanged:
+            # doctor and insight read them, and the tab's sections are
+            # about what applies to you everywhere
             "state": "enabled" if enabled.get(pid) is True
                      else "disabled" if pid in enabled else "available",
             "enabled": enabled.get(pid) is True,
+            "entries": entries.get(pid, []),
             "components": comps,
             "counts": _counts(comps),
         })
@@ -492,6 +499,116 @@ def plugin_set_enabled(pid, enabled):
     if err:
         raise ValueError(f"settings.json: {err} — fix it by hand first")
     settings_set("enabledPlugins", {**cur, pid: bool(enabled)})
+
+# ---- where a plugin's enablement is recorded
+#
+# Claude Code reads enabledPlugins from three stores: your settings.json
+# (user — every project on this machine), a project's .claude/settings.json
+# (project — committed, everyone who clones), and its settings.local.json
+# (local — you, that project). The plugin's files live in the shared cache
+# regardless; the stores hold only the decision, which is why moving between
+# them is a settings edit and not a reinstall.
+
+def _plugin_scope_entries():
+    """Every enabledPlugins entry across every store this app can see:
+    {pid: [{"scope", "root", "raw_root", "enabled"}, …]}.
+
+    Without this a plugin recorded only in a project renders as "available"
+    on the Plugins tab — "not in use", which is false. A project whose
+    .claude is a symlink is skipped, as everywhere else."""
+    out = {}
+    def note(pid, scope, root, on):
+        if isinstance(on, bool):
+            out.setdefault(pid, []).append(
+                {"scope": scope, "root": tilde(root) if root else None,
+                 "raw_root": str(root) if root else None, "enabled": on})
+    user, _ = enabled_plugins()
+    for pid, on in user.items():
+        note(pid, "user", None, on)
+    for root in project_roots():
+        try:
+            cdir = project_claude_dir(root)
+        except ValueError:
+            continue
+        for fname, scope in (("settings.json", "project"),
+                             ("settings.local.json", "local")):
+            data, _ = _read_json_object(cdir / fname)
+            m = data.get("enabledPlugins")
+            for pid, on in (m.items() if isinstance(m, dict) else ()):
+                note(pid, scope, root, on)
+    return out
+
+def _store(d):
+    """One end of a scope move, validated. The root goes through
+    project_root, so registration and the symlink gates apply first."""
+    scope = (d or {}).get("scope") if isinstance(d, dict) else None
+    if scope not in ("user", "project", "local"):
+        raise ValueError("scope must be user, project or local")
+    root = project_root((d or {}).get("root")) if scope != "user" else None
+    return scope, root
+
+def _store_desc(scope, root):
+    if scope == "user":
+        return "user scope (settings.json)"
+    rel = "settings.json" if scope == "project" else "settings.local.json"
+    return f"{tilde(root)}/.claude/{rel}"
+
+def _store_read(scope, root):
+    if scope == "user":
+        m, err = enabled_plugins()
+        if err:
+            raise ValueError(f"settings.json: {err} — fix it by hand first")
+        return m
+    path = project_claude_dir(root) / ("settings.json" if scope == "project"
+                                       else "settings.local.json")
+    data, err = _read_json_object(path)
+    if err:
+        raise ValueError(f"{tilde(path)}: {err} — fix it by hand first")
+    m = data.get("enabledPlugins")
+    return m if isinstance(m, dict) else {}
+
+def _store_write(scope, root, pid, val):
+    """Set (bool) or remove (None) one entry. An emptied map loses the whole
+    key rather than lingering as {} — in a committed settings.json that would
+    be a puzzle, and Claude Code reads an absent key the same way."""
+    cur = dict(_store_read(scope, root))
+    if val is None:
+        cur.pop(pid, None)
+    else:
+        cur[pid] = val
+    if scope == "user":
+        settings_set("enabledPlugins", cur or None)
+    else:
+        project_setting_set(root, "enabledPlugins", cur or None,
+                            local=(scope == "local"))
+
+def plugin_scope_move(pid, src, dst):
+    """Move an enabledPlugins entry between stores, bool and all.
+
+    The recorded value travels verbatim: a plugin disabled at user scope
+    arrives disabled at project scope, because the move changes where the
+    decision is recorded, not the decision. Destination first, then the
+    source entry goes — a failure in between duplicates the record, never
+    drops it. A destination that already has an answer for this plugin is a
+    conflict to resolve by hand, not to silently overwrite."""
+    if not isinstance(pid, str) or "@" not in pid:
+        raise ValueError("bad plugin id")
+    s_scope, s_root = _store(src)
+    d_scope, d_root = _store(dst)
+    if (s_scope, s_root) == (d_scope, d_root):
+        raise ValueError("source and destination are the same place")
+    val = _store_read(s_scope, s_root).get(pid)
+    if not isinstance(val, bool):
+        raise ValueError(f"{pid}: not recorded at {_store_desc(s_scope, s_root)}")
+    if pid in _store_read(d_scope, d_root):
+        raise ValueError(f"{pid}: already recorded at "
+                         f"{_store_desc(d_scope, d_root)} — resolve by hand")
+    _store_write(d_scope, d_root, pid, val)
+    _store_write(s_scope, s_root, pid, None)
+    return {"id": pid, "enabled": val,
+            "from": _store_desc(s_scope, s_root),
+            "to": _store_desc(d_scope, d_root)}
+
 
 def skill_override_set(name, value):
     """Set (or clear, value=None) one skillOverrides entry in your settings.

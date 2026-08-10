@@ -316,9 +316,8 @@ def item_copy(type_, name, from_scope=None, to_scope=None, enabled=True):
     leaves the target alone. Both rules come from the same place: neither may
     reach into a directory we were never invited to write.
 
-    Nothing is removed at the source. Moving an item is a copy and then a
-    delete, two decisions the caller makes separately, because one of them
-    cannot be undone and the other can.
+    Nothing is removed at the source: this is the half that can always be
+    undone. item_move() below is the pair that also removes, in that order.
     """
     if from_scope == to_scope:
         raise ValueError("source and destination are the same place")
@@ -339,6 +338,24 @@ def item_copy(type_, name, from_scope=None, to_scope=None, enabled=True):
     else:
         atomic_write_bytes(dst, src.read_bytes())
     return {"path": tilde(dst), "name": name, "type": type_}
+
+def item_move(type_, name, from_scope=None, to_scope=None, enabled=True):
+    """Move an item between scopes: a copy, then a delete of the source.
+
+    In that order, because only one of the two can be undone: the copy is
+    fully staged and renamed into place before anything is removed, so a
+    failure part way leaves two copies and says so — never zero. Everything
+    hard is item_copy()'s: collision checks on both sides of disabled/, the
+    staged copytree, and the symlink rule (the contents move, the link is
+    removed, its target is never touched).
+    """
+    res = item_copy(type_, name, from_scope, to_scope, enabled)
+    try:
+        item_delete(type_, name, enabled, from_scope)
+    except (ValueError, OSError) as e:
+        raise ValueError(f"{name}: copied to {res['path']}, but the source "
+                         f"could not be removed — remove it by hand ({e})") from None
+    return {**res, "moved": True}
 
 def item_delete(type_, name, enabled=True, scope=None):
     """Remove an item for good. The one call in this module that destroys.

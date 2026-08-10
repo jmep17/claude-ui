@@ -1066,6 +1066,10 @@ function renderMcp() {
       // to mean opening the editor first, which nothing else asks of you
       const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
         { label: "Copy name", icon: "copy", fn: () => copyText(s.name, "name") },
+        // enabled servers only: the disabled store is this app's parking
+        // area, and a move is of the live entry Claude Code actually reads
+        ...(s.enabled ? [{ label: "Move to a project…", icon: "arrowRight",
+          fn: () => mcpMoveToProject(s) }] : []),
         { label: "Delete server", icon: "trash", danger: true,
           fn: () => mcpDelete(s.name, s.enabled) },
       ]), "More actions");
@@ -1080,6 +1084,49 @@ function renderMcp() {
       actions));
   }
   view.append(list);
+}
+
+/* Scope moves. Claude Code keeps MCP servers in three places: user
+   (~/.claude.json, every project on this machine), project (.mcp.json,
+   committed), and local (~/.claude.json again, but under projects.<root> —
+   one project, this machine, and where `claude mcp add` writes by default).
+   The entry moves verbatim; only where it is recorded changes. */
+
+async function mcpMoveToProject(s) {
+  try { if (!PROJECTS) PROJECTS = await api("/api/projects"); }
+  catch (e) { toast(e.message, true); return; }
+  const projs = PROJECTS.projects || [];
+  if (!projs.length) {
+    toast("No registered projects — add one on the Projects tab first", true);
+    return;
+  }
+  const r = await modal({
+    title: "Move " + s.name + " to a project",
+    text: "The entry leaves ~/.claude.json and lands, verbatim, at the scope "
+        + "you pick. Project scope is .mcp.json — committed, so everyone who "
+        + "clones the repo is offered it; it stays approved for you on this "
+        + "machine. Local scope stays private to you and that one project.",
+    fields: [
+      { id: "p", label: "Project", type: "select",
+        options: projs.map((p) => ({ value: p.root, label: p.tilde })) },
+      { id: "s", label: "Scope", type: "select", options: [
+        { value: "project", label: "project — .mcp.json, shared with the team" },
+        { value: "local", label: "local — just you, just that project" }] },
+    ],
+    ok: "Move",
+  });
+  if (!r || !r.p) return;
+  await mcpMove(s.name, { scope: "user" }, { scope: r.s, root: r.p });
+}
+
+async function mcpMove(name, from, to) {
+  try {
+    await api("/api/mcp-move", { name, from, to });
+    toast(name + " moved");
+    PROJECTS = null;    // both stores changed; refetch each on next look
+    await refresh();
+    render();
+  } catch (e) { toast(e.message, true); }
 }
 
 // ----------------------------------------------------------------- plugins
@@ -1118,6 +1165,7 @@ async function renderPlugins(reload) {
   }));
 
   view.append(subagentModelBar());
+  view.append(userRegistryCard());
 
   if (PLUGINS.error) {
     view.append(el("div.alert.alert-destructive", { style: { marginBottom: "1rem" } },
@@ -1176,6 +1224,170 @@ async function renderPlugins(reload) {
     + "by the plugin's own default. You can split one without ever enabling it.");
 
   adoptedSection(view);
+}
+
+/* --------------------------------------- marketplaces, for this machine --
+   The project card has had this since marketplaces arrived; this is the same
+   bridge at user scope, which is where most people actually install. Adding a
+   marketplace clones a repository and installing a plugin unpacks a version
+   into the shared cache — both Claude Code's decisions, made by its own CLI,
+   run here with --scope user. What lands is one key in your settings.json,
+   and the plugin applies in every project on this machine.
+
+   Collapsed until asked, because unlike everything else on this tab it costs
+   two subprocess calls that can take seconds: the inventory below must stay
+   instant. Where a plugin's tree is already on disk the row says what it
+   brings — skills and MCP servers arrive inside plugins, and that is the only
+   way either of them is distributed. A catalogue entry not yet fetched cannot
+   say, and says so rather than guessing. */
+
+let UREG = null;        // user_registry_state payload — fetched on demand
+let UREGOPEN = false;
+
+function userRegistryCard() {
+  const toggle = mkbtn("btn-sm btn-icon btn-ghost", "", () => {
+    UREGOPEN = !UREGOPEN;
+    if (UREGOPEN && !UREG) userRegistryLoad(); else renderPlugins();
+  }, UREGOPEN ? "Collapse" : "Ask claude what you can install");
+  toggle.append(icon("chevronDown"));
+
+  const card = el("div.card", {},
+    el("div.drow", {},
+      icon("download"),
+      el("span.dmsg", {},
+        el("div", { text: "Marketplaces & installs" }),
+        el("div.hint", { text: "Recorded in your settings.json — installs apply "
+          + "in every project on this machine. Skills and MCP servers are "
+          + "distributed inside plugins; there is no separate marketplace for "
+          + "them." })),
+      el("div.dactions", {}, toggle)));
+  if (!UREGOPEN) return card;
+  if (!UREG) {
+    card.append(el("div.drow", {}, el("span.dmsg", { text: "Asking claude…" })));
+    return card;
+  }
+
+  if (UREG.error)
+    card.append(el("div.drow", {},
+      icon("warn"), el("span.dmsg", { text: UREG.error })));
+
+  for (const m of UREG.marketplaces)
+    card.append(el("div.drow", {},
+      icon("download"),
+      el("span.dmsg.dmono", { text: m.name || String(m) }),
+      el("div.dactions", {}, mkbtn("btn-sm danger", "Remove", () =>
+        userMarketRemove(m.name || String(m))))));
+
+  for (const s of UREG.suggested)
+    if (!UREG.marketplaces.some((m) => (m.name || "") === s.source.split("/")[1]))
+      card.append(el("div.drow", {},
+        icon("download"),
+        el("span.dmsg", {},
+          el("div.dmono", { text: s.source }),
+          el("div.hint", { text: s.desc })),
+        badge(s.label, "outline"),
+        el("div.dactions", {}, mkbtn("btn-sm", "Add", () =>
+          userRegistryRun("user-marketplace-add", { source: s.source },
+            "Marketplace added")))));
+
+  card.append(el("div.drow", {},
+    el("span.dmsg", { text: "Any GitHub repo, git URL or local path works too." }),
+    el("div.dactions", {}, mkbtn("btn-sm", "Add marketplace…", userMarketAdd))));
+
+  for (const p of UREG.installed) {
+    const id = p.id || p.name || "";
+    card.append(el("div.drow", {},
+      icon("plug"),
+      el("span.dmsg", {},
+        el("div.dmono", { text: id }),
+        el("div.hint", { text: (pluginBrings(id) || "installed")
+          + (p.version ? " · v" + p.version : "") })),
+      p.scope === "user" ? badge("yours", "success")
+                         : badge(p.scope || "?", "outline"),
+      el("div.dactions", {}, p.scope === "user"
+        // only the entry this scope owns: a project's install is the
+        // project card's to remove, and pretending otherwise would fail
+        ? mkbtn("btn-sm danger", "Uninstall", () => userPluginRemove(id))
+        : null)));
+  }
+
+  for (const p of UREG.available) {
+    const id = p.pluginId || p.name || "";
+    card.append(el("div.drow", {},
+      icon("plug"),
+      el("span.dmsg", {},
+        el("div.dmono", { text: id }),
+        el("div.hint", { text: pluginBrings(id)
+          || p.description || "Components are listed once it is installed." })),
+      el("div.dactions", {}, mkbtn("btn-sm btn-primary", "Install", () =>
+        userRegistryRun("user-plugin-install", { id }, "Installed")))));
+  }
+
+  if (!UREG.marketplaces.length && !UREG.installed.length)
+    card.append(el("div.drow", {},
+      el("span.dmsg", { text: "No marketplaces yet. Adding one only records "
+        + "where to look; nothing runs until you install a plugin." })));
+  return card;
+}
+
+// What a plugin brings, when its tree is already on disk — the same count
+// line the inventory below uses, so the two never disagree.
+function pluginBrings(id) {
+  const p = (PLUGINS.plugins || []).find((x) => x.id === id);
+  return p && p.counts ? countLine(p) : "";
+}
+
+async function userRegistryLoad() {
+  renderPlugins();                // draw the "Asking claude…" line first
+  try { UREG = await api("/api/user-registry", {}); }
+  catch (e) {
+    UREG = { error: e.message, marketplaces: [], installed: [],
+             available: [], suggested: [] };
+  }
+  if (TAB === "plugins") renderPlugins();
+}
+
+async function userRegistryRun(action, body, msg) {
+  const t = toast({ title: "Running claude…", variant: "loading", duration: 0 });
+  try {
+    const r = await api("/api/" + action, body);
+    t.close();
+    // the CLI's own last line, not our guess at what it did
+    toast(r.ok ? msg + " · " + r.detail : r.detail, !r.ok);
+    UREG = null;
+    await userRegistryLoad();
+    // the tree changed under the inventory below, and settings.json with it
+    await refresh();
+    renderPlugins(true);
+  } catch (e) { t.close(); toast(e.message, true); }
+}
+
+async function userMarketAdd() {
+  const r = await modal({
+    title: "Add a marketplace",
+    text: "Runs `claude plugin marketplace add … --scope user`, which clones "
+        + "the source and records it for every project on this machine. Add "
+        + "sources you trust: a plugin can ship hooks, which run commands.",
+    fields: [{ id: "s", label: "Source", mono: true, placeholder: "owner/repo",
+      hint: "A GitHub owner/repo, a git URL, or a path to a local directory" }],
+    ok: "Add",
+  });
+  if (!r || !r.s) return;
+  userRegistryRun("user-marketplace-add", { source: r.s }, "Marketplace added");
+}
+
+async function userMarketRemove(name) {
+  if (await mconfirm("Remove " + name + "?",
+      "Stops it being a place to install from. Plugins you already installed "
+      + "from it stay on disk, but stop resolving to a source.", "Remove"))
+    userRegistryRun("user-marketplace-remove", { name }, "Marketplace removed");
+}
+
+async function userPluginRemove(id) {
+  if (await mconfirm("Uninstall " + id + "?",
+      "Removes it from your settings.json. A project that enables it in its "
+      + "own settings is unaffected.", "Uninstall"))
+    userRegistryRun("user-plugin-uninstall", { id }, "Uninstalled");
 }
 
 /* What a Split left behind: ordinary items in your config dir that remember
@@ -1290,12 +1502,26 @@ function pluginRow(p) {
      this. See plugins.skill_override_set() for the longer version. */
   const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
     { label: "Copy path", icon: "copy", fn: () => copyText(p.path, "path") },
+    ...((p.entries || []).length
+      ? [{ label: "Move enablement…", icon: "arrowRight",
+           fn: () => pluginScopeMove(p) }]
+      : []),
   ]), "More actions");
   more.append(icon("chevronDown"));
   actions.append(more);
 
   const badges = [badge(p.marketplace, "outline")];
+  // "not set" is the user store's answer. A plugin a project turns on is set
+  // somewhere, so say where before the row calls it unused.
   if (p.state === "available") badges.push(badge("not set", "secondary"));
+  for (const e of (p.entries || []).filter((e) => e.scope !== "user")) {
+    const b = badge(e.scope + ": " + e.root, "outline");
+    b.title = "enabledPlugins in " + e.root + "/.claude/"
+      + (e.scope === "project" ? "settings.json — committed"
+                               : "settings.local.json — just you")
+      + ", currently " + (e.enabled ? "on" : "off") + " there";
+    badges.push(b);
+  }
   if (p.components.some((c) => c.warn)) {
     const b = badge("plugin-relative paths", "warning");
     b.title = "Some components expand ${CLAUDE_PLUGIN_ROOT}, which stops resolving once split";
@@ -1309,6 +1535,51 @@ function pluginRow(p) {
       text: countLine(p) + (p.description ? " — " + p.description : ""),
     }),
     actions, body);
+}
+
+/* Moving where a plugin's enablement is recorded. The plugin's files are in
+   the shared cache either way — this moves one line of settings, so nothing
+   downloads and nothing is removed from disk. */
+async function pluginScopeMove(p) {
+  try { if (!PROJECTS) PROJECTS = await api("/api/projects"); }
+  catch (e) { toast(e.message, true); return; }
+  const projs = PROJECTS.projects || [];
+  const label = (e) => (e.scope === "user" ? "your config" : e.root)
+    + " · " + e.scope + " · " + (e.enabled ? "on" : "off");
+  const dests = [{ value: "user", label: "your config — every project on this machine" }];
+  for (const pr of projs) {
+    dests.push({ value: "project:" + pr.root,
+      label: pr.tilde + " — project, committed with the repo" });
+    dests.push({ value: "local:" + pr.root,
+      label: pr.tilde + " — local, just you" });
+  }
+  const r = await modal({
+    title: "Move where " + p.name + " is enabled",
+    text: "Moves the enabledPlugins entry, keeping its on/off value. The "
+        + "plugin's files stay in the shared cache — nothing is downloaded or "
+        + "deleted, only the record of who has it switched on.",
+    fields: [
+      { id: "f", label: "From", type: "select",
+        options: (p.entries || []).map((e) => ({
+          value: e.scope + ":" + (e.raw_root || ""), label: label(e) })) },
+      { id: "t", label: "To", type: "select", options: dests },
+    ],
+    ok: "Move",
+  });
+  if (!r || !r.f || !r.t) return;
+  const parse = (v) => {
+    const i = v.indexOf(":");
+    const scope = i < 0 ? v : v.slice(0, i);
+    const root = i < 0 ? "" : v.slice(i + 1);
+    return root ? { scope, root } : { scope };
+  };
+  try {
+    await api("/api/plugin-scope-move", { id: p.id, from: parse(r.f), to: parse(r.t) });
+    toast(p.name + " moved");
+    PROJECTS = null;      // a project's settings changed too
+    await refresh();      // and possibly your own settings.json
+    renderPlugins(true);
+  } catch (e) { toast(e.message, true); }
 }
 
 /* ------------------------------------------------- what a plugin's agents run on
@@ -1952,23 +2223,27 @@ const MCP_APPROVAL = {
 
 function projMcpRow(st) {
   const m = st.mcp || { servers: [] };
+  const local = m.local_servers || [];
+  const total = m.servers.length + local.length;
   const key = st.root + "/mcp";
   const open = POPENITEMS.has(key);
   const toggle = mkbtn("btn-sm btn-icon btn-ghost", "", () => {
     if (open) POPENITEMS.delete(key); else POPENITEMS.add(key);
     renderProjects();
-  }, m.servers.length ? (open ? "Collapse" : "Show them") : "Nothing here yet");
+  }, total ? (open ? "Collapse" : "Show them") : "Nothing here yet");
   toggle.append(icon("chevronDown"));
-  if (!m.servers.length) toggle.disabled = true;
+  if (!total) toggle.disabled = true;
 
   const add = mkbtn("btn-sm btn-primary", "Add server…", () => projMcpNew(st));
   add.prepend(icon("plus"));
   const head = el("div.drow", {},
     icon("server"),
     el("span.dmsg", {},
-      el("div", { text: "MCP servers · " + (m.servers.length || "none") }),
-      el("div.hint", { text: ".mcp.json — beside .claude/, committed with the repo" })),
+      el("div", { text: "MCP servers · " + (total || "none") }),
+      el("div.hint", { text: ".mcp.json — beside .claude/, committed with the repo"
+        + (local.length ? " · " + local.length + " local (just you)" : "") })),
     m.error ? badge("unreadable", "destructive") : null,
+    m.local_error ? badge("local scope unreadable", "destructive") : null,
     el("div.dactions", {},
       toggle,
       m.exists ? openFileBtn(st.root + "/.mcp.json", "Edit file") : null,
@@ -1977,7 +2252,7 @@ function projMcpRow(st) {
     return el("div", {}, head, el("div.drow", {},
       el("span.dmsg", { text: m.error + " — fix it by hand; claude-ui will not "
         + "write over a file it cannot read." })));
-  if (!open || !m.servers.length) return head;
+  if (!open || !total) return head;
 
   const box = el("div.list", { style: { margin: "0 0 .5rem" } });
   for (const s of m.servers) {
@@ -1995,6 +2270,10 @@ function projMcpRow(st) {
     const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
       ...(s.approval === "undecided" ? [] : [{ label: "Clear the answer", icon: "power",
         fn: () => projMcpApprove(st, s.name, null) }]),
+      { label: "Move to user scope", icon: "arrowRight",
+        fn: () => projMcpMoveOut(st, s.name) },
+      { label: "Make local — just you", icon: "arrowRight",
+        fn: () => projMcpMakeLocal(st, s.name) },
       { label: "Delete…", icon: "trash", danger: true,
         fn: () => projMcpDelete(st, s.name) },
     ]), "More actions");
@@ -2005,7 +2284,49 @@ function projMcpRow(st) {
       el("span.li-desc", { text: mcpSummary(s.config) }),
       acts));
   }
+  for (const s of local) {
+    const b = badge("local — just you", "outline");
+    b.title = "In ~/.claude.json under this project's entry — where "
+      + "`claude mcp add` writes by default. Not in the repo.";
+    const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
+      { label: "Move to user scope", icon: "arrowRight",
+        fn: () => mcpMove(s.name, { scope: "local", root: st.root }, { scope: "user" }) },
+      { label: "Share with the project…", icon: "arrowRight",
+        fn: () => projMcpShare(st, s.name) },
+    ]), "More actions");
+    more.append(icon("chevronDown"));
+    box.append(el("div.list-item", {},
+      el("div.li-main", {}, el("span.li-name", { text: s.name }), b),
+      el("span.li-desc", { text: mcpSummary(s.config) }),
+      el("div.li-actions", {}, more)));
+  }
   return el("div", {}, head, box);
+}
+
+async function projMcpMoveOut(st, name) {
+  if (await mconfirm("Move " + name + " to user scope?",
+      "Removes it from the repo's .mcp.json — teammates lose it on their next "
+      + "pull. Your machine keeps it, in ~/.claude.json, for every project.",
+      "Move"))
+    mcpMove(name, { scope: "project", root: st.root }, { scope: "user" });
+}
+
+async function projMcpMakeLocal(st, name) {
+  if (await mconfirm("Make " + name + " local?",
+      "Removes it from the repo's .mcp.json — teammates lose it on their next "
+      + "pull. It stays yours, in ~/.claude.json, for this project only.",
+      "Make local"))
+    mcpMove(name, { scope: "project", root: st.root },
+            { scope: "local", root: st.root });
+}
+
+async function projMcpShare(st, name) {
+  if (await mconfirm("Share " + name + " with the project?",
+      "Writes it to .mcp.json — committed, so everyone who clones the repo is "
+      + "offered it. Each of them still gets asked before it runs; for you it "
+      + "is approved already.", "Share"))
+    mcpMove(name, { scope: "local", root: st.root },
+            { scope: "project", root: st.root });
 }
 
 async function projMcpNew(st) {
@@ -2118,8 +2439,12 @@ function projItemsRow(st, type, one) {
   ctx.setActive = (name) => projPost("project-setting-set",
     { root: st.root, key: "outputStyle", value: name },
     "outputStyle set to " + name + " for this project");
-  ctx.copyTo = [{ label: "Copy to your config", icon: "copy",
-    fn: () => projItemCopyOut(st, type, rows) }];
+  ctx.copyTo = [
+    { label: "Copy to your config", icon: "copy",
+      fn: () => projItemCopyOut(st, type, rows) },
+    { label: "Move to your config", icon: "arrowRight",
+      fn: () => projItemMoveOut(st, type, rows) },
+  ];
   ctx.extraBadges = (s) => projItemBadges(st, type, s);
   // Claude Code's own per-skill switch, and the only one that leaves a
   // committed skill's file alone — see project_skill_override().
@@ -2172,6 +2497,8 @@ function projAddMenu(st, type, one) {
     { label: "New " + one + "…", icon: "plus", fn: () => projItemNew(st, type, one) },
     { label: "Copy from your config…", icon: "copy",
       fn: () => projItemCopyIn(st, type, one) },
+    { label: "Move from your config…", icon: "arrowRight",
+      fn: () => projItemMoveIn(st, type, one) },
   ];
   // Output styles are not in PROJECT_ITEM_TYPES, so an archive has no copy of
   // one to put here — offering the button would be offering a dead end.
@@ -2274,6 +2601,82 @@ async function projItemCopyOut(st, type, rows) {
     renderProjects(true);
   } catch (e) { toast(e.message, true); }
 }
+
+/* Move is copy's other half: the same modal shapes, but the source goes away,
+   so the shadowing story inverts. Copying into a project leaves your copy
+   shadowing the new one; moving cannot — there is nothing left to shadow. */
+async function projItemMoveIn(st, type, one) {
+  const mine = ((DATA.items || {})[type] || []).filter((s) => !s.broken);
+  if (!mine.length) {
+    toast("You have no " + type + " to move", true);
+    return;
+  }
+  const r = await modal({
+    title: "Move a " + one + " into " + st.tilde,
+    text: "The files move into the project and your copy is removed — unlike "
+        + "Copy, nothing is left behind to keep in sync"
+        + (SHADOWED_TYPES.has(type)
+           ? ", and nothing of yours is left to shadow the project's copy"
+           : "") + ". A symlinked " + one + " moves its contents; the link "
+        + "target is untouched.",
+    fields: [{ id: "n", label: one[0].toUpperCase() + one.slice(1), type: "select",
+      options: mine.map((s) => ({ value: s.name,
+        label: s.name + (s.enabled ? "" : " (disabled)") })) }],
+    ok: "Move",
+  });
+  if (!r || !r.n) return;
+  const src = mine.find((s) => s.name === r.n);
+  if (type === "output-styles" && src
+      && styleSettingName(src) === (settingsGet("outputStyle") || "")
+      && !await mconfirm("Move your active style?",
+        "outputStyle in your settings selects " + r.n + ". After the move the "
+        + "setting points at a style you no longer have, and Claude Code falls "
+        + "back to the default.", "Move anyway"))
+    return;
+  try {
+    await api("/api/item-move", { type, name: r.n, to_root: st.root,
+      enabled: src ? src.enabled : true });
+    toast(r.n + " moved into " + st.tilde);
+    await refresh();          // it left DATA as well as joining the project
+    renderProjects(true);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function projItemMoveOut(st, type, rows) {
+  const r = await modal({
+    title: "Move out of " + st.tilde,
+    text: "Moves into your own " + (DATA.config_dir || "~/.claude") + "/" + type
+        + "/, where every project sees it. The project's copy is removed — if "
+        + "it is committed, that shows up as a deletion in the next diff."
+        + (SHADOWED_TYPES.has(type)
+           ? " Personal overrides project, so the moved copy will shadow any "
+             + type.replace(/s$/, "") + " of the same name in other projects."
+           : ""),
+    fields: [{ id: "n", label: "Which", type: "select",
+      options: rows.map((s) => ({ value: s.name,
+        label: s.name + (s.enabled ? "" : " (disabled)") })) }],
+    ok: "Move",
+  });
+  if (!r || !r.n) return;
+  const src = rows.find((s) => s.name === r.n);
+  if (type === "output-styles" && src && (ctxStyle(st) === styleSettingName(src))
+      && !await mconfirm("Move this project's active style?",
+        "This project's outputStyle setting selects " + r.n + ". After the "
+        + "move the setting points at a style the project no longer has.",
+        "Move anyway"))
+    return;
+  try {
+    await api("/api/item-move", { type, name: r.n, from_root: st.root,
+      enabled: src ? src.enabled : true });
+    toast(r.n + " moved to your config");
+    await refresh();          // it is in DATA now, not just PROJECTS
+    renderProjects(true);
+  } catch (e) { toast(e.message, true); }
+}
+
+// Which style a project's settings select — the same read projItemsRow makes.
+const ctxStyle = (st) => st.output_style_setting["settings.local.json"]
+  || st.output_style_setting["settings.json"] || "";
 
 /* ------------------------------------------- marketplaces, for one project --
    The one part of this tab that does not edit a file directly. Adding a

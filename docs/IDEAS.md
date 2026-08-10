@@ -169,9 +169,10 @@ suppression are all reimplemented in JS, and the two will drift. Pipe a
 realistic payload through the actual generated script and render its stdout.
 It turns the preview from a drawing into proof.
 
-### 13. Rename-on-split, and marketplace management — M
+### 13. Rename-on-split — M
 
-The Plugins tab shipped (see Done). Two pieces were deliberately left out.
+The Plugins tab shipped (see Done). Two pieces were deliberately left out; one
+of them, marketplace management, has since shipped too.
 
 **Rename on split.** A component whose name you already use renders greyed with
 a `name taken` badge and cannot be ticked; the only way through is to rename
@@ -179,10 +180,10 @@ your own item first. An inline rename input per conflicting row would fix that,
 but it breaks the one-decision-one-confirm shape the dialog was built around, so
 it wants its own thought.
 
-**Marketplaces.** `plugins_state()` returns the marketplace list and the schema
-has `extraKnownMarketplaces`, but nothing adds, updates or removes one — that is
-still `claude plugin marketplace` territory. Worth doing only alongside install,
-which means shelling out to the CLI: the first thing in this app that would.
+**Marketplaces — done.** `registry.py` shells out to `claude plugin` for both
+scopes: the project card added it first, and the Plugins tab's "Marketplaces &
+installs" card does the same at `--scope user`. Updating a marketplace in place
+is still missing; the CLI re-clones on add, so it has not been needed.
 
 ---
 

@@ -703,5 +703,129 @@ class TestPluginEnvSet(Base):
                 plugins.plugin_env_set(bad, "v")
 
 
+class TestScopeMoves(Base):
+    """Where a plugin's enablement is recorded, and moving it between stores.
+
+    projects.py owns the project settings files, so it is patched here too —
+    project_setting_set resolves the root through the registry, which lives in
+    the config dir this suite redirects."""
+
+    def setUp(self):
+        super().setUp()
+        from claude_ui import projects
+        self.projects = projects
+        self._p_config_dir = projects.config_dir
+        projects.config_dir = core.config_dir
+        self.proj = self.tmp.parent / (self.tmp.name + "-proj")
+        (self.proj / ".claude").mkdir(parents=True)
+        projects.registry_add(str(self.proj))
+
+    def tearDown(self):
+        self.projects.config_dir = self._p_config_dir
+        shutil.rmtree(self.proj, ignore_errors=True)
+        super().tearDown()
+
+    def user(self):
+        return {"scope": "user"}
+
+    def end(self, scope):
+        return {"scope": scope, "root": str(self.proj)}
+
+    def pfile(self, local=False):
+        return (self.proj / ".claude"
+                / ("settings.local.json" if local else "settings.json"))
+
+    def pdata(self, local=False):
+        p = self.pfile(local)
+        return json.loads(p.read_text()) if p.is_file() else {}
+
+    def test_entries_see_all_three_stores(self):
+        settings.settings_set("enabledPlugins", {"demo@mkt": True})
+        write(self.pfile(), json.dumps({"enabledPlugins": {"other@mkt": True}}))
+        write(self.pfile(local=True),
+              json.dumps({"enabledPlugins": {"third@mkt": False}}))
+        got = plugins._plugin_scope_entries()
+        self.assertEqual(got["demo@mkt"], [
+            {"scope": "user", "root": None, "raw_root": None, "enabled": True}])
+        self.assertEqual(got["other@mkt"][0]["scope"], "project")
+        self.assertEqual(got["third@mkt"][0]["scope"], "local")
+        self.assertFalse(got["third@mkt"][0]["enabled"])
+
+    def test_state_carries_entries_without_changing_enabled(self):
+        write(self.pfile(), json.dumps({"enabledPlugins": {"demo@mkt": True}}))
+        p = next(p for p in plugins.plugins_state()["plugins"]
+                 if p["id"] == "demo@mkt")
+        # the user store has no answer, so the tab's own sections are unmoved
+        self.assertEqual(p["state"], "available")
+        self.assertFalse(p["enabled"])
+        self.assertEqual([e["scope"] for e in p["entries"]], ["project"])
+
+    def test_user_to_project_and_back(self):
+        settings.settings_set("enabledPlugins", {"demo@mkt": True})
+        plugins.plugin_scope_move("demo@mkt", self.user(), self.end("project"))
+        self.assertEqual(self.pdata()["enabledPlugins"], {"demo@mkt": True})
+        # an emptied map takes the key with it
+        self.assertNotIn("enabledPlugins", settings.settings_state()["data"])
+        plugins.plugin_scope_move("demo@mkt", self.end("project"), self.user())
+        self.assertEqual(settings.settings_state()["data"]["enabledPlugins"],
+                         {"demo@mkt": True})
+        self.assertNotIn("enabledPlugins", self.pdata())
+
+    def test_project_to_local_carries_a_false_verbatim(self):
+        write(self.pfile(), json.dumps({"enabledPlugins": {"demo@mkt": False}}))
+        plugins.plugin_scope_move("demo@mkt", self.end("project"), self.end("local"))
+        self.assertEqual(self.pdata(local=True)["enabledPlugins"],
+                         {"demo@mkt": False})
+        self.assertNotIn("enabledPlugins", self.pdata())
+
+    def test_other_entries_and_other_keys_survive(self):
+        settings.settings_set("enabledPlugins",
+                              {"demo@mkt": True, "keep@mkt": False})
+        write(self.pfile(), json.dumps({"outputStyle": "terse"}))
+        plugins.plugin_scope_move("demo@mkt", self.user(), self.end("project"))
+        self.assertEqual(settings.settings_state()["data"]["enabledPlugins"],
+                         {"keep@mkt": False})
+        self.assertEqual(self.pdata()["outputStyle"], "terse")
+
+    def test_a_destination_that_already_answers_refuses(self):
+        settings.settings_set("enabledPlugins", {"demo@mkt": True})
+        write(self.pfile(), json.dumps({"enabledPlugins": {"demo@mkt": False}}))
+        with self.assertRaises(ValueError):
+            plugins.plugin_scope_move("demo@mkt", self.user(), self.end("project"))
+        self.assertEqual(settings.settings_state()["data"]["enabledPlugins"],
+                         {"demo@mkt": True})
+        self.assertEqual(self.pdata()["enabledPlugins"], {"demo@mkt": False})
+
+    def test_refusals_missing_same_place_bad_id_bad_scope_unregistered(self):
+        settings.settings_set("enabledPlugins", {"demo@mkt": True})
+        with self.assertRaises(ValueError):   # not recorded at the source
+            plugins.plugin_scope_move("nope@mkt", self.user(), self.end("project"))
+        with self.assertRaises(ValueError):
+            plugins.plugin_scope_move("demo@mkt", self.user(), self.user())
+        with self.assertRaises(ValueError):   # an id is always name@marketplace
+            plugins.plugin_scope_move("demo", self.user(), self.end("project"))
+        with self.assertRaises(ValueError):
+            plugins.plugin_scope_move("demo@mkt", self.user(), {"scope": "global"})
+        other = self.tmp.parent / (self.tmp.name + "-other")
+        other.mkdir()
+        try:
+            with self.assertRaises(ValueError):
+                plugins.plugin_scope_move("demo@mkt", self.user(),
+                                          {"scope": "project", "root": str(other)})
+        finally:
+            shutil.rmtree(other, ignore_errors=True)
+        self.assertEqual(settings.settings_state()["data"]["enabledPlugins"],
+                         {"demo@mkt": True})
+
+    def test_bad_json_in_either_store_refuses_before_any_write(self):
+        settings.settings_set("enabledPlugins", {"demo@mkt": True})
+        write(self.pfile(), "{not json")
+        with self.assertRaises(ValueError):
+            plugins.plugin_scope_move("demo@mkt", self.user(), self.end("project"))
+        self.assertEqual(self.pfile().read_text(), "{not json")
+        self.assertEqual(settings.settings_state()["data"]["enabledPlugins"],
+                         {"demo@mkt": True})
+
+
 if __name__ == "__main__":
     unittest.main()
