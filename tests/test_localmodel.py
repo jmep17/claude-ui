@@ -336,6 +336,62 @@ class PickerEntry(Base):
         self.assertFalse(localmodel.local_state()["installed"])
 
 
+class Allowlist(Base):
+    """availableModels: an existing restriction must admit the model; a
+    missing one must never be created."""
+
+    MODEL = "unsloth/Qwen3-14B-MLX-4bit"
+
+    def sjson(self):
+        p = self.cfg / "settings.json"
+        return json.loads(p.read_text()) if p.is_file() else {}
+
+    def test_existing_allowlist_gains_the_model(self):
+        (self.cfg / "settings.json").write_text(
+            '{"availableModels": ["opus", "sonnet"]}')
+        self.configure()
+        localmodel.local_apply()
+        self.assertEqual(self.sjson()["availableModels"],
+                         ["opus", "sonnet", self.MODEL])
+        self.assertTrue(localmodel.local_state()["installed"])
+
+    def test_no_allowlist_is_never_created(self):
+        self.configure()
+        localmodel.local_apply()
+        self.assertNotIn("availableModels", self.sjson())
+
+    def test_blocked_model_reads_as_not_installed(self):
+        self.configure()
+        localmodel.local_apply()
+        settings.settings_set("availableModels", ["opus"])
+        self.assertFalse(localmodel.local_state()["installed"])
+
+    def test_remove_takes_only_our_entry_out(self):
+        (self.cfg / "settings.json").write_text(
+            '{"availableModels": ["opus"]}')
+        self.configure()
+        localmodel.local_apply()
+        localmodel.local_remove()
+        self.assertEqual(self.sjson()["availableModels"], ["opus"])
+
+    def test_remove_deletes_a_list_that_held_only_ours(self):
+        (self.cfg / "settings.json").write_text('{"availableModels": []}')
+        self.configure()
+        localmodel.local_apply()
+        self.assertEqual(self.sjson()["availableModels"], [self.MODEL])
+        localmodel.local_remove()
+        self.assertNotIn("availableModels", self.sjson())
+
+    def test_model_change_moves_the_allowlist_entry(self):
+        (self.cfg / "settings.json").write_text(
+            '{"availableModels": ["opus"]}')
+        self.configure()
+        localmodel.local_apply()
+        self.configure(model="mlx-community/other-model-4bit")
+        self.assertEqual(self.sjson()["availableModels"],
+                         ["opus", "mlx-community/other-model-4bit"])
+
+
 class Suggestions(Base):
 
     def test_saved_model_feeds_the_settings_model_pickers(self):

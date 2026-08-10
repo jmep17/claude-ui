@@ -88,9 +88,10 @@ def local_config_set(base_url, model, api_key):
     # keep an installed wrapper in sync — script and config must never drift
     if model and local_wrapper_state() in ("current", "stale"):
         local_wrapper_write()
-        # ... and the settings.json picker entry follows the model with it
-        if old_model != model and _settings_env().get(ENV_OPTION) == old_model:
-            settings_set_many([("env." + ENV_OPTION, model)])
+        # ... and the settings.json picker entry + allowlist follow the model
+        if old_model != model:
+            _picker_drop(old_model)
+            _picker_add(model)
 
 
 # ---- the wrapper script ----
@@ -186,9 +187,26 @@ def _settings_env():
     env = data.get("env")
     return env if isinstance(env, dict) else {}
 
+def _available_models():
+    data, _ = _read_json_object(config_dir() / "settings.json")
+    models = data.get("availableModels")
+    return models if isinstance(models, list) else None
+
+def _allowlist_ok(model):
+    """availableModels is a restriction allowlist: when it exists, a custom
+    picker entry not on it is filtered and selections of it fall back to
+    another model. No list means no restriction."""
+    models = _available_models()
+    return models is None or model in models
+
 def _picker_add(model):
-    settings_set_many([("env." + ENV_OPTION, model),
-                       ("env." + ENV_DESC, PICKER_DESC)])
+    pairs = [("env." + ENV_OPTION, model), ("env." + ENV_DESC, PICKER_DESC)]
+    # an existing allowlist must also admit the model; a missing list is left
+    # missing — creating one would BE a restriction on everything else
+    models = _available_models()
+    if models is not None and model not in models:
+        pairs.append(("availableModels", models + [model]))
+    settings_set_many(pairs)
 
 def _picker_drop(model):
     """Unset our env keys, each only while still holding our value — a
@@ -199,6 +217,12 @@ def _picker_drop(model):
         pairs.append(("env." + ENV_OPTION, None))
     if env.get(ENV_DESC) == PICKER_DESC:
         pairs.append(("env." + ENV_DESC, None))
+    models = _available_models()
+    if models is not None and model in models:
+        rest = [m for m in models if m != model]
+        # a list holding only our entry goes entirely — [] would block every
+        # named model, a harsher state than the no-restriction default
+        pairs.append(("availableModels", rest or None))
     if pairs:
         settings_set_many(pairs)
 
@@ -239,7 +263,9 @@ def local_state():
         rc_text = ""
     sourced = LOCAL_BEGIN in rc_text
     func_current = func.is_file() and func.read_text(errors="replace") == local_zsh_text()
-    picker = bool(c.get("model")) and _settings_env().get(ENV_OPTION) == c.get("model")
+    picker = (bool(c.get("model"))
+              and _settings_env().get(ENV_OPTION) == c.get("model")
+              and _allowlist_ok(c.get("model")))
     installed = wrapper == "current" and sourced and func_current and picker
     if installed:
         detail = (f"claude-local runs {c.get('model')} at "
@@ -271,6 +297,9 @@ def local_state():
                       f"settings.json env.{ENV_OPTION} = "
                       f"{c.get('model') or '<model>'} — adds it to the /model "
                       "picker in every session (additive; nothing is blocked)",
+                      "settings.json availableModels — only if that allowlist "
+                      "already exists: the model is appended so the "
+                      "restriction admits it; a missing list is never created",
                       f".claude-ui.json pricing[{c.get('model') or '<model>'}]"
                       " = [0, 0] so local sessions show on the Costs tab"],
             "config": {"base_url": c.get("base_url", ""),
