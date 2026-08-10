@@ -107,8 +107,13 @@ export ANTHROPIC_AUTH_TOKEN='{token}'
 export ANTHROPIC_MODEL='{model}'
 export ANTHROPIC_DEFAULT_HAIKU_MODEL='{model}'
 export ANTHROPIC_SMALL_FAST_MODEL='{model}'
-# /model picker lists what the server actually serves (its /v1/models)
+# /model picker lists what the server actually serves (its /v1/models), and
+# the chosen model is added as a picker entry outright in case discovery
+# comes up empty
 export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+export ANTHROPIC_CUSTOM_MODEL_OPTION='{model}'
+export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME='{model}'
+export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION='local model via oMLX'
 # a local-model session should work offline and not phone home
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 # if the server rejects thinking / context-management fields (HTTP 400), also:

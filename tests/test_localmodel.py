@@ -78,6 +78,9 @@ class Templates(Base):
                     "ANTHROPIC_DEFAULT_HAIKU_MODEL='unsloth/Qwen3-14B-MLX-4bit'",
                     "ANTHROPIC_SMALL_FAST_MODEL='unsloth/Qwen3-14B-MLX-4bit'",
                     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION='unsloth/Qwen3-14B-MLX-4bit'",
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME='unsloth/Qwen3-14B-MLX-4bit'",
+                    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION='local model via oMLX'",
                     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"):
             self.assertIn("export " + var, text)
         self.assertTrue(text.endswith('exec claude "$@"\n'))
