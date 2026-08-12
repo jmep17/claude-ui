@@ -159,6 +159,24 @@ class Apply(Base):
         handoff.handoff_apply()
         self.assertEqual(self.skill_path(name).read_text(), payload)
 
+    def test_a_stamped_revision_is_updated_on_reapply(self):
+        handoff.handoff_apply()
+        name = "handoffs"
+        stamped_old = core.set_frontmatter_key(
+            "---\nname: handoffs\n---\nold revision\n",
+            handoff.PRESET_KEY, handoff.PRESET_REF)
+        self.skill_path(name).write_text(stamped_old)
+        handoff.handoff_apply()
+        self.assertEqual(self.skill_path(name).read_text(), handoff._payload(name))
+
+    def test_an_unstamped_edit_is_still_left_alone(self):
+        handoff.handoff_apply()
+        name = "handoffs"
+        self.skill_path(name).write_text("---\nname: handoffs\n---\nmine now\n")
+        handoff.handoff_apply()
+        self.assertEqual(self.skill_path(name).read_text(),
+                         "---\nname: handoffs\n---\nmine now\n")
+
     def test_a_genuinely_edited_skill_is_left_alone(self):
         handoff.handoff_apply()
         name = "handoffs"
@@ -262,7 +280,7 @@ class CaseSuite(unittest.TestCase):
         suite = pathlib.Path(__file__).resolve().parent.parent / \
             "bin" / "claude_ui" / "data" / "handoff" / "handoff_load_cases.sh"
         r = subprocess.run(["bash", str(suite)], capture_output=True,
-                           text=True, timeout=120)
+                           text=True, timeout=180)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("failed 0", r.stdout)
 
@@ -288,6 +306,53 @@ class VendoredPayload(unittest.TestCase):
         for p in handoff.DATA_DIR.rglob("*"):
             if p.is_file():
                 self.assertNotIn("/Users/", p.read_text(), str(p))
+
+    def test_handoff_skill_shape_guards_the_token_cost(self):
+        path = handoff.DATA_DIR / "skills" / "handoff" / "SKILL.md"
+        text = path.read_text()
+        meta = core.parse_frontmatter(text)
+        self.assertIn("__HOOK__", meta.get("allowed-tools", ""))
+        # <= 90 lines: the mechanics this piece cut (Gather, frontmatter
+        # authoring, filename/collision handling) must not creep back in as
+        # prose — that was the whole point of the --new/--facts move.
+        self.assertLessEqual(len(text.splitlines()), 90)
+
+
+class NewEndToEnd(unittest.TestCase):
+    """Runs the *installed* hook script's --new mode as a real subprocess,
+    the way a session actually invokes it."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.tmp = pathlib.Path(self.tmpdir.name)
+        saved = [(m, m.config_dir) for m in (handoff, items, core, settings)]
+        for m, _ in saved:
+            m.config_dir = lambda t=self.tmp: t
+
+        def restore():
+            for m, fn in saved:
+                m.config_dir = fn
+        self.addCleanup(restore)
+        self.hookp, self.storep = handoff.handoff_paths()
+
+    def test_new_round_trips_through_the_installed_hook(self):
+        handoff.handoff_apply()
+        body = self.tmp / "body.md"
+        body.write_text("## Next steps\n1. Say hi\n")
+        work = self.tmp / "work"
+        work.mkdir()
+        env = dict(os.environ, CLAUDE_CONFIG_DIR=str(self.tmp))
+        r = subprocess.run(
+            [sys.executable, str(self.hookp), "--new", "--title", "E2E brief",
+             "--body-file", str(body), "--cwd", str(work)],
+            capture_output=True, text=True, timeout=30, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Handoff written", r.stdout)
+        written = [p for p in (self.storep / "work").glob("*.md")
+                  if p.name != "INDEX.md"]
+        self.assertEqual(len(written), 1)
+        self.assertIn("status: pending", written[0].read_text())
 
 
 class Registry(unittest.TestCase):

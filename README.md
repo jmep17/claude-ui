@@ -101,15 +101,20 @@ owns, links, tracks, or syncs anything:
   ends a session on purpose by parking a structured brief, a
   `SessionStart`/`PreCompact` hook delivers it to the session it was reserved
   for, and `/handoffs` lists what is parked and can resume a brief in place.
-  The hook, both skills, and the hook's offline case suite are vendored here —
-  the suite runs as part of this repo's tests — so a second machine is a
-  checkout and one Apply. Apply merges four `SessionStart` blocks and one
-  `PreCompact` block into `settings.json` (your own blocks stay
-  byte-identical) and adds one `permissions.additionalDirectories` entry so a
-  project-scoped session can read the store; a listing that could not read the
-  store once answered "nothing parked", which is the failure this wiring
-  exists to prevent. Remove unhooks and deletes the script; parked briefs are
-  user data and are never touched.
+  The script — not the model — writes the brief, and groups it under one
+  directory per repository (every git worktree folds into its main tree's
+  group), with `INDEX.md` files the hook regenerates as it goes; old flat
+  briefs at the store root keep working forever, and `--migrate` moves them
+  into a group on request. The hook, both skills, and the hook's offline case
+  suite are vendored here — the suite runs as part of this repo's tests — so
+  a second machine is a checkout and one Apply. Apply merges four
+  `SessionStart` blocks and one `PreCompact` block into `settings.json` (your
+  own blocks stay byte-identical) and adds one
+  `permissions.additionalDirectories` entry so a project-scoped session can
+  read the store; a listing that could not read the store once answered
+  "nothing parked", which is the failure this wiring exists to prevent.
+  Remove unhooks and deletes the script; parked briefs are user data and are
+  never touched.
 - **Doctor** for machine health: broken symlinks, leftover backups, hooks or
   statusline entries pointing at missing executables, and more.
 - **Backup** — a zip of the parts of your config that took work to build, kept

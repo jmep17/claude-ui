@@ -32,8 +32,8 @@ If that reads literally as `$ARGUMENTS`, no substitution happened — treat it a
 no argument and list.
 
 1. Run `--list` first, always.
-2. Resolve the argument to a **basename** (the third field on each entry's
-   second line):
+2. Resolve the argument to the **name** printed as the third field on each
+   entry's second line (a store-relative path, e.g. `claude-ui/2026-08-12-...md`):
    - a number picks that numbered entry;
    - text matches case-insensitively against the titles.
 3. Run `python3 __HOOK__ --take <basename>`.

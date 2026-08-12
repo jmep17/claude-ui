@@ -5,7 +5,10 @@ A handoff brief is what the /handoff skill writes at the end of a session:
 decisions, pointers and a first action, aimed at a fresh session that has no
 transcript. This script is the other half — it finds the pending brief a new
 session should receive, injects it, and marks it consumed so it never fires
-twice.
+twice. It is also the writer: `--new` builds and writes the brief file itself
+(grouped by repository under the store), and `--facts` prints the git/disk
+state a brief's "Changed on disk" section needs, so the model composing a
+brief never has to run its own git batch.
 
 Two ways a brief finds its session. A brief with `target: session:<uuid>` is
 *reserved*: it loads into the session started under that id (`claude
@@ -13,21 +16,34 @@ Two ways a brief finds its session. A brief with `target: session:<uuid>` is
 delay. A brief without one falls back to the original rule — the next session
 started in its `cwd`. Reserved is the deliberate case and outranks the default.
 
+Grouping is cosmetic. Briefs live under `<store>/<repo-basename>/` once
+written by `--new`, and legacy flat briefs at the store root keep working
+forever — `match()`, `candidates()` and delivery never consult a brief's
+group. `INDEX.md` files are generated, write-only, and never read back by
+this script.
+
 Python 3.9 stdlib only (/usr/bin/python3 is 3.9.6 on this machine), and it must
 never take down a session start: every failure path exits 0.
 """
 
 import calendar
 import fcntl
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
+import uuid
 
 MAX_AGE_DAYS = 14          # older briefs surface as a path instead of injecting; 0 disables
 MAX_BODY = 24 * 1024       # injected body cap, truncated at a line boundary
 MAX_FILE = 512 * 1024      # files larger than this are not even read
+
+INDEX_NAME = "INDEX.md"
+WORKTREE_MARKER = "/.claude/worktrees/"
+MAX_DIFF_FILES = 20
 
 # Kept open for the life of the process: closing the fd drops the lock.
 _LOCK_FD = None
@@ -99,6 +115,7 @@ def parse_frontmatter(text):
 
 
 TARGET_RE = re.compile(r"^session:\s*([0-9a-fA-F-]{36})$")
+TARGET_UUID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 
 
 def targeted(meta):
@@ -240,26 +257,76 @@ def take_lock(store):
     return True
 
 
-def scan(store):
-    """Every *.md in the store, no filter, no sort. (entries, errors).
+def _is_index(name):
+    return name.lower() == INDEX_NAME.lower()
 
-    This is the one place that reads the store off disk. `candidates()`, and
-    the CLI modes in the `# cli` section below, all filter and order what this
-    returns — they never read the directory themselves. That is what keeps
-    `--list` and the hook from ever disagreeing about what is parked.
+
+def _walk(store, errors):
+    """Yield store-relative *.md paths, one level of grouping deep.
+
+    The root `os.listdir(store)` is uncaught — that is what lets `scan()`'s
+    caller tell "empty" from "unreadable" apart (the hook treats both as
+    "nothing to do"; `--list`/`--take` need to tell them apart). Everything
+    below the root is best-effort: an unreadable group directory becomes an
+    `errors` entry, never an exception, and a symlinked "group" directory is
+    skipped outright — `isdir` follows symlinks, and a symlinked group could
+    otherwise read `.md` files from outside the store.
+    """
+    names = sorted(os.listdir(store))
+    for name in names:
+        if _is_index(name):
+            continue
+        path = os.path.join(store, name)
+        if name.endswith(".md"):
+            try:
+                if os.path.isfile(path):
+                    yield name
+            except OSError:
+                pass
+            continue
+        if name.startswith("."):
+            continue
+        try:
+            is_link = os.path.islink(path)
+            is_dir = os.path.isdir(path)
+        except OSError:
+            continue
+        if is_link or not is_dir:
+            continue
+        try:
+            inner_names = sorted(os.listdir(path))
+        except Exception as exc:
+            errors.append((name, str(exc)))
+            continue
+        for inner in inner_names:
+            if _is_index(inner) or not inner.endswith(".md"):
+                continue
+            inner_path = os.path.join(path, inner)
+            try:
+                if os.path.isfile(inner_path):
+                    yield "%s/%s" % (name, inner)
+            except OSError:
+                pass
+
+
+def scan(store):
+    """Every *.md in the store, one level of grouping, no filter, no sort.
+
+    (entries, errors). This is the one place that reads the store off disk.
+    `candidates()`, and the CLI modes in the `# cli` section below, all filter
+    and order what this returns — they never read the directory themselves.
+    That is what keeps `--list` and the hook from ever disagreeing about what
+    is parked.
 
     `os.listdir(store)` itself is allowed to raise here — deliberately not
-    caught. A caller that wants "empty" and "unreadable" to look the same
-    (the hook) catches it; a caller that must tell them apart (`--list`,
-    `--take`) needs the exception to reach it.
+    caught (see `_walk`'s docstring).
     """
     entries = []
     errors = []
-    names = sorted(os.listdir(store))
-    for name in names:
-        if not name.endswith(".md"):
-            continue
-        path = os.path.join(store, name)
+    for rel in _walk(store, errors):
+        path = os.path.join(store, rel)
+        base = os.path.basename(rel)
+        group = rel.rsplit("/", 1)[0] if "/" in rel else ""
         try:
             st = os.stat(path)
             if not os.path.isfile(path) or st.st_size > MAX_FILE:
@@ -267,7 +334,7 @@ def scan(store):
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
         except Exception as exc:
-            errors.append((name, str(exc)))
+            errors.append((rel, str(exc)))
             continue
         meta = parse_frontmatter(text)
         target = targeted(meta)
@@ -279,7 +346,9 @@ def scan(store):
             order = st.st_mtime
         entries.append({
             "path": path,
-            "name": name,
+            "name": rel,
+            "base": base,
+            "group": group,
             "text": text,
             "meta": meta,
             "status": meta.get("status", "").strip(),
@@ -324,32 +393,18 @@ def candidates(store, cwd, session_id, reason):
         out.append(c)
     # Reserved first, whatever the timestamps say: an explicit choice outranks a
     # default, and a stale reservation is still the one that was asked for.
-    out.sort(key=lambda c: (c["targeted"], c["order"], os.path.basename(c["path"])),
+    out.sort(key=lambda c: (c["targeted"], c["order"], c["base"]),
              reverse=True)
     return out
 
 
 def pending_count(store):
     """Pending briefs left in the store — the number the nag line reports."""
-    n = 0
     try:
-        names = os.listdir(store)
+        entries, _ = scan(store)
     except Exception:
         return 0
-    for name in names:
-        if not name.endswith(".md"):
-            continue
-        path = os.path.join(store, name)
-        try:
-            if not os.path.isfile(path) or os.stat(path).st_size > MAX_FILE:
-                continue
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                text = fh.read()
-            if parse_frontmatter(text).get("status", "").strip() == "pending":
-                n += 1
-        except Exception:
-            continue
-    return n
+    return sum(1 for c in entries if c["status"] == "pending")
 
 
 def nag(store):
@@ -376,6 +431,210 @@ def flip(entry, status, extra=None):
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
     os.replace(tmp, path)
+    entry["text"] = text
+
+
+# --------------------------------------------------------------------------
+# grouping — which repository a cwd belongs to, and which store directory
+# --------------------------------------------------------------------------
+
+def _git(args, cwd, timeout=5):
+    """(rc, stdout stripped). stderr is discarded — a failed or timed-out
+    command is itself a fact, never retried."""
+    try:
+        proc = subprocess.run(
+            ["git"] + list(args), cwd=cwd, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            universal_newlines=True)
+    except Exception:
+        return 1, ""
+    return proc.returncode, (proc.stdout or "").strip()
+
+
+def root_from_path(p):
+    """The main working tree for `p` — the group key.
+
+    1. `p` a directory: `git rev-parse --git-common-dir` with cwd=p. The
+       output is usually relative (`.git`, `../.git`), so it is resolved
+       against `p` and then its parent taken — that parent is the main tree
+       even when `p` itself is a linked worktree.
+    2. Otherwise (or if that failed): truncate at `/.claude/worktrees/` if
+       present — the same convention `match()`'s docstring already encodes,
+       and what makes `--migrate` work when the worktree is gone.
+    3. Otherwise: `p` itself.
+    """
+    try:
+        is_dir = os.path.isdir(p)
+    except Exception:
+        is_dir = False
+    if is_dir:
+        rc, out = _git(["rev-parse", "--git-common-dir"], cwd=p)
+        if rc == 0 and out:
+            try:
+                gcd = os.path.realpath(os.path.join(p, out))
+                return os.path.dirname(gcd)
+            except Exception:
+                pass
+    idx = p.find(WORKTREE_MARKER)
+    if idx != -1:
+        return p[:idx]
+    return p
+
+
+def group_name(root):
+    """Sanitize a main-tree root into a store directory name."""
+    try:
+        base = os.path.basename(os.path.realpath(root))
+    except Exception:
+        base = os.path.basename(root)
+    base = re.sub(r"[^A-Za-z0-9._-]+", "-", base or "")
+    base = base.lstrip(".")
+    base = base[:60]
+    return base or "root"
+
+
+def group_dir_for(store, root, entries):
+    """The store directory name for `root` — matched by inspection, never
+    recorded. A group dir named `base` or `base-*` whose briefs carry a
+    `root:` matching this one (compared by realpath) is reused; otherwise the
+    first free name of `base`, `<parent>-<base>`, `<base>-<hash8>` is picked.
+    Zero extra I/O beyond the `entries` already scanned."""
+    base = group_name(root)
+    try:
+        target_root = os.path.realpath(root)
+    except Exception:
+        target_root = root
+
+    by_group = {}
+    for e in entries:
+        g = e.get("group")
+        if g:
+            by_group.setdefault(g, []).append(e)
+
+    for g, es in by_group.items():
+        if g != base and not g.startswith(base + "-"):
+            continue
+        for e in es:
+            r = e["meta"].get("root")
+            if not r:
+                continue
+            try:
+                same = os.path.realpath(r) == target_root
+            except Exception:
+                same = r == root
+            if same:
+                return g
+
+    existing = set(by_group.keys())
+    if base not in existing:
+        return base
+    parent = os.path.basename(os.path.dirname(target_root.rstrip("/"))) or "parent"
+    parent = re.sub(r"[^A-Za-z0-9._-]+", "-", parent).lstrip(".") or "parent"
+    alt = "%s-%s" % (parent, base)
+    if alt not in existing:
+        return alt
+    h = hashlib.sha1(target_root.encode("utf-8", "replace")).hexdigest()[:8]
+    return "%s-%s" % (base, h)
+
+
+# --------------------------------------------------------------------------
+# indexes — generated, write-only, never read back by this script
+# --------------------------------------------------------------------------
+
+def _write_if_changed(path, content):
+    """Write only when the content differs byte-for-byte. temp + os.replace
+    in the same directory, so a reader never sees a partial file."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            if fh.read() == content:
+                return False
+    except Exception:
+        pass
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        return False
+
+
+def _index_header(hookpath):
+    return ("> generated by handoff_load.py — run `python3 %s --list` "
+            "instead of reading this\n\n" % hookpath)
+
+
+def reindex(store, deadline=None):
+    """Build the root index and each group index. Prints nothing, ever.
+
+    Returns (written, total_groups). A store-read failure propagates — the
+    `--reindex` CLI mode wants that loud; `session_start`'s call site wraps
+    this in its own try/except so a hook never sees it. `deadline`, when
+    given, is an epoch time after which remaining group indexes are left
+    stale rather than risk a hook timeout.
+    """
+    hookpath = os.path.abspath(__file__)
+    entries, _ = scan(store)
+
+    groups = {}
+    flat_total = flat_pending = 0
+    for e in entries:
+        g = e["group"]
+        if not g:
+            flat_total += 1
+            if e["status"] == "pending":
+                flat_pending += 1
+            continue
+        gg = groups.setdefault(g, {"total": 0, "pending": 0, "root": None, "entries": []})
+        gg["total"] += 1
+        if e["status"] == "pending":
+            gg["pending"] += 1
+        if gg["root"] is None and e["meta"].get("root"):
+            gg["root"] = e["meta"]["root"]
+        gg["entries"].append(e)
+
+    header = _index_header(hookpath)
+    written = 0
+
+    root_lines = [header, "# Handoff groups\n\n"]
+    if not groups and not flat_total:
+        root_lines.append("No groups.\n")
+    for name in sorted(groups):
+        gg = groups[name]
+        root_lines.append("- **%s** — %s — %d total, %d pending\n"
+                           % (name, gg["root"] or "unknown", gg["total"], gg["pending"]))
+    if flat_total:
+        root_lines.append("- **(ungrouped)** — %d total, %d pending\n"
+                           % (flat_total, flat_pending))
+    if _write_if_changed(os.path.join(store, INDEX_NAME), "".join(root_lines)):
+        written += 1
+
+    for name, gg in groups.items():
+        if deadline is not None and time.time() > deadline:
+            break
+        gdir = os.path.join(store, name)
+        if not os.path.isdir(gdir):
+            continue
+        lines = [header, "# %s\n\n" % name]
+        rows = sorted(gg["entries"], key=lambda e: (e["order"], e["base"]), reverse=True)
+        for e in rows:
+            meta = e["meta"]
+            tgt = (" — target: %s" % e["target"]) if e["target"] else ""
+            lines.append("- %s — %s — %s — `%s`%s\n"
+                         % (meta.get("created", "unknown"), e["status"],
+                            meta.get("title") or e["base"], e["base"], tgt))
+        try:
+            if _write_if_changed(os.path.join(gdir, INDEX_NAME), "".join(lines)):
+                written += 1
+        except Exception:
+            continue
+
+    return written, len(groups)
 
 
 # --------------------------------------------------------------------------
@@ -478,9 +737,11 @@ def session_start(payload):
         else:
             fresh.append(c)
 
+    flipped = False
     for c in stale:
         try:
             flip(c, "expired")
+            flipped = True
         except Exception:
             pass
 
@@ -489,6 +750,11 @@ def session_start(payload):
         emit(message=("Handoff brief for this directory is older than %d days "
                       "— not loaded. Read it yourself if it still matters: %s"
                       % (MAX_AGE_DAYS, newest["path"])))
+        if flipped:
+            try:
+                reindex(store, deadline=time.time() + 2.0)
+            except Exception:
+                pass
         return
 
     top = fresh[0]
@@ -541,11 +807,19 @@ def session_start(payload):
             ("consumed", stamp),
             ("consumed_by", payload.get("session_id") or "unknown"),
         ])
+        flipped = True
     except Exception:
         pass
     for c in others:
         try:
             flip(c, "superseded")
+            flipped = True
+        except Exception:
+            pass
+
+    if flipped:
+        try:
+            reindex(store, deadline=time.time() + 2.0)
         except Exception:
             pass
 
@@ -561,6 +835,449 @@ def precompact(payload):
 
 
 # --------------------------------------------------------------------------
+# facts — the git/disk state a brief's "Changed on disk" section needs
+# --------------------------------------------------------------------------
+
+def _transcript_path(cwd):
+    """Prefer the transcript named for this exact session, fall back to the
+    newest .jsonl in this cwd's project directory, then "unknown"."""
+    cfg = config_dir()
+    slug = re.sub(r"[/.]", "-", cwd)
+    proj_dir = os.path.join(cfg, "projects", slug)
+    sess = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if sess:
+        p = os.path.join(proj_dir, "%s.jsonl" % sess)
+        if os.path.isfile(p):
+            return p
+    try:
+        names = [n for n in os.listdir(proj_dir) if n.endswith(".jsonl")]
+    except Exception:
+        return "unknown"
+    if not names:
+        return "unknown"
+    names.sort(key=lambda n: os.stat(os.path.join(proj_dir, n)).st_mtime, reverse=True)
+    return os.path.join(proj_dir, names[0])
+
+
+def _disk_bullets(cwd):
+    """The '## Changed on disk' section as a list of lines, or None outside a
+    git repo. Shared by `--facts` and `--new` (which splices this verbatim in
+    place of the placeholder heading the model wrote), so the two can never
+    disagree."""
+    rc, _ = _git(["rev-parse", "--show-toplevel"], cwd)
+    if rc != 0:
+        return None
+
+    lines = ["## Changed on disk"]
+
+    rc_b, branch = _git(["branch", "--show-current"], cwd)
+    branch = branch if (rc_b == 0 and branch) else None
+    if branch:
+        rc_a, ahead_out = _git(["rev-list", "--count", "@{u}..HEAD"], cwd)
+        rc_be, behind_out = _git(["rev-list", "--count", "HEAD..@{u}"], cwd)
+        if rc_a == 0 and rc_be == 0:
+            ahead = ahead_out.strip() or "0"
+            behind = behind_out.strip() or "0"
+            pushed = "pushed" if behind == "0" else "unpushed"
+            lines.append("- Branch: `%s` — %s ahead, %s" % (branch, ahead, pushed))
+        else:
+            lines.append("- Branch: `%s` — no upstream" % branch)
+    else:
+        lines.append("- Branch: detached HEAD")
+
+    rc_l, log_out = _git(["log", "--oneline", "-15"], cwd)
+    commits = log_out.splitlines() if rc_l == 0 and log_out else []
+    if commits:
+        lines.append("- Commits this session (last 15):")
+        for c in commits:
+            lines.append("  `%s`" % c)
+    else:
+        lines.append("- Commits: none")
+
+    rc_s, status_out = _git(["status", "--porcelain=v1"], cwd)
+    paths = status_out.splitlines() if rc_s == 0 and status_out else []
+    if paths:
+        lines.append("- Uncommitted:")
+        for p in paths:
+            lines.append("  `%s`" % p)
+    else:
+        lines.append("- Uncommitted: clean")
+
+    rc_st, stash_out = _git(["stash", "list"], cwd)
+    stashes = stash_out.splitlines() if rc_st == 0 and stash_out else []
+    lines.append("- Stashes: %s" % ("; ".join(stashes) if stashes else "none"))
+
+    return lines
+
+
+def cmd_facts(argv):
+    """CLI-only, never on the hook path. An information superset of the old
+    ten-command Gather batch, compressed rather than truncated."""
+    cwd = os.getcwd()
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--cwd" and i + 1 < len(argv):
+            cwd = argv[i + 1]
+            i += 2
+        else:
+            sys.stderr.write("unknown argument: %s\n" % argv[i])
+            return 2
+    cwd = os.path.realpath(cwd)
+
+    bullets = _disk_bullets(cwd)
+    if bullets is None:
+        sys.stdout.write("Not a git repository: %s\n" % cwd)
+        return 0
+
+    lines = list(bullets)
+
+    rc_d, diff_out = _git(["diff", "--stat", "HEAD"], cwd)
+    diff_lines = diff_out.splitlines() if rc_d == 0 and diff_out else []
+    if diff_lines:
+        lines.append("")
+        lines.append("### git diff --stat")
+        for d in diff_lines[:MAX_DIFF_FILES]:
+            lines.append(d)
+        if len(diff_lines) > MAX_DIFF_FILES:
+            lines.append("... +%d more" % (len(diff_lines) - MAX_DIFF_FILES))
+
+    lines.append("")
+    lines.append("Transcript: %s" % _transcript_path(cwd))
+
+    sys.stdout.write("\n".join(lines) + "\n")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# --new — the script writes the brief
+# --------------------------------------------------------------------------
+
+SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(title):
+    s = SLUG_RE.sub("-", (title or "").lower()).strip("-")
+    if len(s) > 40:
+        s = s[:40]
+        s = s.rsplit("-", 1)[0] if "-" in s else s
+    return s or "brief"
+
+
+def _first_step(body):
+    in_section = False
+    for line in body.splitlines():
+        if line.strip() == "## Next steps":
+            in_section = True
+            continue
+        if in_section:
+            if line.startswith("## "):
+                break
+            m = re.match(r"^\s*1\.\s+(.*)$", line)
+            if m:
+                return m.group(1).strip()
+    return None
+
+
+def _splice_section(text, heading, section_lines):
+    """Replace the body under `heading` (up to the next '## ' heading) with
+    `section_lines`. If `heading` is not present, `text` is returned unchanged."""
+    lines = text.splitlines()
+    out = []
+    i = 0
+    replaced = False
+    while i < len(lines):
+        if not replaced and lines[i].strip() == heading:
+            out.extend(section_lines)
+            i += 1
+            while i < len(lines) and not lines[i].startswith("## "):
+                i += 1
+            replaced = True
+            continue
+        out.append(lines[i])
+        i += 1
+    nl = "\n"
+    trailing = text.endswith("\n")
+    return nl.join(out) + (nl if trailing else "")
+
+
+def _build_frontmatter(title, target_uuid, cwd, repo, root, branch, created, transcript):
+    """Build the frontmatter block key by key through set_frontmatter_key, so
+    a bad title (control characters) raises the same ValueError it always
+    would — never a hand-formatted line that skips validation."""
+    text = "---\n---\n"
+    text = set_frontmatter_key(text, "title", title)
+    if target_uuid:
+        text = set_frontmatter_key(text, "target", "session:%s" % target_uuid)
+    text = set_frontmatter_key(text, "cwd", cwd)
+    if repo:
+        text = set_frontmatter_key(text, "repo", repo)
+    if root:
+        text = set_frontmatter_key(text, "root", root)
+    text = set_frontmatter_key(text, "branch", branch)
+    text = set_frontmatter_key(text, "created", created)
+    text = set_frontmatter_key(text, "transcript", transcript)
+    text = set_frontmatter_key(text, "status", "pending")
+    return text
+
+
+def cmd_new(argv):
+    title = None
+    body_file = None
+    target_mode = "auto"     # "auto" -> generate; "" -> --no-target; else literal
+    cwd = os.getcwd()
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--title" and i + 1 < len(argv):
+            title = argv[i + 1]; i += 2
+        elif a == "--body-file" and i + 1 < len(argv):
+            body_file = argv[i + 1]; i += 2
+        elif a == "--target" and i + 1 < len(argv):
+            target_mode = argv[i + 1]; i += 2
+        elif a == "--no-target":
+            target_mode = ""; i += 1
+        elif a == "--cwd" and i + 1 < len(argv):
+            cwd = argv[i + 1]; i += 2
+        else:
+            sys.stderr.write("unknown argument: %s\n" % a)
+            return 2
+
+    if not title or not title.strip():
+        sys.stderr.write("--title is required\n")
+        return 2
+
+    if not body_file:
+        if sys.stdin.isatty():
+            sys.stderr.write("--body-file is required (a path, or - for stdin)\n")
+            return 2
+        body_file = "-"
+
+    if body_file == "-":
+        try:
+            body = sys.stdin.read()
+        except Exception:
+            body = ""
+    else:
+        try:
+            with open(body_file, "r", encoding="utf-8") as fh:
+                body = fh.read()
+        except Exception as exc:
+            sys.stderr.write("could not read --body-file: %s\n" % exc)
+            return 2
+
+    if not body.strip():
+        sys.stderr.write("the body is empty\n")
+        return 2
+
+    if target_mode == "auto":
+        target_uuid = str(uuid.uuid4())
+    elif target_mode == "":
+        target_uuid = None
+    else:
+        if not TARGET_UUID_RE.match(target_mode.strip()):
+            sys.stderr.write("--target must be a uuid\n")
+            return 2
+        target_uuid = target_mode.strip().lower()
+
+    cwd = os.path.realpath(cwd)
+    store = store_dir()
+
+    try:
+        os.makedirs(store, mode=0o700, exist_ok=True)
+    except Exception as exc:
+        sys.stderr.write("could not create the store: %s\n" % exc)
+        return 2
+
+    if not take_lock(store):
+        sys.stderr.write("another session is loading a brief right now — "
+                         "try again in a moment\n")
+        return 2
+
+    try:
+        entries, _ = scan(store)
+    except Exception:
+        entries = []
+
+    root = root_from_path(cwd)
+    group = group_dir_for(store, root, entries)
+
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    name_stamp = time.strftime("%Y-%m-%d-%H%M")
+    slug = _slugify(title)
+
+    rc_repo, repo = _git(["rev-parse", "--show-toplevel"], cwd)
+    repo = repo if (rc_repo == 0 and repo) else None
+    rc_br, branch = _git(["branch", "--show-current"], cwd)
+    branch_val = branch if (rc_br == 0 and branch) else "detached"
+    transcript = _transcript_path(cwd)
+
+    try:
+        frontmatter = _build_frontmatter(
+            title.strip(), target_uuid, cwd, repo, root, branch_val, stamp, transcript)
+    except ValueError as exc:
+        sys.stderr.write("bad title: %s\n" % exc)
+        return 2
+
+    full_text = frontmatter + body.rstrip("\n") + "\n"
+    disk_bullets = _disk_bullets(cwd)
+    if disk_bullets and "## Changed on disk" in full_text:
+        full_text = _splice_section(full_text, "## Changed on disk", disk_bullets)
+
+    gdir = os.path.join(store, group)
+    try:
+        os.makedirs(gdir, mode=0o700, exist_ok=True)
+    except Exception as exc:
+        sys.stderr.write("could not create the group directory: %s\n" % exc)
+        return 2
+
+    final_path = None
+    for suffix in [""] + ["-%d" % n for n in range(2, 10)]:
+        candidate = os.path.join(gdir, "%s-%s%s.md" % (name_stamp, slug, suffix))
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        except Exception as exc:
+            sys.stderr.write("could not write the brief: %s\n" % exc)
+            return 2
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(full_text)
+        except Exception as exc:
+            try:
+                os.unlink(candidate)
+            except Exception:
+                pass
+            sys.stderr.write("could not write the brief: %s\n" % exc)
+            return 2
+        final_path = candidate
+        break
+    if final_path is None:
+        sys.stderr.write("could not find a free filename after 9 attempts\n")
+        return 2
+
+    try:
+        reindex(store)
+    except Exception:
+        pass
+
+    first_step = _first_step(body) or "see Next steps in the brief"
+
+    sys.stdout.write("Handoff written: %s\n" % title.strip())
+    sys.stdout.write("  %s\n\n" % final_path)
+    if target_uuid:
+        sys.stdout.write("Parked for a session you choose. Continue it any "
+                         "time, from anywhere:\n")
+        sys.stdout.write("  claude --session-id %s\n\n" % target_uuid)
+    else:
+        sys.stdout.write("Loads when you next run claude in %s.\n\n" % cwd)
+    sys.stdout.write("First step: %s\n" % first_step)
+    return 0
+
+
+# --------------------------------------------------------------------------
+# --migrate — flat briefs at the store root only
+# --------------------------------------------------------------------------
+
+def _migrate_root_for(meta):
+    for key in ("root", "repo", "cwd"):
+        v = meta.get(key)
+        if v:
+            r = root_from_path(v)
+            if r:
+                return r
+    return None
+
+
+def cmd_migrate(argv):
+    apply_ = False
+    for a in argv:
+        if a == "--apply":
+            apply_ = True
+        else:
+            sys.stderr.write("unknown argument: %s\n" % a)
+            return 2
+
+    store = store_dir()
+    try:
+        entries, errors = scan(store)
+    except Exception as exc:
+        sys.stderr.write("cannot read the handoff store at %s: %s\n" % (store, exc))
+        return 2
+
+    flat = [e for e in entries if not e["group"]]
+    if not flat:
+        sys.stdout.write("nothing to migrate.\n")
+        return 0
+
+    if apply_ and not take_lock(store):
+        sys.stderr.write("another session is loading a brief right now — "
+                         "try again in a moment\n")
+        return 2
+
+    lines = []
+    moved = 0
+    for e in sorted(flat, key=lambda e: e["base"]):
+        root = _migrate_root_for(e["meta"])
+        if not root:
+            lines.append("%s (stays: no repo/cwd recorded)" % e["base"])
+            continue
+        group = group_dir_for(store, root, entries)
+        dest_dir = os.path.join(store, group)
+        if not apply_:
+            lines.append("%s -> %s/%s" % (e["base"], group, e["base"]))
+            continue
+        try:
+            os.makedirs(dest_dir, mode=0o700, exist_ok=True)
+        except Exception as exc:
+            lines.append("%s: could not create %s (%s)" % (e["base"], group, exc))
+            continue
+        final = os.path.join(dest_dir, e["base"])
+        if os.path.exists(final):
+            stem = e["base"][:-3] if e["base"].endswith(".md") else e["base"]
+            for n in range(2, 10):
+                cand = os.path.join(dest_dir, "%s-%d.md" % (stem, n))
+                if not os.path.exists(cand):
+                    final = cand
+                    break
+            else:
+                lines.append("%s: no free name in %s" % (e["base"], group))
+                continue
+        try:
+            text = set_frontmatter_key(e["text"], "root", root)
+        except ValueError:
+            text = e["text"]
+        try:
+            tmp = "%s.tmp.%d" % (e["path"], os.getpid())
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.replace(tmp, e["path"])
+            os.replace(e["path"], final)
+        except Exception as exc:
+            lines.append("%s: move failed (%s)" % (e["base"], exc))
+            continue
+        moved += 1
+        lines.append("%s -> %s/%s" % (e["base"], group, os.path.basename(final)))
+        e["group"] = group
+        e["meta"]["root"] = root
+
+    for name, exc in errors:
+        lines.append("warning: %s could not be read (%s)" % (name, exc))
+
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.write("\n%d flat brief%s, %d %s.\n" % (
+        len(flat), "" if len(flat) == 1 else "s",
+        moved, "moved" if apply_ else "would move"))
+
+    if apply_ and moved:
+        try:
+            reindex(store)
+        except Exception:
+            pass
+    return 0
+
+
+# --------------------------------------------------------------------------
 # cli
 # --------------------------------------------------------------------------
 
@@ -569,7 +1286,18 @@ USAGE = """usage:
   handoff_load.py --precompact    PreCompact hook
   handoff_load.py --list          list pending handoff briefs
   handoff_load.py --take <what>   print one brief and mark it consumed
+  handoff_load.py --new --title <text> --body-file <path>|- [--target <uuid>|--no-target] [--cwd <path>]
+                                   write a new handoff brief
+  handoff_load.py --facts [--cwd <path>]
+                                   print the git/disk state a brief needs
+  handoff_load.py --reindex       rebuild the store's INDEX.md files
+  handoff_load.py --groups        list groups and their brief counts
+  handoff_load.py --migrate [--apply]
+                                   move flat root briefs into their repo's group
 """
+
+CLI_FLAGS = ("--help", "-h", "--list", "--take", "--new", "--facts",
+             "--reindex", "--groups", "--migrate")
 
 
 def open_store():
@@ -604,7 +1332,7 @@ def cmd_list(argv):
     else:
         # Newest first, full stop — unlike candidates(), a list is not choosing
         # one, so a reservation gets no special rank here.
-        pending.sort(key=lambda c: (c["order"], c["name"]), reverse=True)
+        pending.sort(key=lambda c: (c["order"], c["base"]), reverse=True)
         now = time.time()
         n = len(pending)
         lines = ["%d handoff brief%s parked." % (n, "" if n == 1 else "s"), ""]
@@ -635,8 +1363,66 @@ def cmd_list(argv):
     return 0
 
 
+def cmd_groups(argv):
+    """Read-only, no lock: one line per group plus (ungrouped) for flat briefs."""
+    result = open_store()
+    if isinstance(result, int):
+        return result
+    _store, entries, errors = result
+
+    groups = {}
+    ungrouped = 0
+    for e in entries:
+        g = e["group"]
+        if not g:
+            ungrouped += 1
+            continue
+        gg = groups.setdefault(g, [0, 0])
+        gg[0] += 1
+        if e["status"] == "pending":
+            gg[1] += 1
+
+    if not groups and not ungrouped:
+        sys.stdout.write("no groups.\n")
+    else:
+        lines = []
+        for name in sorted(groups):
+            total, pending = groups[name]
+            lines.append("%s — %d total, %d pending" % (name, total, pending))
+        if ungrouped:
+            lines.append("(ungrouped) — %d total" % ungrouped)
+        sys.stdout.write("\n".join(lines) + "\n")
+
+    if errors:
+        names = ", ".join(name for name, _ in errors)
+        sys.stderr.write("warning: %d entries could not be read: %s\n"
+                         % (len(errors), names))
+    return 0
+
+
+def cmd_reindex(argv):
+    """Loud, meaningful exit code — the interactive counterpart of the
+    best-effort reindex the hook and `--take` do on the side."""
+    store = store_dir()
+    if not take_lock(store):
+        sys.stderr.write("another session is loading a brief right now — "
+                         "try again in a moment\n")
+        return 2
+    try:
+        written, total = reindex(store)
+    except Exception as exc:
+        sys.stderr.write("could not reindex: %s\n" % exc)
+        return 2
+    sys.stdout.write("reindexed: %d/%d group index(es) updated\n" % (written, total))
+    return 0
+
+
 def resolve_selector(entries, pending, selector):
     """(matches, digit_error) against scan() results — never against the disk.
+
+    Four ordered tiers: exact store-relative name, list digit, exact
+    basename, target uuid. Tiered, not unioned, so a bare number can never be
+    read as a basename.
 
     `digit_error`, when set, is the exact out-of-range message to report; an
     empty `matches` with no `digit_error` means the generic "no match" case.
@@ -651,8 +1437,29 @@ def resolve_selector(entries, pending, selector):
         if not pending:
             return [], "nothing is parked."
         return [], "there is no brief %d — %d parked." % (n, len(pending))
+    base_matches = [c for c in entries if c["base"] == selector]
+    if base_matches:
+        return base_matches, None
     want = selector.strip().lower()
     return [c for c in entries if c["target"] == want], None
+
+
+def _bad_selector(selector):
+    """Refuse anything that could reach outside the store. Resolution still
+    never joins the selector onto a path — this only rejects the shapes that
+    look like an attempt to."""
+    if not selector:
+        return True
+    if ".." in selector:
+        return True
+    if selector[0] in "/\\":
+        return True
+    if selector.count("/") > 1:
+        return True
+    for part in selector.replace("\\", "/").split("/"):
+        if part.startswith("."):
+            return True
+    return False
 
 
 def cmd_take(argv):
@@ -661,9 +1468,7 @@ def cmd_take(argv):
         sys.stderr.write(USAGE)
         return 2
     selector = argv[0]
-    # Resolution only ever looks selector up against scan() results — never by
-    # joining it onto a path — so nothing outside the store is reachable.
-    if not selector or "/" in selector or ".." in selector:
+    if _bad_selector(selector):
         sys.stderr.write('refusing selector "%s": give a brief name, a session '
                          'id, or a list number\n' % selector)
         return 2
@@ -685,7 +1490,7 @@ def cmd_take(argv):
         return 2
 
     pending = [c for c in entries if c["status"] == "pending"]
-    pending.sort(key=lambda c: (c["order"], c["name"]), reverse=True)
+    pending.sort(key=lambda c: (c["order"], c["base"]), reverse=True)
 
     matches, digit_error = resolve_selector(entries, pending, selector)
     if digit_error:
@@ -745,6 +1550,11 @@ def cmd_take(argv):
     except Exception as exc:
         sys.stderr.write("warning: the brief was loaded but could not be marked "
                          "consumed (%s) — it will load again\n" % exc)
+    else:
+        try:
+            reindex(store)
+        except Exception as exc2:
+            sys.stderr.write("warning: could not update the index (%s)\n" % exc2)
 
     if entry["target"]:
         sys.stderr.write("the reservation for claude --session-id %s is now "
@@ -761,7 +1571,22 @@ def cli(argv):
             return 0
         if argv[0] == "--list":
             return cmd_list(argv[1:])
-        return cmd_take(argv[1:])
+        if argv[0] == "--take":
+            return cmd_take(argv[1:])
+        if argv[0] == "--new":
+            return cmd_new(argv[1:])
+        if argv[0] == "--facts":
+            return cmd_facts(argv[1:])
+        if argv[0] == "--reindex":
+            return cmd_reindex(argv[1:])
+        if argv[0] == "--groups":
+            return cmd_groups(argv[1:])
+        if argv[0] == "--migrate":
+            return cmd_migrate(argv[1:])
+        if argv[0].startswith("--"):
+            sys.stderr.write(USAGE)
+            return 2
+        return cmd_take(argv)
     except Exception as exc:
         if os.environ.get("HANDOFF_DEBUG"):
             import traceback
@@ -773,8 +1598,11 @@ def cli(argv):
 def main():
     argv = sys.argv[1:]
     # argv before stdin: a CLI run from a terminal must not block on read().
-    if argv and argv[0] in ("--list", "--take", "--help", "-h"):
+    if argv and argv[0] in CLI_FLAGS:
         return cli(argv)
+    if argv and argv[0].startswith("--") and argv[0] != "--precompact":
+        sys.stderr.write(USAGE)
+        return 2
     try:
         raw = sys.stdin.read()
     except Exception:
