@@ -11,6 +11,7 @@ exists in this checkout; settings presets slot in as a data file under
 data/presets/settings/ plus a PRESETS row in settings_presets.py."""
 
 from .caveman import caveman_apply, caveman_remove, caveman_state
+from .handoff import handoff_apply, handoff_remove, handoff_state
 from .localmodel import local_apply, local_remove, local_state
 from .projects import zsh_apply, zsh_remove, zsh_state
 from .settings_presets import preset_apply, preset_remove, preset_state
@@ -50,6 +51,9 @@ PIECES = {
     "caveman": {"state": caveman_state,
                 "apply": caveman_apply,
                 "remove": caveman_remove},
+    "handoff": {"state": handoff_state,
+                "apply": handoff_apply,
+                "remove": handoff_remove},
 }
 
 def setup_state():

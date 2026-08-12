@@ -192,7 +192,7 @@ class Registry(unittest.TestCase):
     def test_pieces_and_dispatch(self):
         ids = [p["id"] for p in setup.setup_state()["pieces"]]
         self.assertEqual(ids, ["statusline", "token-saver", "zsh-claude",
-                               "local-model", "caveman"])
+                               "local-model", "caveman", "handoff"])
 
     def test_token_saver_is_removable(self):
         piece = [p for p in setup.setup_state()["pieces"]
