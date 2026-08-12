@@ -21,7 +21,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "bin"))
 
-from claude_ui import schema, settings, settings_presets, setup  # noqa: E402
+from claude_ui import caveman, schema, settings, settings_presets, setup  # noqa: E402
 
 
 class PresetData(unittest.TestCase):
@@ -189,6 +189,13 @@ class BrokenPresetFile(unittest.TestCase):
 
 class Registry(unittest.TestCase):
 
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._config_dir = caveman.config_dir
+        caveman.config_dir = lambda: pathlib.Path(self.tmp.name)
+        self.addCleanup(setattr, caveman, "config_dir", self._config_dir)
+
     def test_pieces_and_dispatch(self):
         ids = [p["id"] for p in setup.setup_state()["pieces"]]
         self.assertEqual(ids, ["statusline", "token-saver", "zsh-claude",
@@ -204,6 +211,24 @@ class Registry(unittest.TestCase):
             setup.setup_apply("nope")
         with self.assertRaises(ValueError):
             setup.setup_remove("nope")
+
+    def test_setup_config_dispatches_to_caveman(self):
+        setup.setup_config("caveman", {"level": "ultra"})
+        self.assertEqual(caveman.caveman_level(), "ultra")
+
+    def test_setup_config_refuses_empty_values(self):
+        caveman.caveman_level_set("ultra")
+        with self.assertRaises(ValueError):
+            setup.setup_config("caveman", {})
+        self.assertEqual(caveman.caveman_level(), "ultra")
+
+    def test_setup_config_refuses_a_piece_without_settings(self):
+        with self.assertRaises(ValueError):
+            setup.setup_config("statusline", {})
+
+    def test_setup_config_refuses_an_unknown_piece(self):
+        with self.assertRaises(ValueError):
+            setup.setup_config("nope", {})
 
 
 if __name__ == "__main__":

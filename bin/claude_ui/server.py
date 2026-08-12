@@ -38,7 +38,7 @@ from .registry import (marketplace_add, marketplace_remove, plugin_install,
 from .settings import (hook_test, settings_schema, settings_set, settings_state,
                        start_docs_fetch, suggest_state)
 from .statusline import statusline_save, statusline_state
-from .setup import setup_apply, setup_remove, setup_state
+from .setup import setup_apply, setup_config, setup_remove, setup_state
 from .insight import cost_stats, usage_stats
 from .context import context_state
 from .assist import assist
@@ -293,6 +293,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, {"ok": True})
             elif action == "setup-remove":
                 setup_remove(req.get("id", ""))
+                self.send(200, {"ok": True})
+            elif action == "setup-config":
+                setup_config(req.get("id", ""), req.get("values") or {})
                 self.send(200, {"ok": True})
             elif action == "local-config":
                 local_config_set(req.get("base_url", ""), req.get("model", ""),

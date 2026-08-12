@@ -8,9 +8,14 @@ The registry below is the extension point: each entry supplies a `state`
 callable (returns the piece's current status) plus `apply` and `remove`. New
 pieces (fish/tmux/ghostty drop-ins) slot in as more entries once their payload
 exists in this checkout; settings presets slot in as a data file under
-data/presets/settings/ plus a PRESETS row in settings_presets.py."""
+data/presets/settings/ plus a PRESETS row in settings_presets.py.
 
-from .caveman import caveman_apply, caveman_remove, caveman_state
+A piece that has a setting worth changing after it is installed adds a
+`config` callable and returns `config_fields` from its state; the Setup tab
+draws those fields without knowing what the piece is."""
+
+from .caveman import (caveman_apply, caveman_level_set, caveman_remove,
+                      caveman_state)
 from .handoff import handoff_apply, handoff_remove, handoff_state
 from .localmodel import local_apply, local_remove, local_state
 from .projects import zsh_apply, zsh_remove, zsh_state
@@ -50,7 +55,8 @@ PIECES = {
                     "remove": local_remove},
     "caveman": {"state": caveman_state,
                 "apply": caveman_apply,
-                "remove": caveman_remove},
+                "remove": caveman_remove,
+                "config": lambda v: caveman_level_set(v.get("level"))},
     "handoff": {"state": handoff_state,
                 "apply": handoff_apply,
                 "remove": handoff_remove},
@@ -68,3 +74,16 @@ def setup_remove(pid):
     if pid not in PIECES:
         raise ValueError("unknown setup piece")
     PIECES[pid]["remove"]()
+
+def setup_config(pid, values):
+    """Write one piece's declared settings. `values` is {field id: value},
+    exactly the ids the piece's own state() advertised in config_fields —
+    a piece that declares none has nothing to write and says so."""
+    piece = PIECES.get(pid)
+    if not piece or "config" not in piece:
+        raise ValueError("that setup piece has no settings to change")
+    if not isinstance(values, dict):
+        raise ValueError("settings must be an object")
+    if not values:
+        raise ValueError("no settings given")
+    piece["config"](values)

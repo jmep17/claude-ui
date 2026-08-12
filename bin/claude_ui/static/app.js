@@ -1912,6 +1912,7 @@ async function renderSetup(reload) {
       for (const n of p.notes) fold.append(el("div.li-desc", { text: n }));
       row.append(fold);
     }
+    if (p.config_fields && p.config_fields.length) row.append(pieceConfigBody(p));
     if (p.id === "local-model") row.append(localModelBody(p));
     row.append(actions);
     list.append(row);
@@ -1928,6 +1929,38 @@ async function setupAct(action, p) {
   try {
     await api("/api/setup-" + action, { id: p.id });
     toast(p.label + (action === "apply" ? " applied" : " removed") + " · applies to new sessions");
+    await refresh();
+    renderSetup(true);
+  } catch (e) { toast(e.message, true); }
+}
+
+/* A piece's declared settings, drawn from the state payload alone — the tab
+   knows nothing about what the piece does. Explicit Save, not save-on-change:
+   these write to disk, and every other write in this app is a button press.
+   The local-model piece keeps its own hand-built body above; it has a probe
+   and a live test no declaration can express. */
+function pieceConfigBody(p) {
+  const box = el("div.piececfg");
+  const controls = {};
+  for (const f of p.config_fields) {
+    const sel = el("select");
+    for (const o of f.options || []) sel.append(opt(o.value, o.label || o.value));
+    if (f.value !== undefined && f.value !== null) sel.value = String(f.value);
+    controls[f.id] = () => sel.value;
+    box.append(el("div.lmrow", {}, el("span.lmlbl", { text: f.label || f.id }), sel));
+    if (f.hint) box.append(el("div.lmrow", {}, el("span.li-desc", { text: f.hint })));
+  }
+  box.append(el("div.lmrow", {},
+    mkbtn("btn-sm btn-primary", "Save", () => pieceConfigSave(p, controls))));
+  return box;
+}
+
+async function pieceConfigSave(p, controls) {
+  const values = {};
+  for (const id of Object.keys(controls)) values[id] = controls[id]();
+  try {
+    await api("/api/setup-config", { id: p.id, values });
+    toast(p.label + " saved · applies to new sessions");
     await refresh();
     renderSetup(true);
   } catch (e) { toast(e.message, true); }

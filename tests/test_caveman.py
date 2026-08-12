@@ -163,6 +163,80 @@ class Apply(Base):
         caveman.caveman_apply()
         self.assertEqual(caveman.caveman_level(), "ultra")
 
+    def test_off_removes_the_level_file(self):
+        caveman.caveman_apply()
+        caveman.caveman_level_set("off")
+        self.assertFalse(self.flagp.exists())
+        self.assertIsNone(caveman.caveman_level())
+
+    def test_off_is_reversible(self):
+        caveman.caveman_apply()
+        caveman.caveman_level_set("off")
+        caveman.caveman_level_set("lite")
+        self.assertEqual(caveman.caveman_level(), "lite")
+
+    def test_none_switches_off_too(self):
+        caveman.caveman_apply()
+        caveman.caveman_level_set(None)
+        self.assertFalse(self.flagp.exists())
+
+    def test_setting_off_twice_is_harmless(self):
+        caveman.caveman_apply()
+        caveman.caveman_level_set("off")
+        caveman.caveman_level_set("off")
+        self.assertFalse(self.flagp.exists())
+
+    def test_config_fields_appear_only_once_hooked(self):
+        self.assertEqual(caveman.caveman_state()["config_fields"], [])
+        caveman.caveman_apply()
+        fields = caveman.caveman_state()["config_fields"]
+        self.assertEqual(len(fields), 1)
+        self.assertEqual(fields[0]["id"], "level")
+        self.assertEqual(fields[0]["value"], "full")
+        values = [o["value"] for o in fields[0]["options"]]
+        self.assertIn("off", values)
+        for lv in caveman.LEVELS:
+            self.assertIn(lv, values)
+
+    def test_config_fields_survive_the_off_state(self):
+        caveman.caveman_apply()
+        caveman.caveman_level_set("off")
+        fields = caveman.caveman_state()["config_fields"]
+        self.assertEqual(len(fields), 1)
+        self.assertEqual(fields[0]["value"], "off")
+
+    def test_setup_tab_walkthrough_via_the_dispatcher(self):
+        """Stands in for the plan's Step 6 manual browser walkthrough: Apply,
+        then read/write the Intensity dropdown through the exact call path a
+        Save button press takes (setup.setup_config, not caveman_level_set
+        directly), against a temp config dir rather than ~/.claude."""
+        # Apply: the row goes from not-installed to installed, with the
+        # dropdown defaulting to "full" and naming the flag file in its hint.
+        caveman.caveman_apply()
+        st = caveman.caveman_state()
+        self.assertTrue(st["installed"])
+        fields = st["config_fields"]
+        self.assertEqual(fields[0]["value"], "full")
+        self.assertIn(".caveman-active", fields[0]["hint"])
+
+        # Change the dropdown to "ultra" and press Save.
+        setup.setup_config("caveman", {"level": "ultra"})
+        self.assertEqual(self.flagp.read_text().strip(), "ultra")
+
+        # Change it to "off" and press Save: the flag file disappears, the
+        # row still reads "installed but switched off", and the dropdown
+        # stays put reading "off" rather than vanishing.
+        setup.setup_config("caveman", {"level": "off"})
+        self.assertFalse(self.flagp.exists())
+        st = caveman.caveman_state()
+        self.assertIn("switched off", st["detail"])
+        self.assertEqual(st["config_fields"][0]["value"], "off")
+
+        # Set it back to "full", as the plan's walkthrough has the operator
+        # leave the machine as they found it.
+        setup.setup_config("caveman", {"level": "full"})
+        self.assertEqual(self.flagp.read_text().strip(), "full")
+
     def test_an_edited_skill_is_left_alone(self):
         caveman.caveman_apply()
         self.skillp.write_text("---\nname: caveman\n---\nmine now\n")

@@ -95,7 +95,8 @@ owns, links, tracks, or syncs anything:
   block marked by its own script path and removes only that block, leaving your
   other hooks byte-identical. Intensity lives in `<config>/.caveman-active` —
   the same path and format upstream uses — and deleting that file is the off
-  switch.
+  switch. The Setup tab's Intensity dropdown reads and writes that file
+  directly, `off` included, once the hook is installed — no terminal needed.
 - **Handoff** — a setup piece that installs the handoff system: `/handoff`
   ends a session on purpose by parking a structured brief, a
   `SessionStart`/`PreCompact` hook delivers it to the session it was reserved
