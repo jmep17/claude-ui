@@ -144,6 +144,19 @@ main {
 }
 .section-title .rule { flex: 1; height: 1px; background: var(--border); }
 
+/* The line of prose under a section heading, saying what the section holds.
+   Not .view-head: that is the page's own header and carries a 1rem tail, which
+   under a heading reads as belonging to the list below rather than to the
+   heading above. 0.625rem is the same gap .section-title leaves above a list
+   that has no hint, so a tab's sections keep one rhythm either way. */
+.section-hint {
+  margin: 0 0 0.625rem;
+  color: var(--muted-foreground);
+  font-size: 0.78125rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
 .toolbar {
   display: flex;
   gap: 0.5rem;
@@ -447,7 +460,15 @@ main {
 .pd-toggle.is-open svg { transform: rotate(180deg); }
 .pd-toggle svg { transition: transform var(--dur) var(--ease); }
 
-.subagent-bar { padding: 0.625rem 0.875rem; margin-bottom: 1rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.75rem; }
+/* How far apart this tab's blocks sit is said here, once. The tab stacks a
+   settings bar, a marketplaces card, a filter toolbar and three lists, and
+   .card carries no flow margin of its own (components.css) — so a card whose
+   caller forgot an inline margin ended up welded to the filter input below it.
+   1.25rem is the gap the app's other cards use; 1rem matches .view-head. */
+#pluginsview > .card { margin-bottom: 1.25rem; }
+#pluginsview > .alert { margin-bottom: 1rem; }
+
+.subagent-bar { padding: 0.625rem 0.875rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.75rem; }
 .subagent-bar .sdesc { flex: 1 1 100%; margin: 0; }
 
 /* row editors (list / kv) and object mini-forms */

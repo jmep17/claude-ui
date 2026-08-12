@@ -1168,7 +1168,7 @@ async function renderPlugins(reload) {
   view.append(userRegistryCard());
 
   if (PLUGINS.error) {
-    view.append(el("div.alert.alert-destructive", { style: { marginBottom: "1rem" } },
+    view.append(el("div.alert.alert-destructive", {},
       el("span.alert-icon", {}, icon("error")),
       el("div.alert-body", {},
         el("div.alert-title", { text: "Could not read the plugin config" }),
@@ -1212,7 +1212,7 @@ async function renderPlugins(reload) {
     const rows = shown.filter((p) => p.state === state);
     if (!rows.length) return;
     view.append(sectionTitle(label, rows.length));
-    if (hint) view.append(el("div.view-head", { text: hint, style: { marginTop: "-.35rem" } }));
+    if (hint) view.append(el("div.section-hint", { text: hint }));
     const box = el("div.list");
     for (const p of rows) box.append(pluginRow(p));
     view.append(box);
@@ -1399,7 +1399,7 @@ function adoptedSection(view) {
   if (!rows.length) return;
 
   view.append(sectionTitle("Split into your config", rows.length));
-  view.append(el("div.view-head", { style: { marginTop: "-.35rem" },
+  view.append(el("div.section-hint", {
     text: "Yours now — edit them freely. Drift just means you have changed your "
       + "copy, or the plugin moved on; it is only a problem if you meant to stay "
       + "in step." }));
