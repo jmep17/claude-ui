@@ -4370,6 +4370,18 @@ function itemRow(type, s, enabled, ctx) {
     && styleSettingName(s) === active;
   const actions = el("div.li-actions");
 
+  // An optional expandable panel under the row, supplied by the view via a
+  // ctx flag — the same seam ctx.extraBadges and ctx.extraMenu use. Only the
+  // Skills tab sets it today.
+  const detail = ctx.detail ? el("div.item-detail", { hidden: true }) : null;
+  if (detail) {
+    const open = mkbtn("btn-sm btn-icon btn-ghost pd-toggle", "",
+      () => toggleItemDetail(ctx, s, enabled, open, detail),
+      "The settings this skill reads");
+    open.append(icon("chevronDown"));
+    actions.append(open);
+  }
+
   if (active != null && enabled && !s.broken && !isActive) {
     const set = ctx.setActive
       || ((name) => commitSetting("outputStyle", name));
@@ -4415,7 +4427,74 @@ function itemRow(type, s, enabled, ctx) {
       ...itemBadges(s),
       ...(ctx.extraBadges ? ctx.extraBadges(s) : [])),
     el("span.li-desc", { text: s.description || "" }),
-    actions);
+    actions, detail);
+}
+
+/* Built on first expand, not on render: the panel walks the skill's files
+   server-side, and a list of forty skills must stay instant. */
+async function toggleItemDetail(ctx, s, enabled, btn, body) {
+  body.hidden = !body.hidden;
+  btn.classList.toggle("is-open", !body.hidden);
+  if (body.hidden || body.dataset.built) return;
+  body.dataset.built = "1";
+  body.append(el("div.hint", { text: "Reading the skill…" }));
+  try {
+    const d = await api("/api/skill-detail?name=" + encodeURIComponent(s.name)
+      + "&enabled=" + (enabled ? "1" : "0"));
+    body.innerHTML = "";
+    skillEnvPanel(d.env || [], body);
+  } catch (e) {
+    body.innerHTML = "";
+    body.append(el("div.hint", { text: e.message }));
+  }
+}
+
+/* The Plugins tab's "Settings this plugin reads", for a skill. Same scanner
+   behind it, same caveat, same settings.json `env` destination — a skill
+   that ships scripts has exactly the plugin's problem, and Claude Code has
+   no per-skill settings either. */
+function skillEnvPanel(env, body) {
+  body.append(el("div.pd-title", { text: "Settings this skill reads" }));
+  if (!env.length) {
+    body.append(el("div.pd-note", {
+      text: "Nothing found — this skill's files do not read any environment "
+        + "variable of their own." }));
+    return;
+  }
+  body.append(el("div.pd-note", {
+    html: "Names found by reading the skill's own files, not a list it publishes — "
+      + "treat them as a lead. They are written to <b>env</b> in settings.json, "
+      + "where they apply to every session, not just this skill." }));
+  for (const e of env) {
+    const sc = scalarControl(
+      { key: e.model ? SUBAGENT_KEY : "env." + e.name, type: "combo",
+        values: e.model ? modelValues() : [] },
+      e.value || undefined, "unset");
+    const right = el("div.pd-ctrl", {}, sc.node);
+    if (sc.aux) right.append(sc.aux);
+    right.append(mkbtn("btn-sm btn-primary", "Set",
+      () => setSkillEnv(e.name, sc.collect())));
+    if (e.value) right.append(mkbtn("btn-sm danger", "Clear", () => setSkillEnv(e.name, "")));
+    body.append(el("div.pd-row", {},
+      el("div.pd-name", {},
+        el("span.skey", { title: "read in " + e.files.join(", "), text: e.name }),
+        e.model ? badge("model", "outline") : null,
+        e.value ? badge("set", "default") : null),
+      right));
+    if (e.doc)
+      body.append(el("div.pd-doc", { title: e.doc.file, text: e.doc.line }));
+  }
+}
+
+/* Same endpoint the plugin panel uses — it writes one settings.json env
+   entry and has never cared where the name came from. */
+async function setSkillEnv(name, value) {
+  try {
+    await api("/api/plugin-env-set", { name, value: value === undefined ? "" : String(value) });
+    toast(name + (value ? " set to " + value : " cleared") + " · applies to new sessions");
+    await refresh();
+    renderInventory();
+  } catch (e) { toast(e.message, true); }
 }
 
 function renderInventory() {
@@ -4494,6 +4573,8 @@ function renderInventory() {
         icon: "power",
         fn: () => skillOverride(s.name, ov[s.name] === "off" ? null : "off"),
       }];
+      // The panel itself is built on expand; this only says the row has one.
+      ctx.detail = true;
     }
     for (const s of list) box.append(itemRow(TAB, s, enabled, ctx));
     view.append(box);

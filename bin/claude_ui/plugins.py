@@ -22,6 +22,7 @@ from .core import (NAME_RE, SOURCE_KEY, _read_json_object, atomic_write,
                    config_dir, disabled_dir, item_rel, parse_frontmatter,
                    project_claude_dir, project_root, project_roots,
                    set_frontmatter_key, tilde)
+from .items import resolve_item
 from .mcp import mcp_machine_set, validate_mcp_config
 from .projects import project_setting_set
 from .settings import ENV_READONLY, settings_set, settings_state
@@ -438,24 +439,24 @@ def _env_doc(name, texts):
             return {"line": line.replace("`", "")[:240], "file": rel}
     return None
 
-def plugin_env_vars(pid):
-    """[{name, model, files, doc, value}] — env vars this plugin's code reads.
+def env_vars_in(root):
+    """[{name, model, files, doc, value}] — env vars the code under `root`
+    reads, whatever `root` is: a plugin tree or one skill's directory.
 
-    Kept out of plugins_state(): that runs on every /api/plugins call and again
-    inside insight and doctor, and this walks the whole tree.
+    Kept out of any state() call: those run on every /api/plugins hit and again
+    inside insight and doctor, and this walks a whole tree.
     """
-    _, _, pdir, _ = _plugin(pid)
-    # CLAUDE_PLUGIN_ROOT and friends are handed *to* the plugin by Claude Code
+    # CLAUDE_PLUGIN_ROOT and friends are handed *to* a plugin by Claude Code
     official = set(schema.env_var_names()) | set(ENV_READONLY) | set(PLUGIN_ROOT_VARS)
     hits, docs = {}, []
-    for p in _env_scan_files(pdir):
+    for p in _env_scan_files(root):
         try:
             if p.stat().st_size > ENV_SCAN_MAX_BYTES:
                 continue
             text = p.read_text(errors="replace")
         except OSError:
             continue
-        rel = str(p.relative_to(pdir))
+        rel = str(p.relative_to(root))
         if p.suffix == ".md":
             docs.append((rel, text))
             continue
@@ -479,11 +480,32 @@ def plugin_env_vars(pid):
     out.sort(key=lambda e: (not e["model"], e["name"]))
     return out
 
+
+def plugin_env_vars(pid):
+    """The env vars one installed plugin reads."""
+    _, _, pdir, _ = _plugin(pid)
+    return env_vars_in(pdir)
+
 def plugin_env_set(name, value):
     """Set (or clear, value falsy) one settings.json env entry."""
     if not re.match(r"^[A-Z_][A-Z0-9_]*$", name or ""):
         raise ValueError("bad environment variable name")
     settings_set("env." + name, value if value else None)
+
+
+def skill_env_vars(name, enabled=True):
+    """The env vars one personal skill's own files read.
+
+    A skill is a directory, so it can ship a scripts/ package that reads the
+    environment the same way a plugin does — and with the same problem: the
+    names exist only in its source. Same scanner, same caveat in the UI, and
+    the values land in the same settings.json `env`, because that is the only
+    place Claude Code reads them from.
+    """
+    root = resolve_item("skills", name, enabled, None)
+    if not root.is_dir():
+        raise ValueError(f"no skill named {name}")
+    return env_vars_in(root)
 
 
 def plugin_set_enabled(pid, enabled):

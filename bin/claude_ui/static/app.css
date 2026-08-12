@@ -411,8 +411,10 @@ main {
 
 /* ---------------------------------------------- plugin detail (models, env)
    An expanded plugin card. Lives inside .list-item, which wraps, so the panel
-   claims a full row of its own below the plugin's name and buttons. */
-.plugin-detail {
+   claims a full row of its own below the plugin's name and buttons. A skill
+   row's expanded settings panel is the same shape and shares this rule. */
+.plugin-detail,
+.item-detail {
   flex: 1 1 100%;
   margin-top: 0.5rem;
   padding: 0.625rem 0.75rem 0.75rem;

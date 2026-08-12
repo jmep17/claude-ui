@@ -10,7 +10,9 @@ owns, links, tracks, or syncs anything:
 - **Inventory** of `<config>/skills/`, `commands/`, `agents/`, and
   `output-styles/`, with enable/disable (disabled items move to
   `<config>/disabled/`, a plain visible directory outside everything Claude
-  Code scans — the filesystem is the entire state, no manifest).
+  Code scans — the filesystem is the entire state, no manifest). Expanding a
+  skill shows **the environment variables it reads**, found the same way as
+  the plugin scan below.
 - **Editor** for item files and the config-dir files `CLAUDE.md`,
   `settings.json`, and `keybindings.json`.
 - **Settings** form editor for every documented `settings.json` key, with

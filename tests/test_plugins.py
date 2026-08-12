@@ -4,7 +4,8 @@ Stdlib unittest, no dependencies — `python3 -m unittest discover tests` from t
 repo root, or just `python3 tests/test_plugins.py`.
 
 config_dir is patched in every namespace that reads it (plugins reaches the
-plugin tree through it, settings writes settings.json through it), since
+plugin tree through it, settings writes settings.json through it, items
+resolves a skill's directory through it for skill_env_vars), since
 core.config_dir() consults .claude-ui.json before $CLAUDE_CONFIG_DIR and so
 can't be redirected by the environment alone. plugins_root() is a function over
 config_dir() precisely so this works.
@@ -21,7 +22,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "bin"))
 
-from claude_ui import core, plugins, settings  # noqa: E402
+from claude_ui import core, items, plugins, settings  # noqa: E402
 
 
 def write(path, text):
@@ -39,7 +40,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.tmp = pathlib.Path(self.tmpdir.name)
-        self._saved = [(m, m.config_dir) for m in (plugins, settings, core)]
+        self._saved = [(m, m.config_dir) for m in (plugins, settings, core, items)]
         for m, _ in self._saved:
             m.config_dir = lambda t=self.tmp: t
         self.plugin = self.tmp / "plugins" / "marketplaces" / "mkt" / "plugins" / "demo"
@@ -701,6 +702,78 @@ class TestPluginEnvSet(Base):
         for bad in ("", "lower", "a.b", "X Y", "env.X"):
             with self.assertRaises(ValueError, msg=bad):
                 plugins.plugin_env_set(bad, "v")
+
+
+class TestEnvVarsIn(Base):
+    """The split-out entry point takes any directory, not just a plugin tree —
+    a skill's own folder works the same way. plugin_env_vars() is exercised
+    end to end by TestPluginEnvVars above, which already proves the split left
+    that path unchanged (same filters, same model-first sort, same doc
+    attachment, same refusal for an unknown plugin) — nothing new to
+    duplicate here."""
+
+    def test_env_vars_in_reads_any_directory(self):
+        root = self.tmp / "somewhere"
+        write(root / "scripts" / "run.py", "import os\nos.environ.get('DEMO_KNOB')\n")
+        names = [e["name"] for e in plugins.env_vars_in(root)]
+        self.assertEqual(names, ["DEMO_KNOB"])
+
+
+class TestSkillEnvVars(Base):
+    """Same scanner, pointed at a personal skill's own directory instead of a
+    plugin's, via items.resolve_item — which is also the path-traversal
+    guard, so it is what these refusal cases actually exercise."""
+
+    def skill_file(self, rel, text, enabled=True, name="demo"):
+        base = (self.tmp if enabled else self.tmp / "disabled") / "skills" / name
+        write(base / rel, text)
+        return base
+
+    def test_skill_env_vars_finds_a_skills_scripts(self):
+        self.skill_file("SKILL.md", md("Demo skill"))
+        self.skill_file("scripts/x.py", "import os\nos.environ.get('DEMO_MODEL')\n")
+        got = plugins.skill_env_vars("demo")
+        self.assertEqual([e["name"] for e in got], ["DEMO_MODEL"])
+        self.assertTrue(got[0]["model"])
+
+    def test_skill_env_vars_skips_official_names(self):
+        self.skill_file("SKILL.md", md("Demo skill"))
+        self.skill_file("scripts/x.py",
+                         "import os\nos.environ.get('ANTHROPIC_API_KEY')\n")
+        self.assertEqual(plugins.skill_env_vars("demo"), [])
+
+    def test_skill_env_vars_reads_a_disabled_skill(self):
+        self.skill_file("SKILL.md", md("Demo skill"), enabled=False)
+        self.skill_file("scripts/x.py", "import os\nos.environ.get('DEMO_MODEL')\n",
+                         enabled=False)
+        got = plugins.skill_env_vars("demo", enabled=False)
+        self.assertEqual([e["name"] for e in got], ["DEMO_MODEL"])
+
+    def test_skill_env_vars_refuses_an_unknown_skill(self):
+        with self.assertRaises(ValueError):
+            plugins.skill_env_vars("nope")
+
+    def test_skill_env_vars_refuses_a_traversing_name(self):
+        with self.assertRaises(ValueError):
+            plugins.skill_env_vars("../../etc")
+
+    def test_set_and_clear_reach_the_same_settings_json(self):
+        """The panel's Set/Clear buttons both call the plugin writer as-is
+        (plan: reuse plugin_env_set / /api/plugin-env-set, do not rename it) —
+        this is what Step 5's manual haiku-then-clear walkthrough exercised."""
+        self.skill_file("SKILL.md", md("Demo skill"))
+        self.skill_file("scripts/x.py", "import os\nos.environ.get('CAVEMAN_MODEL')\n")
+        got = plugins.skill_env_vars("demo")
+        self.assertEqual(got[0]["name"], "CAVEMAN_MODEL")
+        self.assertTrue(got[0]["model"])
+        self.assertEqual(got[0]["value"], "")
+
+        plugins.plugin_env_set("CAVEMAN_MODEL", "haiku")
+        self.assertEqual(self.settings_json()["env"]["CAVEMAN_MODEL"], "haiku")
+        self.assertEqual(plugins.skill_env_vars("demo")[0]["value"], "haiku")
+
+        plugins.plugin_env_set("CAVEMAN_MODEL", "")
+        self.assertNotIn("CAVEMAN_MODEL", self.settings_json().get("env", {}))
 
 
 class TestScopeMoves(Base):

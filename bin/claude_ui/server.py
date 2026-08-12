@@ -24,7 +24,8 @@ from . import output_styles
 from . import schema
 from .plugins import (adopted_items, plugin_env_set, plugin_env_vars,
                       plugin_resync, plugin_scope_move, plugin_set_enabled,
-                      plugins_split, plugins_state, skill_override_set)
+                      plugins_split, plugins_state, skill_env_vars,
+                      skill_override_set)
 from .projects import (mcp_move, project_init, project_mcp_approve,
                        project_mcp_set, project_set_mode, project_setting_set,
                        project_skill_override, project_toggle, projects_state,
@@ -204,6 +205,17 @@ class Handler(BaseHTTPRequestHandler):
             pid = (q.get("id") or [""])[0]
             try:
                 self.send(200, {"id": pid, "env": plugin_env_vars(pid)})
+            except (ValueError, OSError) as e:
+                self.send(400, {"error": str(e)})
+        elif self.path.startswith("/api/skill-detail?"):
+            # the env vars one skill reads — same walk as plugin-detail, and
+            # off the /api/state path for the same reason
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            get = lambda k, d="": (q.get(k) or [d])[0]
+            try:
+                self.send(200, {"name": get("name"),
+                                "env": skill_env_vars(get("name"),
+                                                      get("enabled", "1") == "1")})
             except (ValueError, OSError) as e:
                 self.send(400, {"error": str(e)})
         else:
