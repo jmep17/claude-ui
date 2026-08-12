@@ -1904,8 +1904,11 @@ async function renderSetup(reload) {
     // A piece may carry notes: the exact writes it makes, one per line, so the
     // list is on screen before the button that performs them is pressed.
     if (p.notes && p.notes.length) {
+      // "keys" is the settings-preset shape; a piece that writes files rather
+      // than settings keys supplies its own summary instead.
       const fold = el("details.piece-notes", {},
-        el("summary", { text: "What it writes (" + p.notes.length + " keys)" }));
+        el("summary", { text: p.notes_label
+          || "What it writes (" + p.notes.length + " keys)" }));
       for (const n of p.notes) fold.append(el("div.li-desc", { text: n }));
       row.append(fold);
     }

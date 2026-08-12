@@ -73,6 +73,27 @@ owns, links, tracks, or syncs anything:
   session's `/model` picker via `env.ANTHROPIC_CUSTOM_MODEL_OPTION` in
   `settings.json` (additive — nothing is restricted) and a `$0` pricing
   override so local sessions stay visible on the Costs tab.
+- **Caveman** — a setup piece that installs two skills out of
+  [caveman](https://github.com/JuliusBrussee/caveman) and turns the first on by
+  default. Upstream ships it as a plugin — 21 skills, 5 commands, 3 agents, an
+  MCP delegate — and Claude Code enables a plugin whole; the parts worth having
+  are `caveman` itself, a single self-contained `SKILL.md`, and
+  `caveman-compress`, a tree whose `scripts/` package rewrites a memory file in
+  place. Both are vendored here beside the other presets and kept honest by
+  `tools/sync_caveman_skill.py --check`, which walks every file it ships. So
+  there is no marketplace, no `claude plugin install`, and no network: on a
+  second machine it is a checkout and one Apply. A skill alone is never on by
+  default — Claude Code reads its description and loads the body only when it
+  decides to — so the piece also generates a `SessionStart` hook that prints the
+  caveman ruleset into each session, which is the same mechanism upstream's
+  plugin uses and the reason `/caveman` is no longer needed. Only that one is
+  hooked; `caveman-compress` goes in as an ordinary skill you invoke, because
+  overwriting a file is not something to put on a hook. It is the one piece that
+  merges into `settings.json`'s `hooks`, a list you also own, so it appends a
+  block marked by its own script path and removes only that block, leaving your
+  other hooks byte-identical. Intensity lives in `<config>/.caveman-active` —
+  the same path and format upstream uses — and deleting that file is the off
+  switch.
 - **Doctor** for machine health: broken symlinks, leftover backups, hooks or
   statusline entries pointing at missing executables, and more.
 - **Backup** — a zip of the parts of your config that took work to build, kept

@@ -10,6 +10,7 @@ pieces (fish/tmux/ghostty drop-ins) slot in as more entries once their payload
 exists in this checkout; settings presets slot in as a data file under
 data/presets/settings/ plus a PRESETS row in settings_presets.py."""
 
+from .caveman import caveman_apply, caveman_remove, caveman_state
 from .localmodel import local_apply, local_remove, local_state
 from .projects import zsh_apply, zsh_remove, zsh_state
 from .settings_presets import preset_apply, preset_remove, preset_state
@@ -46,6 +47,9 @@ PIECES = {
     "local-model": {"state": local_state,
                     "apply": local_apply,
                     "remove": local_remove},
+    "caveman": {"state": caveman_state,
+                "apply": caveman_apply,
+                "remove": caveman_remove},
 }
 
 def setup_state():
