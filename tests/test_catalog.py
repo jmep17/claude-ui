@@ -332,6 +332,38 @@ class TestResolveInstall(Base):
         self.assertEqual(catalog.resolve_install("pkg0@extmkt", None), "pkg0@extmkt")
 
 
+class TestArchivedSkills(Base):
+    """An archived skill is still yours and still findable — the archive is a
+    place to put something you might want back, and searching is how you
+    remember you have it."""
+
+    def test_archived_skill_indexes_under_its_own_id(self):
+        write(self.tmp / "skills" / "archived" / "old" / "SKILL.md",
+              md("was useful"))
+        e = self.by_id()["yours:archived:old"]
+        self.assertEqual(e["kind"], "skill")
+        self.assertEqual(e["group"], "yours")
+        self.assertEqual(e["state"], "archived")
+        self.assertEqual(e["description"], "was useful")
+        self.assertNotIn("yours:skills:old", self.by_id())
+
+    def test_a_live_twin_does_not_collide(self):
+        """A skill can be live and archived at the same time (the doctor flags
+        the pair); two entries must not share one id."""
+        write(self.tmp / "skills" / "pdf" / "SKILL.md", md("live one"))
+        write(self.tmp / "skills" / "archived" / "pdf" / "SKILL.md", md("old one"))
+        by = self.by_id()
+        self.assertEqual(by["yours:skills:pdf"]["state"], "enabled")
+        self.assertEqual(by["yours:archived:pdf"]["state"], "archived")
+        ids = [e["id"] for e in self.entries()]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_the_archive_directory_is_not_itself_a_skill(self):
+        write(self.tmp / "skills" / "archived" / "old" / "SKILL.md", md("x"))
+        names = {e["name"] for e in self.entries() if e["group"] == "yours"}
+        self.assertNotIn("archived", names)
+
+
 class TestGetEntry(Base):
     """get_entry(): the read-only id -> Entry lookup /api/skill-audit uses to
     resolve a request's `id` server-side, mirroring resolve_install()'s

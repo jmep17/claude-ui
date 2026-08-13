@@ -29,7 +29,7 @@ import math
 import re
 
 from .core import config_dir, discover_cache_path, tilde
-from .items import scan_items
+from .items import scan_archived_skills, scan_items
 from . import plugins
 from .settings import settings_state
 
@@ -344,6 +344,16 @@ def _yours_entries():
                 it, "yours", id=f"yours:{type_}:{it['name']}", kind=singular,
                 state="enabled" if it.get("enabled") else "disabled",
             ))
+    # Archived skills are still yours and still findable — the archive is a
+    # place to put something you might want back, and searching for it is how
+    # you remember you have it. The id says `archived`, not `skills`, because
+    # a skill can legitimately be live and archived at the same time (the
+    # doctor flags that pair) and two entries must not collide on one id.
+    for a in scan_archived_skills():
+        out.append(_item_entry(
+            a, "yours", id=f"yours:archived:{a['name']}", kind="skill",
+            state="archived",
+        ))
     return out
 
 def _installed_entries():

@@ -42,9 +42,11 @@ import zipfile
 from .core import (CLAUDE_JSON, CONFIG_FILES, ITEM_TYPES, MCP_FILE, NAME_RE,
                    PROJECT_ITEM_TYPES, _read_json_object, _within, atomic_write,
                    atomic_write_bytes, config_dir, disabled_dir,
-                   project_claude_dir, project_items, read_cfg, tilde, write_cfg)
+                   is_reserved_skill_dir, project_claude_dir, project_items,
+                   read_cfg, tilde, write_cfg)
 from .insight import MAX_TRANSCRIPT, projects_dir
-from .items import resolve_item, scan_items
+from .items import (resolve_archived, resolve_item, scan_archived_skills,
+                    scan_items)
 from .mcp import mcp_machine_set, mcp_state
 from .plugins import plugins_root
 from .statusline import statusline_paths
@@ -216,6 +218,18 @@ def _g_items():
                 out += _walk_entries("items", p, unit_of=lambda _p, u=u: u)
             else:
                 out += _file_entries("items", [p], unit_of=lambda _p, u=u: u)
+    # Archived skills are items too, and would otherwise land in the catch-all
+    # below — a unit called "Other files" is not somewhere you can find one
+    # skill to restore. scan_items() cannot see them by design (the archive is
+    # excluded at items._scan_dir_type), so they are asked for separately.
+    for a in scan_archived_skills():
+        try:
+            p = resolve_archived(a["name"])
+        except ValueError:
+            continue
+        u = {"unit": "skills/archived/" + a["name"], "unit_label": a["name"],
+             "unit_desc": ITEM_LABEL.get("skills", "skills") + " · archived"}
+        out += _walk_entries("items", p, unit_of=lambda _p, u=u: u)
     claimed = {e["path"] for e in out}
 
     rest = {"unit": "other", "unit_label": "Other files",
@@ -767,6 +781,13 @@ def _project_member(member):
         parts = parts[1:]
     if len(parts) < 2 or parts[0] not in PROJECT_ITEM_TYPES:
         raise ValueError(f"{member}: not a project skill, command or agent")
+    # The archive is a user-scope idea, and unlike disabled/ it cannot simply
+    # be dropped: a project has no archive area, so restoring skills/archived/
+    # <name>/ into one would either resurrect a skill you archived or create a
+    # directory Claude Code scans for a project that never asked for it.
+    if parts[0] == "skills" and is_reserved_skill_dir(parts[1]):
+        raise ValueError(f"{member}: archived skills have no project form — "
+                         "restore it to your config dir and move it there")
     type_, rest = parts[0], parts[1:]
     if ITEM_TYPES[type_]["kind"] == "dir":
         # a skill is a directory of files: the item is the directory, and

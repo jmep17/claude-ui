@@ -133,6 +133,18 @@ class TestUnits(Base):
         self.assertEqual([e["unit"] for e in entries if e["path"] == skill],
                          ["skills/pdf"])
 
+    def test_an_archived_skill_is_its_own_unit(self):
+        """scan_items() cannot see the archive by design, so without its own
+        claim an archived skill lands in "Other files" — not somewhere you can
+        find one skill to restore."""
+        write(self.cfg / "skills" / "archived" / "old" / "SKILL.md",
+              "---\nname: old\n---\nparked\n")
+        u = self.units("items")
+        self.assertIn("skills/archived/old", u)
+        self.assertEqual(u["skills/archived/old"]["label"], "old")
+        self.assertIn("archived", u["skills/archived/old"]["desc"])
+        self.assertNotIn("other", u)
+
     def test_config_statusline_and_mcp_split_by_the_obvious_thing(self):
         self.assertEqual(set(self.units("config")), {"CLAUDE.md", "settings.json"})
         self.assertEqual(set(self.units("statusline")), {"statusline.sh"})
@@ -587,6 +599,17 @@ class TestProjectRestore(Base):
                 with self.assertRaises(ValueError):
                     backup._project_member(member)
                 self.assertFalse(victim.exists())
+
+    def test_an_archived_skill_has_no_project_form(self):
+        """A project has no archive area, and unlike disabled/ the segment
+        cannot just be dropped — that would resurrect a skill you archived."""
+        for member in ("files/skills/archived/old/SKILL.md",
+                       "files/disabled/skills/archived/old/SKILL.md",
+                       "files/skills/Archived/old/SKILL.md"):
+            with self.subTest(member=member):
+                with self.assertRaises(ValueError) as cm:
+                    backup._project_member(member)
+                self.assertIn("archived", str(cm.exception))
 
     def test_a_crafted_unit_label_cannot_redirect_the_write(self):
         """The unit comes from the path. An archive we did not write gets to

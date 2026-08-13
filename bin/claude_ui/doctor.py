@@ -14,7 +14,7 @@ import time
 from .core import (CLAUDE_JSON, ITEM_TYPES, _read_json_object, config_dir,
                    tilde)
 from .insight import cost_stats
-from .items import scan_items
+from .items import scan_archived_skills, scan_items
 from .mcp import mcp_state
 from .output_styles import normalize_setting, setting_name
 from . import schema
@@ -223,6 +223,43 @@ def doctor():
                 add("info", t, f"{it['name']}: description has no \"Use when …\" "
                                "trigger — Claude may not know when to load it",
                     _at_item(it, t, file=main, find="description:"))
+
+    # skills: the archive, and the two ways a skill can be off
+    at_skills = {"kind": "tab", "tab": "skills"}
+    skills = scan_items("skills")
+    live_skills = {it["name"] for it in skills if it["enabled"]}
+    parked = [it["name"] for it in skills if not it["enabled"]]
+    archived = scan_archived_skills()
+    for a in archived:
+        if a["name"] in live_skills:
+            add("warn", "skills", f"{a['name']}: exists both live and archived "
+                                  "— restoring it would fail; resolve by hand",
+                {**at_skills, "q": a["name"]})
+    if parked:
+        # disabled/skills/ still works and is still read here; the archive is
+        # simply the better home, and the tab offers a one-press migration
+        add("info", "skills",
+            f"{len(parked)} skill(s) parked in disabled/skills/ "
+            f"({', '.join(sorted(parked)[:5])}"
+            f"{', …' if len(parked) > 5 else ''}) — the Skills tab can move "
+            "them to skills/archived/ in one press",
+            at_skills)
+    # an override naming nothing on disk. Deliberately "info", and deliberately
+    # hedged: a skill bundled with Claude Code is legitimately overridable and
+    # is not in your skills directory, so this cannot be a warning.
+    ov = sdata.get("skillOverrides")
+    if isinstance(ov, dict):
+        known = live_skills | set(parked) | {a["name"] for a in archived}
+        for key in sorted(k for k in ov if isinstance(k, str)):
+            # a "plugin:skill" key is not ours to judge — that form is what
+            # the docs say skillOverrides cannot reach anyway
+            if key in known or ":" in key:
+                continue
+            add("info", "settings",
+                f"skillOverrides has an entry for \"{key}\", which is not a "
+                "skill in your skills folder — harmless if it names a bundled "
+                "skill, otherwise left over from one you removed",
+                _at_path(settings_path, find=f'"{key}"'))
 
     # enabled plugins shipping a component that shares a name with one of ours
     # (either side: adopting on top of a disabled twin is its own breakage)

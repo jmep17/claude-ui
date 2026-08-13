@@ -365,6 +365,51 @@ class TestDoctorTargets(TempConfig):
         f = self.find(doctor.doctor()["findings"], "broken symlink")
         self.assertNotIn("target", f)
 
+    def test_the_archive_is_not_scanned_as_an_inventory(self):
+        """archived/ is excluded at items._scan_dir_type, which is what keeps
+        it out of every check in this loop at once."""
+        self.write("skills/archived/old/SKILL.md",
+                   "---\nname: old\ndescription: does things\n---\n"
+                   "TODO: finish\n")
+        msgs = [f["msg"] for f in doctor.doctor()["findings"]]
+        self.assertFalse([m for m in msgs if "old" in m and "TODO" in m], msgs)
+        self.assertFalse([m for m in msgs if "old:" in m], msgs)
+
+    def test_live_and_archived_twin_is_flagged(self):
+        self.write("skills/pdf/SKILL.md",
+                   "---\nname: pdf\ndescription: Use when reading PDFs\n---\nx\n")
+        self.write("skills/archived/pdf/SKILL.md",
+                   "---\nname: pdf\ndescription: Use when reading PDFs\n---\nold\n")
+        f = self.find(doctor.doctor()["findings"], "both live and archived")
+        self.assertEqual(f["level"], "warn")
+        self.assertEqual(f["target"], {"kind": "tab", "tab": "skills", "q": "pdf"})
+
+    def test_parked_skills_get_a_migration_nudge(self):
+        self.write("disabled/skills/old/SKILL.md", "---\nname: old\n---\nx\n")
+        f = self.find(doctor.doctor()["findings"], "parked in disabled/skills/")
+        self.assertEqual(f["level"], "info")
+        self.assertIn("old", f["msg"])
+
+    def test_no_nudge_when_nothing_is_parked(self):
+        self.write("skills/pdf/SKILL.md", "---\nname: pdf\n---\nx\n")
+        msgs = [f["msg"] for f in doctor.doctor()["findings"]]
+        self.assertFalse([m for m in msgs if "parked in disabled/skills/" in m])
+
+    def test_orphan_skill_override_is_info_and_hedged(self):
+        self.write("settings.json", json.dumps({"skillOverrides": {"gone": "off"}}))
+        f = self.find(doctor.doctor()["findings"], '"gone"')
+        self.assertEqual(f["level"], "info")
+        # a skill bundled with Claude Code is legitimately overridable and is
+        # not on disk here — the wording must not claim the entry is wrong
+        self.assertIn("harmless", f["msg"])
+        self.assertEqual(f["target"]["find"], '"gone"')
+
+    def test_an_override_naming_an_archived_skill_is_not_an_orphan(self):
+        self.write("skills/archived/pdf/SKILL.md", "---\nname: pdf\n---\nx\n")
+        self.write("settings.json", json.dumps({"skillOverrides": {"pdf": "off"}}))
+        msgs = [f["msg"] for f in doctor.doctor()["findings"]]
+        self.assertFalse([m for m in msgs if '"pdf"' in m and "skillOverrides" in m])
+
     def test_every_path_target_is_absolute_and_not_tilded(self):
         """tilde() is a lossy display transform; a target we can't reopen is
         the whole bug this replaced."""
