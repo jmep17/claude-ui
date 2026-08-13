@@ -55,7 +55,29 @@ def resolve_item(type_, name, enabled=True, scope=None):
         raise ValueError("bad name")
     return item_root(type_, enabled, scope) / rel
 
-def _dir_item(entry, enabled):
+def skill_dirs(root):
+    """Every directory in `root` shaped like a skill, sorted, dotfiles out.
+
+    The one iterator over a skills directory — yours, a project's, or one
+    inside an installed plugin. Reserved names (core.RESERVED_SKILL_DIRS) are
+    deliberately *not* filtered here: that is a rule about your skills
+    directory, not about any directory shaped like one, and a plugin may
+    legally ship a skill called `archived`. The exclusion happens at the two
+    call sites that own that rule — _scan_dir_type() below and
+    core.project_items()."""
+    if not root.is_dir():
+        return []
+    return [e for e in sorted(root.iterdir())
+            if not e.name.startswith(".") and (e.is_dir() or e.is_symlink())]
+
+def skill_facts(entry):
+    """Everything one skill directory says about itself, from one read of its
+    SKILL.md. Nothing scope- or state-specific: no `enabled`, no `archived`,
+    no `conflict`. Callers add their own fields on top.
+
+    The single reader of a skill directory. plugins.py decorates this result
+    rather than parsing the frontmatter a second time, which is what kept two
+    record shapes — and two adapters in catalog.py — alive before."""
     skill_md = entry / "SKILL.md"
     broken = entry.is_symlink() and not entry.exists()
     text = "" if broken else (
@@ -66,7 +88,7 @@ def _dir_item(entry, enabled):
     except OSError:
         mtime = 0
     return {
-        "name": entry.name, "enabled": enabled,
+        "name": entry.name,
         "symlink": entry.is_symlink(), "broken": broken,
         "incomplete": not broken and not skill_md.is_file(),
         "description": ("(broken symlink: " + str(entry.readlink()) + ")")
@@ -86,16 +108,13 @@ def _dir_item(entry, enabled):
                                ).strip().lower() in ("true", "yes"),
     }
 
+def _dir_item(entry, enabled):
+    return {**skill_facts(entry), "enabled": enabled}
+
 def _scan_dir_type(root, enabled):
-    items = []
-    if not root.is_dir():
-        return items
-    for entry in sorted(root.iterdir()):
-        if entry.name.startswith("."):
-            continue
-        if entry.is_dir() or entry.is_symlink():
-            items.append(_dir_item(entry, enabled))
-    return items
+    """The inventory of a skills directory: the facts, plus which side of
+    disabled/ they were found on."""
+    return [_dir_item(e, enabled) for e in skill_dirs(root)]
 
 def _scan_md_type(root, enabled):
     items = []

@@ -22,7 +22,7 @@ from .core import (NAME_RE, SOURCE_KEY, _read_json_object, atomic_write,
                    config_dir, disabled_dir, item_rel, parse_frontmatter,
                    project_claude_dir, project_root, project_roots,
                    set_frontmatter_key, tilde)
-from .items import resolve_item
+from .items import resolve_item, skill_dirs, skill_facts
 from .mcp import mcp_machine_set, validate_mcp_config
 from .projects import project_setting_set
 from .settings import ENV_READONLY, settings_set, settings_state
@@ -187,12 +187,18 @@ def _md_components(pdir, kind):
     return out
 
 def _skill_components(pdir):
-    root = pdir / "skills"
+    """A plugin's skills, read by items.skill_facts() and decorated here.
+
+    The facts (description, symlink, broken, incomplete, todo, long_desc,
+    chars, mtime) come from the one shared reader, so a plugin's skill and one
+    of yours carry the same keys and the frontend needs a single badge
+    function. What stays here is the ${CLAUDE_PLUGIN_ROOT} walk: skill_facts()
+    deliberately reads only SKILL.md, because a recursive read of every skill
+    tree on every /api/state is not a cost the inventory can carry, and only
+    splitting needs the whole-tree answer."""
     out = []
-    if not root.is_dir():
-        return out
-    for entry in sorted(root.iterdir()):
-        if not entry.is_dir() or entry.name.startswith("."):
+    for entry in skill_dirs(pdir / "skills"):
+        if not entry.is_dir():   # a bare symlink is not a plugin's to ship
             continue
         smd = entry / "SKILL.md"
         text = smd.read_text(errors="replace") if smd.is_file() else ""
@@ -202,10 +208,10 @@ def _skill_components(pdir):
         except OSError:
             body = text
         out.append({
-            "kind": "skills", "name": entry.name,
-            "description": parse_frontmatter(text).get("description", ""),
+            **skill_facts(entry),   # name, description, path, and the badges
+            "kind": "skills",
             "model": "",
-            "path": tilde(entry), "adoptable": True, "reason": None,
+            "adoptable": True, "reason": None,
             "warn": ("references ${CLAUDE_PLUGIN_ROOT}; those paths will not "
                      "resolve once split") if _references_plugin_root(body) else None,
         })

@@ -320,6 +320,19 @@ def is_blocked(marketplace_name, source, settings):
 
 # --------------------------------------------------------------- corpora
 
+def _item_entry(rec, group, **kw):
+    """One inventory record as an index entry — the single translation.
+
+    `rec` is whatever items.py produced: a skill directory read by
+    skill_facts(), an md item from _scan_md_type(), or a plugin component
+    built on top of skill_facts(). All three carry name/description/path in
+    the same place, which is exactly what stopped being true when two readers
+    each invented their own record shape. Everything corpus-specific — the id,
+    the state, the parent — is the caller's, passed through."""
+    return _entry(group=group, name=rec["name"],
+                  description=clean_str(rec.get("description"), 300),
+                  path=rec.get("path"), **kw)
+
 def _yours_entries():
     """Your own items — never cached, recomputed on every call. Cheap (already
     done on every /api/state), and the whole point is that a skill created 30
@@ -327,12 +340,9 @@ def _yours_entries():
     out = []
     for type_, singular in _KIND_SINGULAR.items():
         for it in scan_items(type_):
-            out.append(_entry(
-                id=f"yours:{type_}:{it['name']}", kind=singular, group="yours",
-                name=it["name"],
-                description=clean_str(it.get("description"), 300),
+            out.append(_item_entry(
+                it, "yours", id=f"yours:{type_}:{it['name']}", kind=singular,
                 state="enabled" if it.get("enabled") else "disabled",
-                path=it.get("path"),
             ))
     return out
 
@@ -358,12 +368,10 @@ def _installed_entries():
             kind = _COMPONENT_KIND.get(c.get("kind"))
             if kind is None:
                 continue
-            out.append(_entry(
-                id=f"{pid}/{c['kind']}/{c['name']}", kind=kind,
-                group="installed", name=c["name"], parent=pid,
-                description=clean_str(c.get("description"), 300),
-                marketplace=p.get("marketplace"), state=p.get("state"),
-                installable=False, path=c.get("path"),
+            out.append(_item_entry(
+                c, "installed", id=f"{pid}/{c['kind']}/{c['name']}", kind=kind,
+                parent=pid, marketplace=p.get("marketplace"),
+                state=p.get("state"), installable=False,
             ))
     return out, st.get("error")
 

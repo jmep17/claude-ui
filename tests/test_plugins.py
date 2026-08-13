@@ -160,6 +160,34 @@ class TestScan(Base):
         self.assertTrue(c["adoptable"])
         self.assertIn("CLAUDE_PLUGIN_ROOT", c["warn"])
 
+    def test_skill_component_carries_the_full_facts_record(self):
+        """A plugin's skill is read by items.skill_facts(), the same reader the
+        inventory uses, so the merged tab can badge it with one function."""
+        self.skill("helper")
+        c = next(c for c in self.one()["components"] if c["kind"] == "skills")
+        for k in ("name", "description", "path", "symlink", "broken",
+                  "incomplete", "todo", "todo_line", "long_desc", "chars",
+                  "mtime", "name_mismatch", "source", "no_model_invoke"):
+            self.assertIn(k, c)
+        self.assertEqual(c["description"], "S")
+        self.assertFalse(c["incomplete"])
+        # nothing about your config dir: a plugin's skill has no side of
+        # disabled/ to be on
+        self.assertNotIn("enabled", c)
+
+    def test_skill_without_skill_md_is_incomplete(self):
+        write(self.plugin / "skills" / "bare" / "notes.md", "no frontmatter")
+        c = next(c for c in self.one()["components"] if c["name"] == "bare")
+        self.assertTrue(c["incomplete"])
+
+    def test_plugin_root_in_a_non_skill_md_file_still_warns(self):
+        """skill_facts() reads SKILL.md alone; the whole-tree walk that finds
+        this stays in plugins.py, and must not have been swallowed by it."""
+        root = self.skill("helper")
+        write(root / "refs" / "note.md", "see ${CLAUDE_PLUGIN_ROOT}/refs")
+        c = next(c for c in self.one()["components"] if c["name"] == "helper")
+        self.assertIn("CLAUDE_PLUGIN_ROOT", c["warn"])
+
     def test_conflict_is_reported_on_the_component(self):
         write(self.tmp / "agents" / "alpha.md", "MINE")
         c = next(c for c in self.one()["components"] if c["name"] == "alpha")

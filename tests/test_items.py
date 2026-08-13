@@ -168,6 +168,50 @@ class SkillFlags(Base):
         self.assertFalse(flags["open"])
 
 
+class SkillFactsShape(Base):
+    """skill_facts() is the one reader of a skill directory — items.py scans
+    with it and plugins.py decorates its result. Both record shapes used to be
+    written out by hand in two places, and drifted; this pins the key set so a
+    field added for one consumer cannot quietly go missing for the other."""
+
+    KEYS = {"name", "description", "path", "symlink", "broken", "incomplete",
+            "mtime", "chars", "todo", "todo_line", "source", "name_mismatch",
+            "long_desc", "no_model_invoke"}
+
+    def test_facts_keys(self):
+        self.write("skills/pdf/SKILL.md", "---\ndescription: d\n---\nhow\n")
+        facts = items.skill_facts(self.tmp / "skills" / "pdf")
+        self.assertEqual(set(facts), self.KEYS)
+        # deliberately absent: nothing about where the directory was found
+        self.assertNotIn("enabled", facts)
+
+    def test_scan_adds_only_enabled(self):
+        self.write("skills/pdf/SKILL.md", "---\ndescription: d\n---\nhow\n")
+        (it,) = items.scan_items("skills")
+        self.assertEqual(set(it), self.KEYS | {"enabled"})
+
+    def test_carries_every_key_its_consumers_read(self):
+        # context.py weighs items, doctor.py flags them, catalog.py indexes
+        # them — each reads these off a scan_items record by name
+        self.write("skills/pdf/SKILL.md", "---\ndescription: d\n---\nhow\n")
+        (it,) = items.scan_items("skills")
+        for k in ("name", "description", "path", "enabled", "chars", "broken",
+                  "incomplete", "todo", "todo_line", "long_desc",
+                  "name_mismatch"):
+            self.assertIn(k, it)
+
+    def test_skill_dirs_takes_dirs_and_links_not_files(self):
+        self.write("skills/pdf/SKILL.md", "x")
+        self.write("skills/.hidden/SKILL.md", "x")
+        self.write("skills/loose.md", "x")
+        (self.tmp / "skills" / "link").symlink_to(self.tmp / "skills" / "pdf")
+        self.assertEqual([e.name for e in items.skill_dirs(self.tmp / "skills")],
+                         ["link", "pdf"])
+
+    def test_skill_dirs_on_a_missing_root(self):
+        self.assertEqual(items.skill_dirs(self.tmp / "nope"), [])
+
+
 class Chars(Base):
     """Every scanned item reports its file size in chars — the Context tab
     weighs items with it, so it must track the bytes actually on disk."""
