@@ -264,12 +264,31 @@ def doctor():
     except Exception:
         cst = None
     if cst and cst["sessions"] and not cst["totals"]["all"]:
-        ids = ", ".join(cst["excluded_models"]) or "none recorded"
+        if cst["excluded_models"]:
+            why = ("no message matched a known Claude model (dropped model ids: "
+                   + ", ".join(cst["excluded_models"])
+                   + "); price them via 'pricing' in .claude-ui.json")
+        elif cst["nomodel"]:
+            why = (f"{cst['nomodel']} messages carried usage but no model id, "
+                   "so nothing could be priced against them")
+        elif not cst["usage_msgs"]:
+            why = "no message carried a usage block"
+        else:
+            why = "every message priced to zero"
         add("warn", "costs",
-            f"{cst['sessions']} transcripts read but nothing could be priced — "
-            f"no message matched a known Claude model (dropped model ids: {ids}); "
-            "price them via 'pricing' in .claude-ui.json",
+            f"{cst['sessions']} transcripts read but nothing could be priced — {why}",
             {"kind": "tab", "tab": "costs"})
+    # A Claude id priced at $0 by a `pricing` override is real spend going
+    # uncounted, whether or not the grand total reached zero.
+    for z in (cst or {}).get("zeroed_models") or []:
+        if z["override"] and ("claude" in z["model"].lower()
+                              or "anthropic" in z["model"].lower()):
+            add("warn", "costs",
+                f"{z['model']} is priced at $0 by the 'pricing' override "
+                f"\"{z['override']}\" in .claude-ui.json — its usage is missing "
+                "from every Costs total; override keys match as substrings, so "
+                "use the model's full id to narrow one",
+                {"kind": "tab", "tab": "costs"})
 
     order = {"warn": 0, "info": 1}
     finds.sort(key=lambda f: (order[f["level"]], f["area"]))

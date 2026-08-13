@@ -4053,7 +4053,19 @@ async function renderCosts(rescan) {
   // fix applies, so state it rather than guessing at a single cause.
   if (!c.totals.all) {
     let why;
-    if ((c.excluded_models || []).length) {
+    const zeroed = c.zeroed_models || [];
+    const byOv = zeroed.filter((z) => z.override);
+    if (byOv.length) {
+      const keys = [...new Set(byOv.map((z) => z.override))];
+      why = "Every model was priced at $0 by " + (keys.length === 1
+        ? "a <code>pricing</code> override in <b>.claude-ui.json</b>: <b>"
+        : "<code>pricing</code> overrides in <b>.claude-ui.json</b>: <b>")
+        + keys.map(esc).join(", ") + "</b>. Override keys match as substrings, so a "
+        + "short one zeroes every model id containing it — "
+        + esc(byOv[0].override) + " is being applied to <b>" + esc(byOv[0].model)
+        + "</b>. If it was meant only for a local model, make the key that model's "
+        + "full id, or remove it.";
+    } else if ((c.excluded_models || []).length) {
       why = "Dropped model ids: <b>" + c.excluded_models.map(esc).join(", ") + "</b> ("
         + c.dropped_msgs + " message" + (c.dropped_msgs === 1 ? "" : "s")
         + "). If these are Claude models behind a gateway or proxy alias, price them "
@@ -4120,6 +4132,19 @@ async function renderCosts(rescan) {
       c.by_project.map((p) =>
         `<td class="mono">${esc(p.cwd.replace(/^\/(home|Users)\/[^/]+/, "~"))}</td>`
         + `<td class="num">${usd(p.cost)}</td><td class="num dim">${p.msgs}</td>`)));
+  }
+
+  // A Claude id priced at $0 by a broad override is spend going uncounted; the
+  // local model it was meant for is not, so only warn about the family ids.
+  const zeroClaude = (c.zeroed_models || []).filter(
+    (z) => z.override && /claude|anthropic/i.test(z.model));
+  if (zeroClaude.length) {
+    view.append(el("div.alert.alert-warning", { style: { marginBottom: "1rem" } },
+      el("span.alert-icon", {}, icon("warn")),
+      el("div.alert-body", { text: "Priced at $0 by a 'pricing' override: "
+        + zeroClaude.map((z) => z.model + " (via \"" + z.override + "\")").join(", ")
+        + " — that usage is missing from every total here. Override keys match as "
+        + "substrings; use the model's full id to narrow one." })));
   }
 
   if ((c.excluded_models || []).length) {

@@ -559,6 +559,67 @@ class DroppedModelsAreReported(unittest.TestCase):
         self.assertAlmostEqual(r["totals"]["all"], 5.0, places=2)
 
 
+class ZeroPricingOverrides(unittest.TestCase):
+    """A [0, 0] override is how a local model is counted as free — but the keys
+    match as substrings, so a short one silently zeroes real Claude usage."""
+
+    def setUp(self):
+        self._real = insight.transcript_stats
+        self._cfg = insight.read_cfg
+        self.today = datetime.date.today().isoformat()
+
+    def tearDown(self):
+        insight.transcript_stats = self._real
+        insight.read_cfg = self._cfg
+
+    def stats(self, pricing, models=("claude-opus-5",)):
+        insight.read_cfg = lambda: {"pricing": pricing}
+        table = {self.today: {insight._rate_key(m, 1.0): row(tin=1_000_000, msgs=1)
+                              for m in models}}
+        insight.transcript_stats = lambda rescan=False: {
+            "days": table, "projects": {}, "sessions": 1, "dir": "d",
+            "available": True}
+        return insight.cost_stats()
+
+    def test_broad_key_zeroes_real_usage_and_is_named(self):
+        r = self.stats({"opus": [0, 0]})
+        self.assertEqual(r["totals"]["all"], 0)
+        self.assertEqual(r["zeroed_models"],
+                         [{"model": "claude-opus-5", "override": "opus"}])
+
+    def test_nothing_reported_when_prices_are_real(self):
+        self.assertEqual(self.stats({})["zeroed_models"], [])
+
+    def test_local_model_alone_does_not_flag_the_claude_ones(self):
+        r = self.stats({"my-local-llama": [0, 0]},
+                       models=("claude-opus-5", "my-local-llama"))
+        self.assertAlmostEqual(r["totals"]["all"], 5.0, places=2)
+        self.assertEqual([z["model"] for z in r["zeroed_models"]], ["my-local-llama"])
+
+    def test_exact_key_beats_a_broader_one(self):
+        """Regression: which override won used to depend on JSON key order."""
+        for pricing in ({"opus": [0, 0], "claude-opus-5": [5, 25]},
+                        {"claude-opus-5": [5, 25], "opus": [0, 0]}):
+            r = self.stats(pricing)
+            self.assertAlmostEqual(r["totals"]["all"], 5.0, places=2, msg=str(pricing))
+            self.assertEqual(r["zeroed_models"], [], str(pricing))
+
+    def test_longest_key_wins_when_neither_is_exact(self):
+        self.assertEqual(
+            insight._override_match({"opus": [1, 2], "claude-opus": [3, 4]},
+                                    "claude-opus-5-20260101"),
+            ("claude-opus", 3.0, 4.0))
+
+    def test_diagnostics_names_the_override_that_zeroed_it(self):
+        insight.read_cfg = lambda: {"pricing": {"opus": [0, 0]}}
+        insight.transcript_stats = lambda rescan=False: {
+            "days": {self.today: {insight._rate_key("claude-opus-5", 1.0): row(msgs=1)}},
+            "projects": {}, "sessions": 1, "dir": "d", "available": True}
+        m = insight.cost_diagnostics()["models"][0]
+        self.assertEqual(m["verdict"], "zero-priced")
+        self.assertIn('"opus"', m["note"])
+
+
 class UsageWithoutAModelId(FixedZone):
     """Usage that names no model is dropped at scan time, before pricing ever
     sees it — so the scan has to count it or the tab can't say where it went."""

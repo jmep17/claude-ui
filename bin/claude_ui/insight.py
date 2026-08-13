@@ -398,9 +398,19 @@ def cost_diagnostics(rescan=False):
                                              "override matches it")
         else:
             pin, pout, known = model_price(name, today, overrides)
-            verdict = "priced" if known else "estimated"
-            note = (f"${pin}/${pout} per Mtok" if known
-                    else f"no list price — guessed at ${pin}/${pout} per Mtok")
+            hit = _override_match(overrides, name)
+            src = (f" from your 'pricing' override \"{hit[0]}\"" if hit
+                   else " from the built-in price table")
+            if not pin and not pout:
+                # Priced, but at nothing — the one verdict that looks like
+                # success and reads like a bug on the tab.
+                verdict = "zero-priced"
+                note = (f"$0/$0 per Mtok{src} — this model's usage counts as free"
+                        if hit else "$0/$0 per Mtok — no rate to charge")
+            else:
+                verdict = "priced" if known else "estimated"
+                note = (f"${pin}/${pout} per Mtok{src}" if known
+                        else f"no list price — guessed at ${pin}/${pout} per Mtok")
         models.append({**c, "days": len(c["days"]), "verdict": verdict,
                        "note": note})
     models.sort(key=lambda m: -m["msgs"])
@@ -450,24 +460,41 @@ PRICING = [
     ("sonnet", 3, 15),
 ]
 
-def _override_price(overrides, model):
-    """(input, output) from a matching `pricing` override, else None.
+def _override_match(overrides, model):
+    """(key, input, output) for the `pricing` override that wins, else None.
 
     One place decides what counts as a usable override, so `_excluded` can't opt a
     model into the totals that `model_price` then declines to price — a malformed
     entry like {"llama": 3} used to do exactly that, admitting a local model and
     then billing it at the opus-tier guess.
+
+    Keys match as substrings, so more than one can apply. The most specific wins:
+    an exact id first, then the longest key — not whichever the JSON happened to
+    list first, which made {"opus": [0, 0], "claude-opus-5": [5, 25]} depend on
+    file order. The winning key is returned because a $0 total is usually one
+    broad override, and the tab can only say so if it knows which.
     """
     if not isinstance(overrides, dict):
         return None
     m = (model or "").lower()
+    best = None
     for sub, v in overrides.items():
-        if str(sub).lower() in m and isinstance(v, (list, tuple)) and len(v) == 2:
-            try:
-                return float(v[0]), float(v[1])
-            except (TypeError, ValueError):
-                continue
-    return None
+        k = str(sub).lower()
+        if k not in m or not (isinstance(v, (list, tuple)) and len(v) == 2):
+            continue
+        try:
+            pin, pout = float(v[0]), float(v[1])
+        except (TypeError, ValueError):
+            continue
+        rank = (k == m, len(k))
+        if best is None or rank > best[0]:
+            best = (rank, (str(sub), pin, pout))
+    return best[1] if best else None
+
+def _override_price(overrides, model):
+    """(input, output) from a matching `pricing` override, else None."""
+    hit = _override_match(overrides, model)
+    return (hit[1], hit[2]) if hit else None
 
 def model_price(model, day, overrides=None):
     """(input, output, known) $/Mtok for a model on a given local day."""
@@ -537,6 +564,11 @@ def cost_stats(rescan=False):
     # loop below re-walks the same rows and would double-count.
     excluded = set()
     dropped_msgs = 0
+    # A `pricing` override of [0, 0] prices real usage at nothing. That is the
+    # point for a local model, but the keys match as substrings, so a short one
+    # ("opus") silently zeroes every Claude id it appears in. Record model -> the
+    # override key responsible, so a $0 screen can name the cause.
+    zeroed = {}
     # Read once: the overrides are consulted for every (day, model, rate) row, and
     # re-reading mid-computation could price two days off different config.
     overrides = read_cfg().get("pricing")
@@ -556,6 +588,9 @@ def cost_stats(rescan=False):
             pin, pout, known = model_price(model, day, overrides)
             if not known:
                 unknown.add(model)
+            if not pin and not pout:
+                hit = _override_match(overrides, model)
+                zeroed[model] = hit[0] if hit else ""
             c = _row_cost(row, pin, pout, mult)
             drow["cost"] += c
             # One model can appear at more than one rate on the same day, so
@@ -615,5 +650,7 @@ def cost_stats(rescan=False):
             # Measured, not inferred: the zero-state alert states which of these
             # is actually true rather than guessing at a cause.
             "usage_msgs": st.get("usage_msgs", 0), "nomodel": st.get("nomodel", 0),
+            "zeroed_models": [{"model": m, "override": k}
+                              for m, k in sorted(zeroed.items())],
             "sessions": st["sessions"], "dir": st["dir"],
             "available": st["available"]}
