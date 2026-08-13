@@ -559,6 +559,101 @@ class DroppedModelsAreReported(unittest.TestCase):
         self.assertAlmostEqual(r["totals"]["all"], 5.0, places=2)
 
 
+class UsageWithoutAModelId(FixedZone):
+    """Usage that names no model is dropped at scan time, before pricing ever
+    sees it — so the scan has to count it or the tab can't say where it went."""
+
+    def scan(self, lines):
+        fd, path = tempfile.mkstemp(suffix=".jsonl")
+        os.close(fd)
+        with open(path, "w") as fh:
+            for obj in lines:
+                fh.write(json.dumps(obj) + "\n")
+        try:
+            return insight._scan_transcript(path)
+        finally:
+            os.unlink(path)
+
+    def test_counted_and_not_priced(self):
+        d = self.scan([
+            {"timestamp": "2026-07-30T11:25:27.932Z", "uuid": "u1",
+             "message": {"id": "m1", "usage": {"input_tokens": 100,
+                                               "output_tokens": 10}}},
+            {"timestamp": "2026-07-30T11:26:27.932Z", "uuid": "u2",
+             "message": {"id": "m2", "model": "claude-opus-5",
+                         "usage": {"input_tokens": 100, "output_tokens": 10}}},
+        ])
+        self.assertEqual(d["nomodel"], 1)
+        self.assertEqual(len(d["msgs"]), 1)   # only the one with a model id
+
+    def test_zero_when_every_message_names_its_model(self):
+        d = self.scan([
+            {"timestamp": "2026-07-30T11:25:27.932Z", "uuid": "u1",
+             "message": {"id": "m1", "model": "claude-opus-5",
+                         "usage": {"input_tokens": 100, "output_tokens": 10}}},
+        ])
+        self.assertEqual(d["nomodel"], 0)
+
+
+class Diagnostics(unittest.TestCase):
+    """The Costs tab's built-in census: what the pricer saw and what it decided."""
+
+    def setUp(self):
+        self._real = insight.transcript_stats
+        self._cfg = insight.read_cfg
+        insight.read_cfg = lambda: {"pricing": {"gateway": [3, 15],
+                                                "broken": 7}}
+        today = datetime.date.today().isoformat()
+        table = {today: {
+            insight._rate_key("claude-opus-5", 1.0): row(tin=1_000_000, msgs=2),
+            insight._rate_key("internal-alias", 1.0): row(tin=500, msgs=3),
+            insight._rate_key("gateway-sonnet", 1.0): row(tin=500, msgs=1),
+            insight._rate_key("claude-brand-new-9", 1.0): row(tin=500, msgs=1),
+        }}
+        insight.transcript_stats = lambda rescan=False: {
+            "days": table, "projects": {}, "sessions": 5, "dir": "d",
+            "available": True, "usage_msgs": 7, "nomodel": 4,
+            "bytes": 2048, "oversize": 1}
+
+    def tearDown(self):
+        insight.transcript_stats = self._real
+        insight.read_cfg = self._cfg
+
+    def verdicts(self):
+        return {m["model"]: m["verdict"] for m in insight.cost_diagnostics()["models"]}
+
+    def test_each_model_gets_a_verdict(self):
+        self.assertEqual(self.verdicts(), {
+            "claude-opus-5": "priced",
+            "claude-brand-new-9": "estimated",   # in-family, no list price
+            "gateway-sonnet": "priced",          # opted in by a valid override
+            "internal-alias": "dropped",
+        })
+
+    def test_scan_time_losses_are_reported(self):
+        d = insight.cost_diagnostics()
+        self.assertEqual(d["nomodel"], 4)
+        self.assertEqual(d["usage_msgs"], 7)
+        self.assertEqual(d["oversize"], 1)
+
+    def test_models_are_ordered_by_message_count(self):
+        d = insight.cost_diagnostics()
+        self.assertEqual([m["msgs"] for m in d["models"]],
+                         sorted((m["msgs"] for m in d["models"]), reverse=True))
+
+    def test_malformed_override_is_flagged_unusable(self):
+        ov = {o["key"]: o["ok"] for o in insight.cost_diagnostics()["overrides"]}
+        self.assertEqual(ov, {"gateway": True, "broken": False})
+
+    def test_synthetic_is_named_as_a_placeholder_not_a_gap(self):
+        insight.transcript_stats = lambda rescan=False: {
+            "days": {"2026-07-30": {insight._rate_key("<synthetic>", 1.0): row(msgs=9)}},
+            "projects": {}, "sessions": 1, "dir": "d", "available": True}
+        m = insight.cost_diagnostics()["models"][0]
+        self.assertEqual(m["verdict"], "dropped")
+        self.assertIn("never billed", m["note"])
+
+
 class AnthropicFamilyIsNotExcluded(unittest.TestCase):
     def test_family_ids_pass(self):
         for model in ("claude-opus-5", "us.anthropic.claude-sonnet-4-5-v1:0",

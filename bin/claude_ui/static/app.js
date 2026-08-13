@@ -4049,22 +4049,36 @@ async function renderCosts(rescan) {
   }
 
   // Transcripts exist but nothing priced: a grid of $0.000 is the symptom, not
-  // the story. Say which model ids were dropped and how to price them.
+  // the story. Say what was measured — where the usage was lost decides which
+  // fix applies, so state it rather than guessing at a single cause.
   if (!c.totals.all) {
+    let why;
+    if ((c.excluded_models || []).length) {
+      why = "Dropped model ids: <b>" + c.excluded_models.map(esc).join(", ") + "</b> ("
+        + c.dropped_msgs + " message" + (c.dropped_msgs === 1 ? "" : "s")
+        + "). If these are Claude models behind a gateway or proxy alias, price them "
+        + "with the <code>pricing</code> key in <b>.claude-ui.json</b>, e.g. "
+        + "<code>{\"pricing\": {\"" + esc(c.excluded_models[0])
+        + "\": [3, 15]}}</code> — input and output dollars per million tokens.";
+    } else if (c.nomodel) {
+      why = c.nomodel + " message" + (c.nomodel === 1 ? "" : "s")
+        + " carried token usage but no <code>message.model</code> id, so there is nothing "
+        + "to price them against. That usually means a proxy or gateway is stripping the "
+        + "model from the response before Claude Code records it.";
+    } else if (!c.usage_msgs) {
+      why = "No message in those transcripts carried a <code>usage</code> block at all, so "
+        + "there are no tokens to price.";
+    } else {
+      why = c.usage_msgs + " usage messages were read and all priced to zero.";
+    }
     view.append(el("div.alert.alert-warning", { style: { marginBottom: "1rem" } },
       el("span.alert-icon", {}, icon("warn")),
       el("div.alert-body", {
         html: "Read " + c.sessions + " transcript" + (c.sessions === 1 ? "" : "s")
-          + ", but no message matched a known Claude model, so nothing could be priced."
-          + ((c.excluded_models || []).length
-            ? " Dropped model ids: <b>" + c.excluded_models.map(esc).join(", ") + "</b> ("
-              + c.dropped_msgs + " message" + (c.dropped_msgs === 1 ? "" : "s") + ")."
-              + " If these are Claude models behind a gateway or proxy alias, price them "
-              + "with the <code>pricing</code> key in <b>.claude-ui.json</b>, e.g. "
-              + "<code>{\"pricing\": {\"" + esc(c.excluded_models[0])
-              + "\": [3, 15]}}</code> — input and output dollars per million tokens."
-            : " No model ids were recorded on the messages that carried usage."),
+          + ", but nothing could be priced. " + why
+          + " Run the diagnostics below for the full model-id census.",
       })));
+    view.append(costsDiagToolbar());
     return;
   }
 
@@ -4126,7 +4140,90 @@ async function renderCosts(rescan) {
 
   const rb = mkbtn("btn-sm", "Rescan transcripts", () => renderCosts(true));
   rb.prepend(icon("refresh"));
-  view.append(el("div.toolbar", {}, rb));
+  view.append(el("div.toolbar", {}, rb, costsDiagBtn()));
+  view.append(el("div", { id: "costsdiag" }));
+}
+
+// Why this machine's numbers came out the way they did: every model id the
+// pricer saw, its verdict, and the counters that say whether usage was lost at
+// scan time or at pricing time. Built in rather than shipped as a script,
+// because the machine that shows $0 is usually not the one you can log into.
+function costsDiagBtn() {
+  const b = mkbtn("btn-sm", "Diagnostics", () => renderCostsDiag());
+  b.prepend(icon("search"));
+  return b;
+}
+
+function costsDiagToolbar() {
+  return el("div", {}, el("div.toolbar", {}, costsDiagBtn()),
+    el("div", { id: "costsdiag" }));
+}
+
+async function renderCostsDiag() {
+  const box = document.getElementById("costsdiag");
+  if (!box) return;
+  box.innerHTML = "";
+  box.append(el("div.muted", { style: { fontSize: ".8125rem" },
+    text: "Taking a census of the model ids in your transcripts…" }));
+  let d;
+  try { d = await api("/api/costs/diagnose"); }
+  catch (e) {
+    box.innerHTML = "";
+    box.append(el("div.alert.alert-destructive", {},
+      el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
+    return;
+  }
+  box.innerHTML = "";
+  box.append(sectionTitle("Cost diagnostics", d.models.length));
+
+  const mb = (n) => (n < 1024 ? n + " B"
+    : n < 1048576 ? (n / 1024).toFixed(1) + " KB"
+      : (n / 1048576).toFixed(1) + " MB");
+  const facts = [
+    ["Transcripts directory", d.dir + (d.available ? "" : " — MISSING")],
+    ["Transcripts", d.transcripts + (d.transcripts === 1 ? " file, " : " files, ")
+      + mb(d.bytes)
+      + (d.oversize ? " (" + d.oversize + " skipped, over " + mb(d.max_transcript)
+        + " each)" : "")],
+    ["Usage messages", String(d.usage_msgs)],
+    ["Usage with no model id", d.nomodel + (d.nomodel ? " — cannot be priced" : "")],
+    ["Active days", String(d.days)],
+    ["Scan cache", d.cache.path + (d.cache.exists
+      ? " (v" + d.cache.version + ", " + mb(d.cache.size) + ", " + d.cache.mtime + ")"
+      : " — not written yet")],
+  ];
+  box.append(dataTable(["Check", "Value"], facts.map(([k, v]) =>
+    `<td>${esc(k)}</td><td class="mono">${esc(v)}</td>`)));
+
+  box.append(dataTable(["Model id seen", "Msgs", "Input", "Output", "Days", "Verdict"],
+    d.models.length
+      ? d.models.map((m) =>
+        `<td class="mono">${esc(m.model)}</td><td class="num">${m.msgs}</td>`
+        + `<td class="num dim">${tokfmt(m.in)}</td><td class="num dim">${tokfmt(m.out)}</td>`
+        + `<td class="num dim">${m.days}</td>`
+        + `<td>${esc(m.verdict.toUpperCase())} <span class="dim">— ${esc(m.note)}</span></td>`)
+      : [`<td colspan="6" class="dim">No model ids recorded in any transcript.</td>`]));
+
+  box.append(sectionTitle("Pricing overrides", d.overrides.length));
+  box.append(dataTable(["Key (matched as a substring)", "Value", "Usable"],
+    d.overrides.length
+      ? d.overrides.map((o) =>
+        `<td class="mono">${esc(o.key)}</td><td class="mono">${esc(JSON.stringify(o.value))}</td>`
+        + `<td>${o.ok ? "yes" : "NO — needs [input, output] numbers"}</td>`)
+      : [`<td colspan="3" class="dim">None set in .claude-ui.json.</td>`]));
+
+  const txt = ["claude-ui cost diagnostics", ...facts.map(([k, v]) => k + ": " + v),
+    "", "model ids seen:",
+    ...(d.models.length ? d.models.map((m) =>
+      `  ${m.msgs} msgs  ${m.model}  ${m.verdict.toUpperCase()} (${m.note})`)
+      : ["  (none)"]),
+    "", "pricing overrides:",
+    ...(d.overrides.length ? d.overrides.map((o) =>
+      `  ${o.key} = ${JSON.stringify(o.value)} ${o.ok ? "ok" : "UNUSABLE"}`)
+      : ["  (none)"])].join("\n");
+  const cb = mkbtn("btn-sm", "Copy report", () => copyText(txt, "diagnostics"));
+  cb.prepend(icon("copy"));
+  box.append(el("div.toolbar", {}, cb));
 }
 
 // ------------------------------------------------------------------ doctor

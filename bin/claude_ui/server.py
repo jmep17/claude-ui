@@ -43,7 +43,7 @@ from .settings import (hook_test, settings_schema, settings_set, settings_state,
                        start_docs_fetch, suggest_state)
 from .statusline import statusline_save, statusline_state
 from .setup import setup_apply, setup_config, setup_remove, setup_state
-from .insight import cost_stats, usage_stats
+from .insight import cost_diagnostics, cost_stats, usage_stats
 from .context import context_state
 from .assist import assist
 from .doctor import doctor
@@ -208,6 +208,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, {"usage": usage_stats(rescan=rescan),
                             "allow": (settings_state()["data"]
                                       .get("permissions", {}) or {}).get("allow", [])})
+        elif self.path.startswith("/api/costs/diagnose"):
+            self.send(200, cost_diagnostics(rescan="rescan" in self.path))
         elif self.path.startswith("/api/costs"):
             self.send(200, cost_stats(rescan="rescan" in self.path))
         elif self.path.startswith("/api/context"):

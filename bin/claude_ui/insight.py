@@ -19,7 +19,7 @@ USAGE_CACHE = Path.home() / ".cache" / "claude-ui-usage.json"
 
 # Bump whenever the shape or meaning of the cached per-file data changes, so
 # stale entries are re-scanned instead of being mixed with the current format.
-CACHE_V = 6
+CACHE_V = 7
 
 def projects_dir():
     """Transcripts live under the resolved config dir, not always ~/.claude."""
@@ -159,10 +159,14 @@ def _bash_prefix(cmd):
     return head
 
 def _scan_transcript(path):
-    """One transcript -> {counts, msgs, bash, cwd, sess}."""
+    """One transcript -> {counts, msgs, bash, cwd, sess, nomodel}."""
     counts = {}   # "kind\tname" -> [count, last_iso_ts]
     msgs = {}     # dedup key -> [local day, model, in, out, cacheW5m, cacheW1h, cacheR]
     bash = {}     # prefix -> count
+    # Usage this scan had to throw away because the message carried no model id.
+    # Nothing downstream can price or even name it, so count it here or the
+    # Costs tab has no way to say why its total is short.
+    nomodel = 0
     cwd = ""
     first_ts = ""
     last_ts = ""
@@ -199,6 +203,8 @@ def _scan_transcript(path):
                     cwd = d["cwd"]
                 msg = d.get("message") or {}
                 usage = msg.get("usage")
+                if isinstance(usage, dict) and not msg.get("model"):
+                    nomodel += 1
                 if isinstance(usage, dict) and msg.get("model"):
                     # cache_creation splits the write total by TTL, which matters
                     # because a 1-hour write costs 2x base and a 5-minute one
@@ -255,7 +261,8 @@ def _scan_transcript(path):
                         if p:
                             bash[p] = bash.get(p, 0) + 1
     except OSError:
-        return {"counts": {}, "msgs": {}, "bash": {}, "cwd": "", "sess": None}
+        return {"counts": {}, "msgs": {}, "bash": {}, "cwd": "", "sess": None,
+                "nomodel": 0}
     # Per-session summary for the Context tab. `first` is the first
     # usage-bearing message's [input, cache writes, cache reads] — read from
     # msgs after the streaming max-merge above, so a partial early line does
@@ -270,7 +277,7 @@ def _scan_transcript(path):
                 "max_cr": max(e[c + R_CR] for e in msgs.values()),
                 "first_ts": first_ts, "last_ts": last_ts, "model": f[1]}
     return {"counts": counts, "msgs": msgs, "bash": bash, "cwd": cwd,
-            "sess": sess}
+            "sess": sess, "nomodel": nomodel}
 
 def transcript_stats(rescan=False):
     """Aggregate usage/cost/bash data across all transcripts, incrementally
@@ -287,6 +294,8 @@ def transcript_stats(rescan=False):
     files = cache.get("files") or {}
     seen = set()
     scanned = 0
+    nbytes = 0
+    oversize = 0
     pdir = projects_dir()
     if pdir.is_dir():
         for p in pdir.rglob("*.jsonl"):
@@ -294,7 +303,9 @@ def transcript_stats(rescan=False):
                 st = p.stat()
             except OSError:
                 continue
+            nbytes += st.st_size
             if st.st_size > MAX_TRANSCRIPT:
+                oversize += 1
                 continue
             key = str(p)
             seen.add(key)
@@ -318,8 +329,12 @@ def transcript_stats(rescan=False):
     projects = {}
     session_rows = []
     seen_msgs = set()
+    nomodel = 0
     for key in sorted(files):   # sorted so a cross-file duplicate resolves the same way every run
         data = files[key].get("data") or {}
+        # Not deduped: an entry with no model id has no dedup key worth trusting.
+        # It's a diagnostic count, not an input to any total.
+        nomodel += data.get("nomodel") or 0
         session_rows.append({"path": key, "cwd": data.get("cwd") or "",
                              "sess": data.get("sess"),
                              "msgs": len(data.get("msgs") or {})})
@@ -347,8 +362,70 @@ def transcript_stats(rescan=False):
             bash[prefix] = bash.get(prefix, 0) + n
     return {"sessions": len(files), "scanned_now": scanned, "by": by,
             "days": days, "bash": bash, "projects": projects,
-            "session_rows": session_rows,
+            "session_rows": session_rows, "usage_msgs": len(seen_msgs),
+            "nomodel": nomodel, "bytes": nbytes, "oversize": oversize,
             "dir": tilde(pdir), "available": pdir.is_dir()}
+
+def cost_diagnostics(rescan=False):
+    """Why the Costs tab shows what it shows, on this machine.
+
+    A census of every model id the pricer actually sees, with the verdict it
+    reaches on each, plus the counts that say whether a shortfall happened at
+    scan time (no model id on the message) or at pricing time (an id nothing
+    recognises). Read-only, and derived from the same cached scan the tab uses,
+    so it reports what the tab really did rather than a second opinion.
+    """
+    st = transcript_stats(rescan)
+    overrides = read_cfg().get("pricing")
+    today = datetime.date.today().isoformat()
+    census = {}
+    for day, rows in st["days"].items():
+        for rkey, row in rows.items():
+            model, _ = _split_rate_key(rkey)
+            c = census.setdefault(model or "(no model id)",
+                                  {"model": model or "(no model id)", "msgs": 0,
+                                   "in": 0, "out": 0, "days": set()})
+            c["msgs"] += row[R_MSGS]
+            c["in"] += row[R_IN]
+            c["out"] += row[R_OUT]
+            c["days"].add(day)
+    models = []
+    for name, c in census.items():
+        if _excluded(name, overrides):
+            verdict, note = "dropped", ("known placeholder, never billed"
+                                        if name == "<synthetic>"
+                                        else "not a Claude id and no 'pricing' "
+                                             "override matches it")
+        else:
+            pin, pout, known = model_price(name, today, overrides)
+            verdict = "priced" if known else "estimated"
+            note = (f"${pin}/${pout} per Mtok" if known
+                    else f"no list price — guessed at ${pin}/${pout} per Mtok")
+        models.append({**c, "days": len(c["days"]), "verdict": verdict,
+                       "note": note})
+    models.sort(key=lambda m: -m["msgs"])
+    ov = []
+    if isinstance(overrides, dict):
+        for k, v in overrides.items():
+            ov.append({"key": str(k),
+                       "ok": _override_price({k: v}, str(k)) is not None,
+                       "value": v if isinstance(v, (list, str, int, float))
+                                else str(v)})
+    cache = {"path": tilde(USAGE_CACHE), "exists": USAGE_CACHE.is_file(),
+             "version": CACHE_V}
+    try:
+        cache["size"] = USAGE_CACHE.stat().st_size
+        cache["mtime"] = time.strftime("%Y-%m-%d %H:%M",
+                                       time.localtime(USAGE_CACHE.stat().st_mtime))
+    except OSError:
+        cache["size"], cache["mtime"] = 0, ""
+    return {"dir": st["dir"], "available": st["available"],
+            "transcripts": st["sessions"], "bytes": st.get("bytes", 0),
+            "oversize": st.get("oversize", 0),
+            "usage_msgs": st.get("usage_msgs", 0),
+            "nomodel": st.get("nomodel", 0),
+            "days": len(st["days"]), "models": models, "overrides": ov,
+            "cache": cache, "max_transcript": MAX_TRANSCRIPT}
 
 def usage_stats(rescan=False):
     # The insight tab wants the item/bash counters, not the cost aggregates — and
@@ -535,5 +612,8 @@ def cost_stats(rescan=False):
             "cache_savings": round(cache_savings, 2),
             "unknown_models": sorted(unknown),
             "excluded_models": sorted(excluded), "dropped_msgs": dropped_msgs,
+            # Measured, not inferred: the zero-state alert states which of these
+            # is actually true rather than guessing at a cause.
+            "usage_msgs": st.get("usage_msgs", 0), "nomodel": st.get("nomodel", 0),
             "sessions": st["sessions"], "dir": st["dir"],
             "available": st["available"]}
