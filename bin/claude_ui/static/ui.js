@@ -606,6 +606,33 @@ const noMatches = (q) =>
 
 const badge = (text, variant) => el("span.badge", { class: "badge-" + (variant || "secondary"), text });
 
+/* The "this view could not load" block, written out by hand in a dozen views.
+   A title is optional: most of these carry a server message that is already a
+   sentence, and a heading above it would only repeat it. */
+function errorAlert(msg, title) {
+  return el("div.alert.alert-destructive", {},
+    el("span.alert-icon", {}, icon("error")),
+    title
+      ? el("div.alert-body", {},
+          el("div.alert-title", { text: title }),
+          el("div", { text: msg }))
+      : el("div.alert-body", { text: msg }));
+}
+
+/* A row of buttons where exactly one is current — the Skills tab's segments,
+   and the Doctor's all/warnings/notes filter, which is why this is here rather
+   than beside either of them. `items` are {key, label, title} or plain
+   strings; `pick` gets the key. */
+function segmented(items, current, pick) {
+  const box = el("div.seg");
+  for (const it of items) {
+    const o = typeof it === "string" ? { key: it, label: it } : it;
+    box.append(mkbtn("btn-sm" + (o.key === current ? " on" : ""),
+                     o.label, () => pick(o.key), o.title));
+  }
+  return box;
+}
+
 /* "1 file", "2 files". Counts were written three ways — bare plurals that read
    "1 files", "file(s)", and hand-written ternaries. */
 const plural = (n, word) => n + " " + word + (n === 1 ? "" : "s");

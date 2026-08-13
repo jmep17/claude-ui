@@ -414,12 +414,12 @@ main {
   .sctrl { width: 100%; justify-content: flex-start; }
 }
 
-/* ---------------------------------------------- plugin detail (models, env)
-   An expanded plugin card. Lives inside .list-item, which wraps, so the panel
-   claims a full row of its own below the plugin's name and buttons. A skill
-   row's expanded settings panel is the same shape and shares this rule. */
-.plugin-detail,
-.item-detail {
+/* ------------------------------------------------ detail panel (models, env)
+   An expanded row's panel — a plugin's agents and env, a skill's env. Lives
+   inside .list-item, which wraps, so the panel claims a full row of its own
+   below the name and buttons. One class: the two were styled identically by
+   two selectors on the same rule, which is a rename waiting to go wrong. */
+.detail-panel {
   flex: 1 1 100%;
   margin-top: 0.5rem;
   padding: 0.625rem 0.75rem 0.75rem;

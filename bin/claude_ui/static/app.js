@@ -317,6 +317,74 @@ const opt = (v, label) => el("option", { value: v, text: label == null ? v : lab
 const mkbtn = (cls, label, onclick, title) =>
   el("button.btn", { class: cls, text: label, onclick, title: title || "" });
 
+/* --------------------------------------------------- the two shared shapes --
+
+   Nine views fetch a payload once, keep it in a module global, and redraw from
+   it; nine actions write, toast, and redraw. Both were written out longhand
+   every time, and the copies had already drifted — a missing stale-tab guard
+   here, a skeleton on a reload that flickers there. */
+
+/* Fetch-once-then-render. Returns false when the caller should stop: the fetch
+   failed, or you switched away while it was in flight and the answer is for a
+   view no longer on screen.
+
+   Two per-view quirks are kept rather than normalised. A view with a `note`
+   (the ones whose fetch scans transcripts) shows its busy state on every load,
+   because a rescan you asked for should look like it is running; one without
+   shows it only on a cold load, where there is nothing on screen to replace.
+   And `errorAsPayload` is renderDiscover's: it renders its consent card even
+   when the index failed, so the failure has to arrive as data rather than as
+   an alert that returns. */
+async function cached({ view, get, set, url, reload, alive, note, skeleton = 3,
+                        errorAsPayload }) {
+  if (get() && !reload) return true;
+  const node = document.getElementById(view);
+  if (note || !get()) {
+    node.innerHTML = "";
+    if (note)
+      node.append(el("div.muted", {
+        style: { marginBottom: ".75rem", fontSize: ".8125rem" }, text: note }));
+    if (skeleton) node.append(skeletonList(skeleton));
+  }
+  try {
+    set(await api(url));
+  } catch (e) {
+    if (!errorAsPayload) {
+      node.innerHTML = "";
+      node.append(errorAlert(e.message));
+      return false;
+    }
+    set({ error: e.message });
+  }
+  return alive ? alive() : true;
+}
+
+/* Write, say what happened, redraw. `msg` is the success wording — the
+   "· applies to new sessions" tail included, verbatim, because it is what
+   tells you the change is not retroactive. A function instead gets the
+   response and returns {text, err}, for the calls whose result reports its own
+   outcome (the plugin CLI's last line, an installer's detail) better than we
+   could guess. `then` replaces the default full refresh(). */
+async function act(url, body, msg, opts = {}) {
+  const t = opts.busy
+    ? toast({ title: opts.busy, variant: "loading", duration: 0 }) : null;
+  try {
+    const res = await api("/api/" + url, body);
+    if (t) t.close();
+    const say = typeof msg === "function" ? msg(res) : { text: msg };
+    const undo = (say && say.undo) || opts.undo || null;
+    if (say && say.text)
+      toast(say.text, !!say.err, say.err ? null : undo);
+    if (opts.then) await opts.then(res);
+    else await refresh();
+    return res;
+  } catch (e) {
+    if (t) t.close();
+    toast(e.message, true);
+    return null;
+  }
+}
+
 let DL_SEQ = 0;
 function datalist(values) {
   const dl = el("datalist", { id: "dl_" + (++DL_SEQ) });
@@ -1149,20 +1217,18 @@ const pluralKind = (k, n) =>
 const countLine = (p) =>
   Object.entries(p.counts).map(([k, n]) => pluralKind(k, n)).join(" · ");
 
+/* What every write on the Plugins tab redraws: /api/state for the inventory
+   and settings.json, then the plugin tree itself. */
+const reloadPlugins = async () => { await refresh(); renderPlugins(true); };
+
 async function renderPlugins(reload) {
   const view = document.getElementById("pluginsview");
-  if (!PLUGINS || reload) {
-    if (!PLUGINS) { view.innerHTML = ""; view.append(skeletonList(3)); }
-    PDETAIL = {};
-    try { PLUGINS = await api("/api/plugins"); }
-    catch (e) {
-      view.innerHTML = "";
-      view.append(el("div.alert.alert-destructive", {},
-        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
-      return;
-    }
-    if (TAB !== "plugins") return;
-  }
+  // a rescan re-reads the plugin tree, so the per-plugin detail cached from
+  // the old one is stale by definition
+  if (!PLUGINS || reload) PDETAIL = {};
+  if (!await cached({ view: "pluginsview", url: "/api/plugins", reload,
+                      get: () => PLUGINS, set: (v) => { PLUGINS = v; },
+                      alive: () => TAB === "plugins" })) return;
   view.innerHTML = "";
   view.append(el("div.view-head", {
     html: "Plugins on disk under <b>" + esc(PLUGINS.root) + "</b>, as set in <b>settings.json</b>. "
@@ -1173,13 +1239,8 @@ async function renderPlugins(reload) {
   view.append(subagentModelBar());
   view.append(userRegistryCard());
 
-  if (PLUGINS.error) {
-    view.append(el("div.alert.alert-destructive", {},
-      el("span.alert-icon", {}, icon("error")),
-      el("div.alert-body", {},
-        el("div.alert-title", { text: "Could not read the plugin config" }),
-        el("div", { text: PLUGINS.error }))));
-  }
+  if (PLUGINS.error)
+    view.append(errorAlert(PLUGINS.error, "Could not read the plugin config"));
 
   const all = PLUGINS.plugins;
   const q = PQ.trim().toLowerCase();
@@ -1355,18 +1416,17 @@ async function userRegistryLoad() {
 }
 
 async function userRegistryRun(action, body, msg) {
-  const t = toast({ title: "Running claude plugin…", variant: "loading", duration: 0 });
-  try {
-    const r = await api("/api/" + action, body);
-    t.close();
-    // the CLI's own last line, not our guess at what it did
-    toast(r.ok ? msg + " · " + r.detail : r.detail, !r.ok);
-    UREG = null;
-    await userRegistryLoad();
-    // the tree changed under the inventory below, and settings.json with it
-    await refresh();
-    renderPlugins(true);
-  } catch (e) { t.close(); toast(e.message, true); }
+  // the CLI's own last line, not our guess at what it did
+  await act(action, body, (r) => ({ text: r.ok ? msg + " · " + r.detail : r.detail,
+                                    err: !r.ok }),
+    { busy: "Running claude plugin…",
+      then: async () => {
+        UREG = null;
+        await userRegistryLoad();
+        // the tree changed under the inventory below, and settings.json with it
+        await refresh();
+        renderPlugins(true);
+      } });
 }
 
 async function userMarketAdd() {
@@ -1472,12 +1532,8 @@ async function adoptedResync(a) {
     + ". Any edits you made to it are lost, and there is no undo.",
     "Overwrite my copy");
   if (!ok) return;
-  try {
-    await api("/api/plugin-resync", { type: a.type, name: a.name });
-    toast(a.name + " re-synced from " + a.source);
-    await refresh();
-    renderPlugins(true);
-  } catch (e) { toast(e.message, true); }
+  await act("plugin-resync", { type: a.type, name: a.name },
+    a.name + " re-synced from " + a.source, { then: reloadPlugins });
 }
 
 function pluginRow(p) {
@@ -1485,7 +1541,7 @@ function pluginRow(p) {
   const agents = p.components.filter((c) => c.kind === "agents");
   const actions = el("div.li-actions", {});
 
-  const body = el("div.plugin-detail", { hidden: true });
+  const body = el("div.detail-panel", { hidden: true });
   if (agents.length || p.state !== "available") {
     const open = mkbtn("btn-sm btn-icon btn-ghost pd-toggle", "", () => togglePluginDetail(p, open, body),
       agents.length ? "Models its agents run on, and the settings it reads"
@@ -1655,24 +1711,37 @@ function effectiveModel(model) {
            variant: "secondary" };
 }
 
-async function togglePluginDetail(p, btn, body) {
+/* Built on first expand, not on render: both panels behind this walk a tree
+   server-side, and a list of forty rows must stay instant. `load` runs once —
+   a second expand redraws nothing, which is what dataset.built records. */
+async function toggleDetail(btn, body, { busy, load, build, onopen }) {
   body.hidden = !body.hidden;
   btn.classList.toggle("is-open", !body.hidden);
-  body.hidden ? POPEN.delete(p.id) : POPEN.add(p.id);
+  if (onopen) onopen(!body.hidden);
   if (body.hidden || body.dataset.built) return;
   body.dataset.built = "1";
-  body.append(el("div.hint", { text: "Reading the plugin…" }));
-  try {
-    if (!PDETAIL[p.id]) PDETAIL[p.id] = await api("/api/plugin-detail?id=" + encodeURIComponent(p.id));
-  } catch (e) {
+  body.append(el("div.hint", { text: busy }));
+  let d;
+  try { d = await load(); }
+  catch (e) {
     body.innerHTML = "";
     body.append(el("div.hint", { text: e.message }));
     return;
   }
   body.innerHTML = "";
-  pluginAgentsPanel(p, body);
-  pluginEnvPanel(p, PDETAIL[p.id].env || [], body);
+  build(d);
 }
+
+const togglePluginDetail = (p, btn, body) => toggleDetail(btn, body, {
+  busy: "Reading the plugin…",
+  onopen: (open) => (open ? POPEN.add(p.id) : POPEN.delete(p.id)),
+  load: async () => (PDETAIL[p.id] ||= await api(
+    "/api/plugin-detail?id=" + encodeURIComponent(p.id))),
+  build: (d) => {
+    pluginAgentsPanel(p, body);
+    envPanel(d.env || [], body, "plugin", reloadPlugins);
+  },
+});
 
 function pluginAgentsPanel(p, body) {
   const agents = p.components.filter((c) => c.kind === "agents");
@@ -1711,18 +1780,30 @@ function pluginAgentsPanel(p, body) {
   }
 }
 
-function pluginEnvPanel(p, env, body) {
-  body.append(el("div.pd-title", { text: "Settings this plugin reads" }));
+/* "Settings this <noun> reads" — the same panel for a plugin and for a skill.
+   A skill is a directory, so it can ship a scripts/ package that reads the
+   environment exactly as a plugin's code does, with the same problem: the
+   names exist only in its source, and the values land in the one settings.json
+   `env` either way, because that is the only place Claude Code reads them. */
+function envPanel(env, body, noun, redraw) {
+  // the two wordings, kept verbatim rather than assembled: a plugin's *code*
+  // reads a variable, a skill's *files* do, and the verb follows the noun
+  const w = noun === "plugin"
+    ? { none: "this plugin's code does not read any environment variable of "
+             + "its own.",
+        src: "the plugin's own code" }
+    : { none: "this skill's files do not read any environment variable of "
+             + "their own.",
+        src: "the skill's own files" };
+  body.append(el("div.pd-title", { text: "Settings this " + noun + " reads" }));
   if (!env.length) {
-    body.append(el("div.pd-note", {
-      text: "Nothing found — this plugin's code does not read any environment "
-        + "variable of its own." }));
+    body.append(el("div.pd-note", { text: "Nothing found — " + w.none }));
     return;
   }
   body.append(el("div.pd-note", {
-    html: "Names found by reading the plugin's own code, not a list it publishes — "
+    html: "Names found by reading " + w.src + ", not a list it publishes — "
       + "treat them as a lead. They are written to <b>env</b> in settings.json, "
-      + "where they apply to every session, not just this plugin." }));
+      + "where they apply to every session, not just this " + noun + "." }));
   for (const e of env) {
     const sc = scalarControl(
       { key: e.model ? SUBAGENT_KEY : "env." + e.name, type: "combo",
@@ -1731,8 +1812,9 @@ function pluginEnvPanel(p, env, body) {
     const right = el("div.pd-ctrl", {}, sc.node);
     if (sc.aux) right.append(sc.aux);
     right.append(mkbtn("btn-sm btn-primary", "Set",
-      () => setPluginEnv(e.name, sc.collect())));
-    if (e.value) right.append(mkbtn("btn-sm danger", "Clear", () => setPluginEnv(e.name, "")));
+      () => setEnvVar(e.name, sc.collect(), redraw)));
+    if (e.value)
+      right.append(mkbtn("btn-sm danger", "Clear", () => setEnvVar(e.name, "", redraw)));
 
     const name = el("div.pd-name", {},
       el("span.skey", { title: "read in " + e.files.join(", "), text: e.name }),
@@ -1744,23 +1826,22 @@ function pluginEnvPanel(p, env, body) {
   }
 }
 
-async function setPluginEnv(name, value) {
-  try {
-    await api("/api/plugin-env-set", { name, value: value === undefined ? "" : String(value) });
-    toast(name + (value ? " set to " + value : " cleared") + " · applies to new sessions");
-    await refresh();
-    renderPlugins(true);
-  } catch (e) { toast(e.message, true); }
+/* One settings.json env entry. The endpoint has never cared whether the name
+   came off a plugin's code or a skill's; only what to redraw afterwards
+   differs, and that is the caller's. */
+async function setEnvVar(name, value, redraw) {
+  await act("plugin-env-set",
+    { name, value: value === undefined ? "" : String(value) },
+    name + (value ? " set to " + value : " cleared") + " · applies to new sessions",
+    { then: redraw });
 }
 
 async function setItemModel(name, model) {
-  try {
-    await api("/api/item-model-set", { name, model: model === undefined ? "" : String(model) });
-    toast(name + (model ? " runs on " + model : " back to inheriting")
-      + " · applies to new sessions");
-    await refresh();
-    renderPlugins(true);
-  } catch (e) { toast(e.message, true); }
+  await act("item-model-set",
+    { name, model: model === undefined ? "" : String(model) },
+    name + (model ? " runs on " + model : " back to inheriting")
+      + " · applies to new sessions",
+    { then: reloadPlugins });
 }
 
 /* Components grouped for the Split checklist. Anything that can't be copied
@@ -1834,26 +1915,22 @@ async function pluginSplit(p, only) {
     catch (e) { toast("Invalid model for " + pick.name + ": " + e.message, true); return; }
     if (v !== undefined) chosen[pick.name] = String(v);
   }
-  try {
-    const res = await api("/api/plugin-split", {
-      id: p.id, picks, disable: p.state !== "available", models: chosen });
-    toast("Kept " + res.kept + " of " + res.total + " from " + p.name
-      + (res.disabled ? " · plugin disabled" : "") + " · applies to new sessions",
-      false, res.disabled
-        ? { label: "Re-enable plugin", fn: () => pluginToggle(p.id, true) }
-        : null);
-    await refresh();
-    renderPlugins(true);
-  } catch (e) { toast(e.message, true); }
+  await act("plugin-split",
+    { id: p.id, picks, disable: p.state !== "available", models: chosen },
+    (res) => ({
+      text: "Kept " + res.kept + " of " + res.total + " from " + p.name
+        + (res.disabled ? " · plugin disabled" : "") + " · applies to new sessions",
+      undo: res.disabled
+        ? { label: "Re-enable plugin", fn: () => pluginToggle(p.id, true) } : null,
+    }),
+    { then: reloadPlugins });
 }
 
 async function pluginToggle(id, enabled) {
-  try {
-    await api("/api/plugin-toggle", { id, enabled });
-    toast(id.split("@")[0] + (enabled ? " enabled" : " disabled") + " · applies to new sessions");
-    await refresh();
-    renderPlugins(true);
-  } catch (e) { toast(e.message, true); }
+  await act("plugin-toggle", { id, enabled },
+    id.split("@")[0] + (enabled ? " enabled" : " disabled")
+      + " · applies to new sessions",
+    { then: reloadPlugins });
 }
 
 /* value is one of Claude Code's four states, or null to remove the entry —
@@ -1861,13 +1938,10 @@ async function pluginToggle(id, enabled) {
    wording follows that: clearing is not "set to null". */
 async function skillOverride(name, value) {
   const was = (settingsGet("skillOverrides") || {})[name] || null;
-  try {
-    await api("/api/skill-override", { name, value });
-    toast(value ? "Skill " + name + " set to " + value + " · applies to new sessions"
-                : "Skill " + name + " back on · applies to new sessions",
-      false, { label: "Undo", fn: () => skillOverride(name, was) });
-    await refresh();
-  } catch (e) { toast(e.message, true); }
+  await act("skill-override", { name, value },
+    value ? "Skill " + name + " set to " + value + " · applies to new sessions"
+          : "Skill " + name + " back on · applies to new sessions",
+    { undo: { label: "Undo", fn: () => skillOverride(name, was) } });
 }
 
 // ------------------------------------------------------------------- setup
@@ -1876,20 +1950,9 @@ let SETUP = null;
 
 async function renderSetup(reload) {
   const view = document.getElementById("setupview");
-  if (!SETUP || reload) {
-    if (!SETUP) {
-      view.innerHTML = "";
-      view.append(skeletonList(2));
-    }
-    try { SETUP = await api("/api/setup"); }
-    catch (e) {
-      view.innerHTML = "";
-      view.append(el("div.alert.alert-destructive", {},
-        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
-      return;
-    }
-    if (TAB !== "setup") return;
-  }
+  if (!await cached({ view: "setupview", url: "/api/setup", reload, skeleton: 2,
+                      get: () => SETUP, set: (v) => { SETUP = v; },
+                      alive: () => TAB === "setup" })) return;
   view.innerHTML = "";
   view.append(el("div.view-head", {
     text: "Installable pieces of environment setup. Applying a piece patches your existing setup "
@@ -2132,20 +2195,9 @@ const shadowedBy = (type, name) =>
 
 async function renderProjects(reload) {
   const view = document.getElementById("projectsview");
-  if (!PROJECTS || reload) {
-    if (!PROJECTS) {
-      view.innerHTML = "";
-      view.append(skeletonList(3));
-    }
-    try { PROJECTS = await api("/api/projects"); }
-    catch (e) {
-      view.innerHTML = "";
-      view.append(el("div.alert.alert-destructive", {},
-        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
-      return;
-    }
-    if (TAB !== "projects") return;
-  }
+  if (!await cached({ view: "projectsview", url: "/api/projects", reload,
+                      get: () => PROJECTS, set: (v) => { PROJECTS = v; },
+                      alive: () => TAB === "projects" })) return;
   view.innerHTML = "";
   if (PRESTORE) { view.append(projRestorePanel()); return; }
   view.append(el("div.view-head", {
@@ -3661,19 +3713,11 @@ function dataTable(headers, rows) {
 
 async function renderInsight(rescan) {
   const view = document.getElementById("insightview");
-  if (!INSIGHT || rescan) {
-    view.innerHTML = "";
-    view.append(el("div.muted", { style: { marginBottom: ".75rem", fontSize: ".8125rem" },
-      text: "Estimating context cost and scanning session transcripts…" }), skeletonList(5));
-    try { INSIGHT = await api("/api/insight" + (rescan ? "?rescan" : "")); }
-    catch (e) {
-      view.innerHTML = "";
-      view.append(el("div.alert.alert-destructive", {},
-        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
-      return;
-    }
-    if (TAB !== "insight") return;
-  }
+  if (!await cached({
+        view: "insightview", url: "/api/insight" + (rescan ? "?rescan" : ""),
+        reload: rescan, skeleton: 5, get: () => INSIGHT,
+        set: (v) => { INSIGHT = v; }, alive: () => TAB === "insight",
+        note: "Estimating context cost and scanning session transcripts…" })) return;
   const u = INSIGHT.usage;
   view.innerHTML = "";
   view.append(el("div.view-head", {
@@ -3937,21 +3981,16 @@ function ctxMeasuredTable(m) {
 
 async function renderContext(rescan) {
   const view = document.getElementById("contextview");
-  if (!CONTEXT || rescan) {
-    view.innerHTML = "";
-    view.append(el("div.muted", { style: { marginBottom: ".75rem", fontSize: ".8125rem" },
-      text: "Sizing your config and reading session transcripts…" }), skeletonList(5));
-    try { CONTEXT = await api("/api/context" + (rescan ? "?rescan" : "")); }
-    catch (e) {
-      view.innerHTML = "";
-      view.append(el("div.alert.alert-destructive", {},
-        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
-      return;
-    }
-    // the transcript cache is shared, so a rescan here refreshed them too
-    if (rescan) { INSIGHT = null; COSTS = null; }
-    if (TAB !== "context") return;
-  }
+  // The transcript cache is shared server-side, so a rescan here refreshes
+  // what those two tabs are holding. Dropped before the fetch rather than
+  // after it: a rescan that fails or that you navigate away from has still
+  // invalidated them, and the cost of being wrong is one refetch.
+  if (rescan) { INSIGHT = null; COSTS = null; }
+  if (!await cached({
+        view: "contextview", url: "/api/context" + (rescan ? "?rescan" : ""),
+        reload: rescan, skeleton: 5, get: () => CONTEXT,
+        set: (v) => { CONTEXT = v; }, alive: () => TAB === "context",
+        note: "Sizing your config and reading session transcripts…" })) return;
   const scopes = CONTEXT.scopes, m = CONTEXT.measured, user = scopes[0];
   view.innerHTML = "";
   view.append(el("div.view-head", {
@@ -4018,19 +4057,11 @@ function usd(n) {
 
 async function renderCosts(rescan) {
   const view = document.getElementById("costsview");
-  if (!COSTS || rescan) {
-    view.innerHTML = "";
-    view.append(el("div.muted", { style: { marginBottom: ".75rem", fontSize: ".8125rem" },
-      text: "Reading transcripts and pricing usage…" }), skeletonList(4));
-    try { COSTS = await api("/api/costs" + (rescan ? "?rescan" : "")); }
-    catch (e) {
-      view.innerHTML = "";
-      view.append(el("div.alert.alert-destructive", {},
-        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
-      return;
-    }
-    if (TAB !== "costs") return;
-  }
+  if (!await cached({
+        view: "costsview", url: "/api/costs" + (rescan ? "?rescan" : ""),
+        reload: rescan, skeleton: 4, get: () => COSTS,
+        set: (v) => { COSTS = v; }, alive: () => TAB === "costs",
+        note: "Reading transcripts and pricing usage…" })) return;
   const c = COSTS;
   view.innerHTML = "";
   view.append(el("div.view-head", {
@@ -4194,8 +4225,7 @@ async function renderCostsDiag() {
   try { d = await api("/api/costs/diagnose"); }
   catch (e) {
     box.innerHTML = "";
-    box.append(el("div.alert.alert-destructive", {},
-      el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
+    box.append(errorAlert(e.message));
     return;
   }
   box.innerHTML = "";
@@ -4257,20 +4287,12 @@ let DFILTER = "all";
 
 async function renderDoctor(rerun) {
   const view = document.getElementById("doctorview");
-  if (!DOCTOR || rerun) {
-    view.innerHTML = "";
-    view.append(el("div.muted", { style: { marginBottom: ".75rem", fontSize: ".8125rem" },
-      text: "Running checks…" }), skeletonList(4));
-    try { DOCTOR = await api("/api/doctor"); }
-    catch (e) {
-      view.innerHTML = "";
-      view.append(el("div.alert.alert-destructive", {},
-        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
-      return;
-    }
-    if (TAB !== "doctor") return;
-    renderTabs();
-  }
+  const cold = !DOCTOR || rerun;
+  if (!await cached({ view: "doctorview", url: "/api/doctor", reload: rerun,
+                      skeleton: 4, get: () => DOCTOR,
+                      set: (v) => { DOCTOR = v; }, alive: () => TAB === "doctor",
+                      note: "Running checks…" })) return;
+  if (cold) renderTabs();   // the tab's own warning count comes from DOCTOR
   view.innerHTML = "";
   const warns = DOCTOR.warns;
   const infos = DOCTOR.findings.length - warns;
@@ -4281,11 +4303,10 @@ async function renderDoctor(rerun) {
     statCard(DOCTOR.ts, "last run")));
 
   const bar = el("div.toolbar");
-  const seg = el("div.row-flex", { style: { gap: ".25rem" } });
-  for (const [k, label] of [["all", "All"], ["warn", "Warnings"], ["info", "Notes"]])
-    seg.append(mkbtn("btn-sm" + (DFILTER === k ? " on" : ""), label,
-      () => { DFILTER = k; renderDoctor(); }));
-  bar.append(seg);
+  bar.append(segmented(
+    [{ key: "all", label: "All" }, { key: "warn", label: "Warnings" },
+     { key: "info", label: "Notes" }],
+    DFILTER, (k) => { DFILTER = k; renderDoctor(); }));
   const rb = mkbtn("btn-sm", "Run again", () => renderDoctor(true));
   rb.prepend(icon("refresh"));
   bar.append(el("div.toolbar-end", {}, rb));
@@ -4513,12 +4534,11 @@ const ctxRoot = (ctx) => (ctx && ctx.root) || undefined;
 const ctxReload = (ctx) => (ctx && ctx.reload ? ctx.reload() : refresh());
 
 async function toggleItem(type, name, enabled, ctx) {
-  try {
-    await api("/api/item-toggle", { type, name, enabled, root: ctxRoot(ctx) });
-    toast(name + (enabled ? " enabled" : " disabled — moved to disabled/") + " · applies to new sessions",
-      false, { label: "Undo", fn: () => toggleItem(type, name, !enabled, ctx) });
-    await ctxReload(ctx);
-  } catch (e) { toast(e.message, true); }
+  await act("item-toggle", { type, name, enabled, root: ctxRoot(ctx) },
+    name + (enabled ? " enabled" : " disabled — moved to disabled/")
+      + " · applies to new sessions",
+    { undo: { label: "Undo", fn: () => toggleItem(type, name, !enabled, ctx) },
+      then: () => ctxReload(ctx) });
 }
 
 /* The one action here that takes something away for good.
@@ -4541,11 +4561,8 @@ async function deleteItem(type, s, enabled, ctx) {
     what + (enabled ? "" : " It is already disabled, so nothing in your live config changes."),
     s.name, "Delete");
   if (!ok) return;
-  try {
-    await api("/api/item-delete", { type, name: s.name, enabled, root: ctxRoot(ctx) });
-    toast(s.name + " deleted");
-    await ctxReload(ctx);
-  } catch (e) { toast(e.message, true); }
+  await act("item-delete", { type, name: s.name, enabled, root: ctxRoot(ctx) },
+    s.name + " deleted", { then: () => ctxReload(ctx) });
 }
 
 function itemBadges(s) {
@@ -4599,7 +4616,7 @@ function itemRow(type, s, enabled, ctx) {
   // An optional expandable panel under the row, supplied by the view via a
   // ctx flag — the same seam ctx.extraBadges and ctx.extraMenu use. Only the
   // Skills tab sets it today.
-  const detail = ctx.detail ? el("div.item-detail", { hidden: true }) : null;
+  const detail = ctx.detail ? el("div.detail-panel", { hidden: true }) : null;
   if (detail) {
     const open = mkbtn("btn-sm btn-icon btn-ghost pd-toggle", "",
       () => toggleItemDetail(ctx, s, enabled, open, detail),
@@ -4656,72 +4673,13 @@ function itemRow(type, s, enabled, ctx) {
     actions, detail);
 }
 
-/* Built on first expand, not on render: the panel walks the skill's files
-   server-side, and a list of forty skills must stay instant. */
-async function toggleItemDetail(ctx, s, enabled, btn, body) {
-  body.hidden = !body.hidden;
-  btn.classList.toggle("is-open", !body.hidden);
-  if (body.hidden || body.dataset.built) return;
-  body.dataset.built = "1";
-  body.append(el("div.hint", { text: "Reading the skill…" }));
-  try {
-    const d = await api("/api/skill-detail?name=" + encodeURIComponent(s.name)
-      + "&enabled=" + (enabled ? "1" : "0"));
-    body.innerHTML = "";
-    skillEnvPanel(d.env || [], body);
-  } catch (e) {
-    body.innerHTML = "";
-    body.append(el("div.hint", { text: e.message }));
-  }
-}
-
-/* The Plugins tab's "Settings this plugin reads", for a skill. Same scanner
-   behind it, same caveat, same settings.json `env` destination — a skill
-   that ships scripts has exactly the plugin's problem, and Claude Code has
-   no per-skill settings either. */
-function skillEnvPanel(env, body) {
-  body.append(el("div.pd-title", { text: "Settings this skill reads" }));
-  if (!env.length) {
-    body.append(el("div.pd-note", {
-      text: "Nothing found — this skill's files do not read any environment "
-        + "variable of their own." }));
-    return;
-  }
-  body.append(el("div.pd-note", {
-    html: "Names found by reading the skill's own files, not a list it publishes — "
-      + "treat them as a lead. They are written to <b>env</b> in settings.json, "
-      + "where they apply to every session, not just this skill." }));
-  for (const e of env) {
-    const sc = scalarControl(
-      { key: e.model ? SUBAGENT_KEY : "env." + e.name, type: "combo",
-        values: e.model ? modelValues() : [] },
-      e.value || undefined, "unset");
-    const right = el("div.pd-ctrl", {}, sc.node);
-    if (sc.aux) right.append(sc.aux);
-    right.append(mkbtn("btn-sm btn-primary", "Set",
-      () => setSkillEnv(e.name, sc.collect())));
-    if (e.value) right.append(mkbtn("btn-sm danger", "Clear", () => setSkillEnv(e.name, "")));
-    body.append(el("div.pd-row", {},
-      el("div.pd-name", {},
-        el("span.skey", { title: "read in " + e.files.join(", "), text: e.name }),
-        e.model ? badge("model", "outline") : null,
-        e.value ? badge("set", "default") : null),
-      right));
-    if (e.doc)
-      body.append(el("div.pd-doc", { title: e.doc.file, text: e.doc.line }));
-  }
-}
-
-/* Same endpoint the plugin panel uses — it writes one settings.json env
-   entry and has never cared where the name came from. */
-async function setSkillEnv(name, value) {
-  try {
-    await api("/api/plugin-env-set", { name, value: value === undefined ? "" : String(value) });
-    toast(name + (value ? " set to " + value : " cleared") + " · applies to new sessions");
-    await refresh();
-    renderInventory();
-  } catch (e) { toast(e.message, true); }
-}
+const toggleItemDetail = (ctx, s, enabled, btn, body) => toggleDetail(btn, body, {
+  busy: "Reading the skill…",
+  load: () => api("/api/skill-detail?name=" + encodeURIComponent(s.name)
+    + "&enabled=" + (enabled ? "1" : "0")),
+  build: (d) => envPanel(d.env || [], body, "skill",
+    async () => { await refresh(); renderInventory(); }),
+});
 
 function renderInventory() {
   const view = document.getElementById("itemsview");
@@ -4852,18 +4810,12 @@ const fwhen = (iso) => {
 
 async function renderBackup(reload) {
   const view = document.getElementById("backupview");
-  if (!BACKUP || reload) {
-    if (!BACKUP) { view.innerHTML = ""; view.append(skeletonList(3)); }
-    try { BACKUP = await api("/api/backup"); }
-    catch (e) {
-      view.innerHTML = "";
-      view.append(el("div.alert.alert-destructive", {},
-        el("span.alert-icon", {}, icon("error")), el("div.alert-body", { text: e.message })));
-      return;
-    }
-    if (TAB !== "backup") return;
-    bPruneUnits();
-  }
+  const cold = !BACKUP || reload;
+  if (!await cached({ view: "backupview", url: "/api/backup", reload,
+                      get: () => BACKUP, set: (v) => { BACKUP = v; },
+                      alive: () => TAB === "backup" })) return;
+  // the plan just changed under BUNITS, whose narrowings name units in it
+  if (cold) bPruneUnits();
   if (!BPICKS) BPICKS = new Set(BACKUP.plan.filter((g) => g.files).map((g) => g.id));
 
   view.innerHTML = "";
@@ -5593,38 +5545,38 @@ function discoverConsentCard() {
   return card;
 }
 
-async function discoverEnable(source) {
-  const t = toast({ title: "Fetching the " + source + " catalog…", variant: "loading", duration: 0 });
+/* Download one remote catalog. `grant` records consent first — the only
+   difference between enabling a source and refreshing one already enabled,
+   which is why they were the same twenty lines twice. */
+async function catalogFetch(source, grant) {
+  const [busy, done, failed] = grant
+    ? ["Fetching", "Fetched · ", "fetch failed"]
+    : ["Refreshing", "Refreshed · ", "refresh failed"];
+  const t = toast({ title: busy + " the " + source + " catalog…",
+                    variant: "loading", duration: 0 });
   try {
-    await api("/api/discover-consent", { source, ok: true });
+    if (grant) await api("/api/discover-consent", { source, ok: true });
     const res = await api("/api/catalog-refresh", { sources: [source] });
     t.close();
     const r = (res.results || {})[source];
-    toast(r && r.ok ? "Fetched · " + r.detail : ((r || {}).detail || "fetch failed"),
+    toast(r && r.ok ? done + r.detail : ((r || {}).detail || failed),
          !(r && r.ok));
     await renderDiscover(true);
   } catch (err) { t.close(); toast(err.message, true); }
 }
 
-async function discoverRefresh(source) {
-  const t = toast({ title: "Refreshing the " + source + " catalog…", variant: "loading", duration: 0 });
-  try {
-    const res = await api("/api/catalog-refresh", { sources: [source] });
-    t.close();
-    const r = (res.results || {})[source];
-    toast(r && r.ok ? "Refreshed · " + r.detail : ((r || {}).detail || "refresh failed"),
-         !(r && r.ok));
-    await renderDiscover(true);
-  } catch (err) { t.close(); toast(err.message, true); }
-}
+const discoverEnable = (source) => catalogFetch(source, true);
+const discoverRefresh = (source) => catalogFetch(source, false);
 
 async function renderDiscover(reload) {
   const view = document.getElementById("discoverview");
-  if (reload || !DCATALOG) {
-    try { DCATALOG = await api("/api/catalog"); }
-    catch (e) { DCATALOG = { error: e.message }; }
-    if (TAB !== "discover") return;
-  }
+  // the one cached() caller whose failure is payload rather than an alert: the
+  // consent card has to render even when the index could not be read, because
+  // an unfetched catalog is exactly when you need it
+  if (!await cached({ view: "discoverview", url: "/api/catalog", reload,
+                      skeleton: 0, errorAsPayload: true,
+                      get: () => DCATALOG, set: (v) => { DCATALOG = v; },
+                      alive: () => TAB === "discover" })) return;
 
   view.innerHTML = "";
   view.append(el("div.view-head", {
@@ -5635,11 +5587,7 @@ async function renderDiscover(reload) {
       + "Search skills.sh.",
   }));
 
-  if (DCATALOG.error) {
-    view.append(el("div.alert.alert-destructive", {},
-      el("span.alert-icon", {}, icon("error")),
-      el("div.alert-body", { text: DCATALOG.error })));
-  }
+  if (DCATALOG.error) view.append(errorAlert(DCATALOG.error));
 
   const consentCard = discoverConsentCard();
   if (consentCard) view.append(consentCard);
@@ -6011,18 +5959,14 @@ async function discoverInstall(e) {
   const r = await modal({ title: "Install " + e.name, text: lines.join(" "), ok: "Install" });
   if (!r) return;
 
-  const t = toast({ title: "Running claude plugin…", variant: "loading", duration: 0 });
-  try {
-    // scope is always "user" for now — a project-scope install picker is a
-    // follow-up; every Discover install lands in every project on this
-    // machine, same as the existing user-plugin-install flow on the Plugins
-    // tab.
-    const res = await api("/api/catalog-install", { id: e.id, scope: "user" });
-    t.close();
-    toast(res.ok ? "Installed · " + res.detail : res.detail, !res.ok);
-    await refresh();
-    discoverSearch();
-  } catch (err) { t.close(); toast(err.message, true); }
+  // scope is always "user" for now — a project-scope install picker is a
+  // follow-up; every Discover install lands in every project on this machine,
+  // same as the existing user-plugin-install flow on the Plugins tab.
+  await act("catalog-install", { id: e.id, scope: "user" },
+    (res) => ({ text: res.ok ? "Installed · " + res.detail : res.detail,
+                err: !res.ok }),
+    { busy: "Running claude plugin…",
+      then: async () => { await refresh(); discoverSearch(); } });
 }
 
 // ------------------------------------------------------------------ render
