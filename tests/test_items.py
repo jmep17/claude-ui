@@ -249,6 +249,154 @@ class MetaName(Base):
         self.assertEqual(got["plain"], "")
 
 
+class Archive(Base):
+    """The third state: <skills>/archived/<name>/, reached by a rename.
+
+    Claude Code loads personal skills one level deep, so a skill one level
+    further down does not load. What these pin is that the move is a move (the
+    bytes are the ones that were there), that the archive is invisible to every
+    inventory, and that the name `archived` cannot itself be taken by a skill.
+    """
+
+    def mkskill(self, name="pdf", desc="d"):
+        return self.write(f"skills/{name}/SKILL.md",
+                          f"---\nname: {name}\ndescription: {desc}\n---\nhow\n")
+
+    def test_archives_and_restores_with_content_intact(self):
+        self.mkskill()
+        self.write("skills/pdf/refs/note.md", "a note")
+        body = (self.tmp / "skills" / "pdf" / "SKILL.md").read_text()
+        out = items.skill_archive_set("pdf", True)
+        self.assertIn("archived/pdf", out)
+        self.assertFalse((self.tmp / "skills" / "pdf").exists())
+        arch = self.tmp / "skills" / "archived" / "pdf"
+        self.assertEqual((arch / "SKILL.md").read_text(), body)
+        self.assertEqual((arch / "refs" / "note.md").read_text(), "a note")
+        items.skill_archive_set("pdf", False)
+        self.assertEqual((self.tmp / "skills" / "pdf" / "SKILL.md").read_text(), body)
+
+    def test_restoring_the_last_one_prunes_the_archive(self):
+        self.mkskill()
+        items.skill_archive_set("pdf", True)
+        self.assertTrue((self.tmp / "skills" / "archived").is_dir())
+        items.skill_archive_set("pdf", False)
+        self.assertFalse((self.tmp / "skills" / "archived").exists())
+        # skills/ itself is Claude Code's to scan, and stays
+        self.assertTrue((self.tmp / "skills").is_dir())
+
+    def test_archive_keeps_the_directory_while_one_remains(self):
+        self.mkskill("pdf")
+        self.mkskill("xlsx")
+        items.skill_archive_set("pdf", True)
+        items.skill_archive_set("xlsx", True)
+        items.skill_archive_set("pdf", False)
+        self.assertTrue((self.tmp / "skills" / "archived" / "xlsx").is_dir())
+
+    def test_refuses_a_missing_source(self):
+        with self.assertRaises(ValueError) as cm:
+            items.skill_archive_set("ghost", True)
+        self.assertIn("not enabled", str(cm.exception))
+        with self.assertRaises(ValueError) as cm:
+            items.skill_archive_set("ghost", False)
+        self.assertIn("not archived", str(cm.exception))
+
+    def test_refuses_a_parked_skill(self):
+        """A skill in disabled/skills/ is not live — the migration path enables
+        it first, and the refusal has to say which state was missing."""
+        self.write("disabled/skills/pdf/SKILL.md", "---\nname: pdf\n---\nx\n")
+        with self.assertRaises(ValueError) as cm:
+            items.skill_archive_set("pdf", True)
+        self.assertIn("not enabled", str(cm.exception))
+
+    def test_refuses_an_occupied_destination(self):
+        self.mkskill("pdf", "live")
+        self.write("skills/archived/pdf/SKILL.md", "---\nname: pdf\n---\nold\n")
+        with self.assertRaises(ValueError) as cm:
+            items.skill_archive_set("pdf", True)
+        self.assertIn("already exists", str(cm.exception))
+        # both sides untouched
+        self.assertIn("live", (self.tmp / "skills" / "pdf" / "SKILL.md").read_text())
+        self.assertIn("old", (self.tmp / "skills" / "archived" / "pdf"
+                              / "SKILL.md").read_text())
+
+    def test_scan_items_excludes_the_archive(self):
+        self.mkskill("live")
+        self.write("skills/archived/old/SKILL.md", "---\nname: old\n---\nx\n")
+        self.assertEqual([s["name"] for s in items.scan_items("skills")], ["live"])
+        got = items.scan_archived_skills()
+        self.assertEqual([s["name"] for s in got], ["old"])
+        self.assertFalse(got[0]["enabled"])
+        self.assertTrue(got[0]["archived"])
+        self.assertEqual(got[0]["description"], "")
+
+    def test_archived_record_carries_the_facts(self):
+        self.write("skills/archived/old/SKILL.md",
+                   "---\nname: old\ndescription: was useful\n---\nx\n")
+        (s,) = items.scan_archived_skills()
+        self.assertEqual(s["description"], "was useful")
+        self.assertIn("archived/old", s["path"])
+
+    def test_synced_is_excluded_case_insensitively(self):
+        self.write("skills/Synced/SKILL.md", "---\nname: s\n---\nx\n")
+        self.mkskill("real")
+        self.assertEqual([s["name"] for s in items.scan_items("skills")], ["real"])
+
+    def test_reserved_names_cannot_be_created(self):
+        for name in ("archived", "SYNCED", "Archived"):
+            with self.assertRaises(ValueError):
+                items.item_create("skills", name, "---\nname: x\n---\nx\n")
+
+    def test_reserved_name_is_still_fine_for_a_command(self):
+        """The rule is about the skills directory, not about the word."""
+        items.item_create("commands", "archived", "list the archive\n")
+        self.assertTrue((self.tmp / "commands" / "archived.md").is_file())
+
+    def test_create_refuses_a_name_the_archive_holds(self):
+        self.write("skills/archived/pdf/SKILL.md", "---\nname: pdf\n---\nx\n")
+        with self.assertRaises(ValueError) as cm:
+            items.item_create("skills", "pdf", "---\nname: pdf\n---\nnew\n")
+        self.assertIn("archived", str(cm.exception))
+        self.assertFalse((self.tmp / "skills" / "pdf").exists())
+
+    def test_archives_a_symlink_as_a_link(self):
+        real = self.tmp / "checkout" / "pdf"
+        real.mkdir(parents=True)
+        (real / "SKILL.md").write_text("---\nname: pdf\n---\nreal\n")
+        (self.tmp / "skills").mkdir(exist_ok=True)
+        (self.tmp / "skills" / "pdf").symlink_to(real)
+        items.skill_archive_set("pdf", True)
+        moved = self.tmp / "skills" / "archived" / "pdf"
+        self.assertTrue(moved.is_symlink())
+        self.assertEqual(moved.readlink(), real)
+        self.assertTrue((real / "SKILL.md").is_file())
+
+    def test_delete_removes_a_tree_and_reports_its_files(self):
+        self.mkskill()
+        self.write("skills/pdf/refs/note.md", "a note")
+        items.skill_archive_set("pdf", True)
+        out = items.skill_archive_delete("pdf")
+        self.assertEqual(out["files"], 2)
+        self.assertFalse((self.tmp / "skills" / "archived").exists())
+
+    def test_delete_unlinks_a_symlink_only(self):
+        real = self.tmp / "checkout" / "pdf"
+        real.mkdir(parents=True)
+        (real / "SKILL.md").write_text("x")
+        (self.tmp / "skills" / "archived").mkdir(parents=True)
+        (self.tmp / "skills" / "archived" / "pdf").symlink_to(real)
+        items.skill_archive_delete("pdf")
+        self.assertTrue((real / "SKILL.md").is_file())
+
+    def test_delete_refuses_a_missing_name(self):
+        with self.assertRaises(ValueError):
+            items.skill_archive_delete("ghost")
+
+    def test_nested_and_reserved_names_are_refused(self):
+        for name in ("git/pr", "archived", ".."):
+            with self.assertRaises(ValueError):
+                items.resolve_archived(name)
+
+
 class ProjectBase(Base):
     """Base plus a project of its own, well outside the config dir.
 

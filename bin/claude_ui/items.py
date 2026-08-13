@@ -5,10 +5,11 @@ import json
 import os
 import shutil
 
-from .core import (CONFIG_FILES, ITEM_TYPES, SOURCE_KEY, atomic_write,
-                   atomic_write_bytes, config_dir, disabled_dir, item_rel,
-                   parse_frontmatter, project_claude_dir, resolve_editable,
-                   set_frontmatter_key, tilde)
+from .core import (ARCHIVE_DIR, CONFIG_FILES, ITEM_TYPES, SOURCE_KEY,
+                   atomic_write, atomic_write_bytes, config_dir, disabled_dir,
+                   is_reserved_skill_dir, item_rel, parse_frontmatter,
+                   project_claude_dir, resolve_editable, set_frontmatter_key,
+                   tilde)
 
 
 MAX_EDIT = 2 * 1024 * 1024
@@ -51,8 +52,15 @@ def resolve_item(type_, name, enabled=True, scope=None):
     rel = item_rel(name)
     if ITEM_TYPES[type_]["kind"] == "md":
         rel = rel.with_suffix(".md")
-    elif len(rel.parts) != 1:
-        raise ValueError("bad name")
+    else:
+        if len(rel.parts) != 1:
+            raise ValueError("bad name")
+        # One guard covering create, copy, move, delete, save, read and
+        # set_enabled: archived/ is ours and synced/ is Claude Code's, and
+        # neither is a name an item may answer to.
+        if is_reserved_skill_dir(rel.name):
+            raise ValueError(f"{rel.name}: a reserved directory name, not a "
+                             "usable skill name")
     return item_root(type_, enabled, scope) / rel
 
 def skill_dirs(root):
@@ -113,8 +121,14 @@ def _dir_item(entry, enabled):
 
 def _scan_dir_type(root, enabled):
     """The inventory of a skills directory: the facts, plus which side of
-    disabled/ they were found on."""
-    return [_dir_item(e, enabled) for e in skill_dirs(root)]
+    disabled/ they were found on.
+
+    The single exclusion point for reserved names. Keeping it here — rather
+    than in each consumer — is what keeps archived/ out of the inventory, the
+    doctor, the context budget, backup's per-skill units and catalog's `yours`
+    corpus at once."""
+    return [_dir_item(e, enabled) for e in skill_dirs(root)
+            if not is_reserved_skill_dir(e.name)]
 
 def _scan_md_type(root, enabled):
     items = []
@@ -198,6 +212,85 @@ def set_enabled(type_, name, enabled, scope=None):
     _prune_empty_up(parked.parent, stop=scope or config_dir())
     _prune_empty_up(live.parent, stop=item_root(type_, True, scope))
     return tilde(dst)
+
+# ---- the archive: the third state a skill can be in
+#
+#   enabled   <skills>/<name>/                nothing to do
+#   disabled  same directory                  settings.json skillOverrides
+#   archived  <skills>/archived/<name>/       the rename below
+#
+# Deliberately not a third value of the `enabled` boolean: four callers resolve
+# a record back to a path with resolve_item(type, name, enabled), and an
+# archived skill is not addressable that way. Keeping the two apart is what
+# stops those callers from silently building a path that names nothing.
+#
+# Writing is user scope only, and the two functions that write say so by having
+# no scope parameter at all. A project has no archive area: a project's skills
+# travel to a teammate's checkout, and an archive that came with them is a
+# directory they never asked for. The readers keep the parameter so a project
+# scope can be asked and truthfully answer "nothing".
+
+def archive_root(scope=None):
+    return item_root("skills", True, scope) / ARCHIVE_DIR
+
+def resolve_archived(name, scope=None):
+    """<skills>/archived/<name>, validated the way resolve_item validates a
+    skill: one path segment, no traversal, and not a reserved name itself."""
+    rel = item_rel(name)
+    if len(rel.parts) != 1 or is_reserved_skill_dir(rel.name):
+        raise ValueError("bad name")
+    return archive_root(scope) / rel
+
+def scan_archived_skills(scope=None):
+    """The archive's inventory, in scan_items() shape plus `archived`.
+
+    `enabled` is False and stays False: nothing in the archive is loaded by
+    Claude Code, which is the point. Reserved names are filtered here too — a
+    directory called `archived` inside archived/ is not a skill either."""
+    return [{**skill_facts(e), "enabled": False, "archived": True}
+            for e in skill_dirs(archive_root(scope))
+            if not is_reserved_skill_dir(e.name)]
+
+def skill_archive_set(name, archived):
+    """Move a skill between <skills>/<name>/ and <skills>/archived/<name>/.
+
+    `archived` is the desired end state. Returns the new location. The same
+    rename() set_enabled() makes, with the same properties: same filesystem,
+    atomic, content untouched, and a symlinked skill moved as a link — the
+    target it points at is never followed, let alone written.
+
+    User scope only, by having no scope parameter at all.
+    """
+    src = resolve_item("skills", name) if archived else resolve_archived(name)
+    dst = resolve_archived(name) if archived else resolve_item("skills", name)
+    if not (src.exists() or src.is_symlink()):
+        # "not enabled" rather than "not found": a skill parked in
+        # disabled/skills/ hits this, and the migration path (enable, then
+        # archive) is only diagnosable if the refusal says which state was
+        # missing
+        raise ValueError(f"{name}: not {'enabled' if archived else 'archived'}")
+    if dst.exists() or dst.is_symlink():
+        raise ValueError(
+            f"{name}: already exists on the "
+            f"{'archived' if archived else 'enabled'} side — resolve by hand")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(dst)  # same filesystem: atomic, content untouched
+    # Prune archived/ the moment it empties. Claude Code sees it as a
+    # first-level directory in skills/ and may list it as a skill with no
+    # SKILL.md, so an archive with nothing in it should not be sitting there.
+    # The floor is skills/ itself, which is Claude Code's to scan and not ours
+    # to remove.
+    _prune_empty_up(archive_root(), stop=item_root("skills", True))
+    return tilde(dst)
+
+def skill_archive_delete(name):
+    """Remove an archived skill for good — item_delete()'s rules, one
+    directory over: a symlink loses the link and nothing else."""
+    p = resolve_archived(name)
+    if not (p.exists() or p.is_symlink()):
+        raise ValueError(f"{name}: not found")
+    out = _delete_path(p, stop=item_root("skills", True))
+    return out
 
 def _prune_empty_up(d, stop=None):
     """Remove empty dirs from d up to (not including) `stop`, the config dir by
@@ -319,12 +412,21 @@ def item_create(type_, name, content, enabled=True, scope=None):
     return item_read(type_, name, None, enabled, scope)
 
 def _need_free(type_, name, scope):
-    """Refuse a name already taken on either side of disabled/ — see
-    item_create() for why both sides count."""
+    """Refuse a name already taken on either side of disabled/, or held by the
+    archive — see item_create() for why both sides of disabled/ count.
+
+    The archive counts for the same reason: skill_archive_set() refuses to
+    restore onto an occupied name, so creating a twin of an archived skill
+    builds a trap you only spring when you try to bring it back."""
     for side in (True, False):
         p = resolve_item(type_, name, side, scope)
         if p.exists() or p.is_symlink():
             raise ValueError(f"{name}: already exists at {tilde(p)}")
+    if type_ == "skills":
+        p = resolve_archived(name, scope)
+        if p.exists() or p.is_symlink():
+            raise ValueError(f"{name}: an archived skill of that name is at "
+                             f"{tilde(p)}")
 
 def item_copy(type_, name, from_scope=None, to_scope=None, enabled=True):
     """Copy an item between scopes: your config dir and a project's .claude/.
@@ -393,6 +495,12 @@ def item_delete(type_, name, enabled=True, scope=None):
     p = resolve_item(type_, name, enabled, scope)
     if not (p.exists() or p.is_symlink()):
         raise ValueError(f"{name}: not found")
+    return _delete_path(p, stop=root)
+
+def _delete_path(p, stop):
+    """Destroy one item path and tidy up behind it. The body item_delete() and
+    skill_archive_delete() share — the symlink rule and the file count are the
+    same wherever the thing being removed happens to sit."""
     files = 1
     if p.is_symlink() or p.is_file():
         p.unlink()
@@ -401,7 +509,7 @@ def item_delete(type_, name, enabled=True, scope=None):
         # would count files rmtree is (rightly) never going to touch
         files = sum(len(names) for _, _, names in os.walk(p))
         shutil.rmtree(p)
-    _prune_empty_up(p.parent, stop=root)
+    _prune_empty_up(p.parent, stop=stop)
     return {"deleted": tilde(p), "files": files}
 
 def item_set_model(name, model, enabled=True, scope=None):

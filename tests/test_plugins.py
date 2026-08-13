@@ -335,6 +335,24 @@ class TestRefusals(Base):
                     if p.name.startswith(".")]
         self.assertEqual(leftover, [])
 
+    def test_archived_collision_raises(self):
+        """items.skill_archive_set refuses to restore onto an occupied name,
+        so splitting on top of an archived twin builds a trap for later."""
+        self.skill()
+        write(self.tmp / "skills" / "archived" / "helper" / "SKILL.md", "OLD")
+        self.assertRefused([{"kind": "skills", "name": "helper"}],
+                           "skills/archived/")
+        self.assertFalse((self.tmp / "skills" / "helper").exists())
+
+    def test_reserved_name_cannot_be_split_out(self):
+        """A plugin may legally ship a skill called `archived`; it just cannot
+        land under that name in your skills directory."""
+        self.skill("archived")
+        c = next(c for c in self.one()["components"] if c["name"] == "archived")
+        self.assertIn("reserved", c["conflict"])
+        self.assertRefused([{"kind": "skills", "name": "archived"}], "reserved")
+        self.assertFalse((self.tmp / "skills" / "archived").exists())
+
     def test_toggle_refuses_a_bad_plugin_id(self):
         with self.assertRaises(ValueError):
             plugins.plugin_set_enabled("nomarketplace", False)

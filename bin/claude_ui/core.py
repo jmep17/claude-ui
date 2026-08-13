@@ -37,6 +37,25 @@ ITEM_TYPES = {
     "output-styles": {"kind": "md"},
 }
 
+# Where an archived skill lives: <skills>/archived/<name>/. Claude Code loads
+# personal skills one level deep — <skills>/<name>/SKILL.md — so a skill one
+# level further down does not load, which is the whole mechanism. It is not
+# hidden from Claude Code, though: `archived` is itself a first-level directory
+# it treats as a skill candidate, and the docs reserve exactly one name for
+# this ("synced"). Hence the constant: if the bare entry turns out to be noisy
+# in /skills, ".archived" is a one-line change here — both Claude Code's scan
+# and items._scan_dir_type skip dotfiles.
+ARCHIVE_DIR = "archived"
+
+# Directory names inside a skills directory that are not skills of yours.
+# "synced" is Claude Code's (before v2.1.227 a folder of that name loaded as a
+# skill); "archived" is ours. Matched case-insensitively, because the
+# filesystems this runs on mostly are.
+RESERVED_SKILL_DIRS = (ARCHIVE_DIR, "synced")
+
+def is_reserved_skill_dir(name):
+    return str(name or "").lower() in RESERVED_SKILL_DIRS
+
 CONFIG_FILES = ("CLAUDE.md", "settings.json", "keybindings.json")
 
 MCP_FILE = "mcp-servers.json"
@@ -195,8 +214,12 @@ def project_items(cdir, type_):
     root = cdir / type_
     try:
         if ITEM_TYPES[type_]["kind"] == "dir":
+            # archived/ and synced/ are directories in skills/ that are not
+            # skills — the same exclusion items._scan_dir_type makes, repeated
+            # here because this function cannot import items (items imports it)
             return sorted(p.name for p in root.iterdir()
-                          if p.is_dir() and not p.name.startswith("."))
+                          if p.is_dir() and not p.name.startswith(".")
+                          and not is_reserved_skill_dir(p.name))
         return sorted(p.relative_to(root).with_suffix("").as_posix()
                       for p in root.rglob("*.md") if p.is_file())
     except (OSError, KeyError):

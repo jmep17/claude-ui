@@ -19,10 +19,10 @@ import shutil
 
 from . import schema
 from .core import (NAME_RE, SOURCE_KEY, _read_json_object, atomic_write,
-                   config_dir, disabled_dir, item_rel, parse_frontmatter,
-                   project_claude_dir, project_root, project_roots,
-                   set_frontmatter_key, tilde)
-from .items import resolve_item, skill_dirs, skill_facts
+                   config_dir, disabled_dir, is_reserved_skill_dir, item_rel,
+                   parse_frontmatter, project_claude_dir, project_root,
+                   project_roots, set_frontmatter_key, tilde)
+from .items import resolve_archived, resolve_item, skill_dirs, skill_facts
 from .mcp import mcp_machine_set, validate_mcp_config
 from .projects import project_setting_set
 from .settings import ENV_READONLY, settings_set, settings_state
@@ -282,9 +282,16 @@ def _conflict(kind, name):
 
     The disabled side counts: items.set_enabled refuses to move when both sides
     exist, so landing on top of a disabled twin would manufacture that state.
+    The archive counts for the same reason — items.skill_archive_set refuses to
+    restore onto an occupied name — and a reserved directory name is not a name
+    an item may answer to at all. A plugin may legally ship a skill called
+    `archived`; it simply cannot be split out under that name.
     """
     if kind not in PLUGIN_TYPES:
         return None
+    if kind == "skills" and is_reserved_skill_dir(name):
+        return (f"{name} is a reserved directory name in your skills folder — "
+                "split it under a different name")
     try:
         live, off = _dest(kind, name), _dest(kind, name, enabled=False)
     except ValueError:
@@ -295,6 +302,13 @@ def _conflict(kind, name):
         return f"you already have {article} {noun} called {name}"
     if off.exists() or off.is_symlink():
         return f"a disabled {noun} called {name} is parked in disabled/"
+    if kind == "skills":
+        try:
+            arch = resolve_archived(name)
+        except ValueError:
+            return "name is not usable as an item name"
+        if arch.exists() or arch.is_symlink():
+            return f"an archived skill called {name} is in skills/archived/"
     return None
 
 def plugins_state():
@@ -887,7 +901,11 @@ def adopted_items():
             root = (config_dir() if enabled else disabled_dir()) / kind
             if not root.is_dir():
                 continue
-            entries = (sorted(p for p in root.iterdir() if p.is_dir())
+            # archived/ is not an item: it holds them. Without this filter an
+            # archived split-out skill renders as an adopted item whose path
+            # the tab cannot open.
+            entries = (sorted(p for p in root.iterdir()
+                              if p.is_dir() and not is_reserved_skill_dir(p.name))
                        if kind == "skills" else sorted(root.rglob("*.md")))
             for p in entries:
                 try:
