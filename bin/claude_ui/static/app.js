@@ -1295,9 +1295,11 @@ const pluralKind = (k, n) =>
 const countLine = (p) =>
   Object.entries(p.counts).map(([k, n]) => pluralKind(k, n)).join(" · ");
 
-/* What every write on the Plugins tab redraws: /api/state for the inventory
-   and settings.json, then the plugin tree itself. */
-const reloadPlugins = async () => { await refresh(); renderPlugins(true); };
+/* What every write against a plugin redraws. Dropping PLUGINS rather than
+   re-rendering the segment: the write may have been made from Installed,
+   which lists plugin skills too, and refresh() -> render() takes whichever
+   segment is actually showing back to a fresh /api/plugins from there. */
+const reloadPlugins = async () => { PLUGINS = null; await refresh(); };
 
 async function renderPlugins(reload) {
   if (!onSeg("plugins")) return;
@@ -1503,8 +1505,7 @@ async function userRegistryRun(action, body, msg) {
         UREG = null;
         await userRegistryLoad();
         // the tree changed under the inventory below, and settings.json with it
-        await refresh();
-        renderPlugins(true);
+        await reloadPlugins();
       } });
 }
 
@@ -1718,9 +1719,8 @@ async function pluginScopeMove(p) {
   try {
     await api("/api/plugin-scope-move", { id: p.id, from: parse(r.f), to: parse(r.t) });
     toast(p.name + " moved");
-    PROJECTS = null;      // a project's settings changed too
-    await refresh();      // and possibly your own settings.json
-    renderPlugins(true);
+    PROJECTS = null;        // a project's settings changed too
+    await reloadPlugins();  // and possibly your own settings.json
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1850,7 +1850,8 @@ function pluginAgentsPanel(p, body) {
       if (mine.model)
         right.append(mkbtn("btn-sm danger", "Clear", () => setItemModel(mine.name, "")));
     } else {
-      right.append(mkbtn("btn-sm", "Split to set…", () => pluginSplit(p, c.name),
+      right.append(mkbtn("btn-sm", "Split to set…",
+        () => pluginSplit(p, { kind: "agents", name: c.name }),
         "The plugin's own copy is read-only — split this agent into your config first"));
     }
     body.append(el("div.pd-row", {},
@@ -1950,7 +1951,7 @@ function splitGroups(p, only, models) {
       return {
         value: kind + "/" + c.name, name: c.name, desc: c.description,
         badges, disabled, extra,
-        checked: only ? c.name === only && kind === "agents" : true,
+        checked: only ? (c.name === only.name && kind === only.kind) : true,
         reason: c.conflict || c.reason || (c.adoptable ? null : "stays with the plugin"),
       };
     });
@@ -1959,10 +1960,11 @@ function splitGroups(p, only, models) {
   return groups;
 }
 
-/* `only` pre-ticks a single agent — the entry point from "Split to set…" on the
-   agents panel, where you came to change one model, not to take the plugin
-   apart. The dialog still shows everything, because splitting turns the plugin
-   off and you should see what that costs before agreeing to it. */
+/* `only` is a {kind, name} that pre-ticks one component: "Split to set…" on
+   the agents panel, where you came to change one model rather than take the
+   plugin apart, and "Copy into your skills" on a plugin's skill row. The
+   dialog still shows everything, because splitting turns the plugin off and
+   you should see what that costs before agreeing to it. */
 async function pluginSplit(p, only) {
   const models = {};
   const groups = splitGroups(p, only, models);
@@ -4726,8 +4728,23 @@ function itemRow(type, s, enabled, ctx) {
     eb.prepend(icon("pencil"));
     actions.append(eb);
   }
-  actions.append(mkbtn("btn-sm" + (enabled ? " danger" : ""),
-    enabled ? "Disable" : "Enable", () => toggleItem(type, s.name, !enabled, ctx)));
+  /* What the row's primary switch does. The default moves the file into
+     disabled/, which is what every item type but one still means by "off".
+
+     A skill of your own is the exception: its switch is skillOverrides,
+     Claude Code's own, which hides it without touching the file. That comes
+     in through ctx rather than being decided here, because this row is also
+     what the Projects tab draws — and a project's skill turned off through
+     skillOverrides would write the key into *your* settings.json, a
+     cross-scope bug with no visible symptom until a teammate's checkout
+     misbehaves. */
+  const tog = ctx.toggle ? ctx.toggle(s) : {
+    on: enabled,
+    label: enabled ? "Disable" : "Enable",
+    fn: () => toggleItem(type, s.name, !enabled, ctx),
+  };
+  actions.append(mkbtn("btn-sm" + (tog.on ? " danger" : ""),
+    tog.label, tog.fn, tog.title || ""));
   const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
     { label: "Copy path", icon: "copy", fn: () => copyText(s.path || s.name, "path") },
     // Broken items have no Edit button (item_read can't follow the dangling
@@ -4736,8 +4753,7 @@ function itemRow(type, s, enabled, ctx) {
       ? [{ label: "Open by path", icon: "file", fn: () => openPath(s.path) }] : []),
     ...(ctx.copyTo || []),
     ...(ctx.extraMenu ? ctx.extraMenu(s) : []),
-    { label: enabled ? "Disable" : "Enable", icon: "power",
-      fn: () => toggleItem(type, s.name, !enabled, ctx), danger: enabled },
+    { label: tog.label, icon: "power", fn: tog.fn, danger: tog.on },
     { label: "Delete…", icon: "trash", danger: true,
       fn: () => deleteItem(type, s, enabled, ctx) },
   ]), "More actions");
@@ -4864,20 +4880,41 @@ function renderSkills() {
   renderInstalled();
 }
 
+/* The one place a skill's state is decided, so the sections below and the
+   switch on each row cannot disagree about it.
+
+   "parked" is the old disabled/skills/ home, still read and still offered a
+   migration; "archived" is skills/archived/, which Claude Code does not load
+   because personal skills load one level deep; anything else is the
+   skillOverrides value, where the absence of an entry reads as "on". */
+const skillState = (s, ov) =>
+  s.archived ? "archived" : !s.enabled ? "parked" : (ov[s.name] || "on");
+
 function renderInstalled() {
   const view = document.getElementById("skillseg");
   const all = (DATA.items || {}).skills || [];
+  const archivedAll = DATA.archived_skills || [];
   const q = IQ.toLowerCase();
-  const items = all.filter((s) =>
-    !q || s.name.toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q));
-  const on = items.filter((s) => s.enabled);
-  const off = items.filter((s) => !s.enabled);
+  const hit = (s) => !q || s.name.toLowerCase().includes(q)
+    || (s.description || "").toLowerCase().includes(q);
+  const items = all.filter(hit);
+  const archived = archivedAll.filter(hit);
+  const ov = settingsGet("skillOverrides") || {};
+  const live = items.filter((s) => s.enabled);
+  const on = live.filter((s) => skillState(s, ov) !== "off");
+  const offForYou = live.filter((s) => skillState(s, ov) === "off");
+  const parked = items.filter((s) => !s.enabled);
 
   view.innerHTML = "";
   view.append(el("div.view-head", {
-    html: "Skills in <b>" + esc(DATA.config_dir) + "/skills</b> — everything real "
-      + "on this machine. Disabling moves a skill to <b>disabled/skills/</b>; "
-      + "nothing is deleted. Changes apply to new sessions.",
+    html: "Skills in <b>" + esc(DATA.config_dir) + "/skills</b>, and the ones "
+      + "installed plugins bring. Turning one of yours off writes "
+      + "<b>skillOverrides</b> in your settings.json and leaves the file where "
+      + "it is; archiving moves it to <b>skills/archived/</b>, which Claude "
+      + "Code does not load. Overrides are read from your settings.json only — "
+      + "a project's settings.local.json can turn a skill off too, and this "
+      + "view cannot see which project you are in. Changes apply to new "
+      + "sessions.",
   }));
 
   // its own id, not the inventory's: a hidden view keeps its DOM, so after a
@@ -4895,23 +4932,23 @@ function renderInstalled() {
   view.append(el("div.toolbar", {}, inp,
     el("div.toolbar-end", {},
       el("span.hint", {
-        text: on.length + " enabled · " + off.length + " disabled"
+        text: on.length + " on · " + offForYou.length + " off"
+          + (archivedAll.length ? " · " + archivedAll.length + " archived" : "")
+          + (parked.length ? " · " + parked.length + " parked" : "")
           + (items.length !== all.length
              ? " · " + items.length + " of " + all.length + " shown" : "") }))));
 
-  if (!all.length) {
+  if (!all.length && !archivedAll.length) {
     view.append(emptyState("No skills yet",
       "Anything you put in " + DATA.config_dir + "/skills shows up here.",
       "sparkles"));
+    // the plugin section still goes below: a plugin's skills are the one thing
+    // you can have without a skills folder of your own
+    view.append(el("div", { id: "pluginskills" }));
+    loadPluginSkills();
     return;
   }
 
-  // skillOverrides is Claude Code's own switch and does something the file
-  // move cannot: it hides a skill from the model while leaving it typable, and
-  // it never touches the file. Read from your settings.json only — a project's
-  // settings.local.json can turn a skill off too, and this view does not know
-  // which project you are in.
-  const ov = settingsGet("skillOverrides") || {};
   const ctx = {
     extraBadges: (s) => {
       if (!ov[s.name] || ov[s.name] === "on") return [];
@@ -4919,30 +4956,248 @@ function renderInstalled() {
       b.title = "skillOverrides in settings.json — the file is untouched";
       return [b];
     },
+    // The primary switch, supplied rather than defaulted — see itemRow(). The
+    // file never moves either way; what moves is one key in settings.json.
+    toggle: (s) => {
+      const isOff = ov[s.name] === "off";
+      return {
+        on: !isOff,
+        label: isOff ? "Turn back on" : "Turn off for me",
+        title: isOff
+          ? "Remove the skillOverrides entry — the file has not moved"
+          : "Write skillOverrides: off in settings.json — the file stays "
+            + "where it is",
+        fn: () => skillOverride(s.name, isOff ? null : "off"),
+      };
+    },
     extraMenu: (s) => [{
-      label: ov[s.name] === "off" ? "Turn back on for me" : "Turn off for me",
-      icon: "power",
-      fn: () => skillOverride(s.name, ov[s.name] === "off" ? null : "off"),
+      label: "Archive", icon: "archive",
+      fn: () => skillArchive(s.name, true),
     }],
     // the panel itself is built on expand; this only says the row has one
     detail: true,
   };
 
-  const section = (list, label, enabled) => {
+  const section = (list, label, row, hint) => {
     if (!list.length) return;
     view.append(sectionTitle(label, list.length));
+    if (hint) view.append(el("div.section-hint", { text: hint }));
     const box = el("div.list");
-    for (const s of list) box.append(itemRow("skills", s, enabled, ctx));
+    for (const s of list) box.append(row(s));
     view.append(box);
   };
 
-  section(on, "Enabled", true);
-  section(off, "Disabled", false);
+  section(on, "Enabled", (s) => itemRow("skills", s, true, ctx));
+  section(offForYou, "Off for you", (s) => itemRow("skills", s, true, ctx),
+    "Turned off with skillOverrides. The files are exactly where they were — "
+    + "this is Claude Code's own switch, not a move.");
+  section(archived, "Archived", archivedRow,
+    "In " + DATA.config_dir + "/skills/archived/. Claude Code loads skills one "
+    + "level deep, so nothing in here loads. Nothing has been rewritten: "
+    + "restoring is the same move back.");
+  parkedSection(view, parked);
 
-  if (!items.length) {
+  view.append(el("div", { id: "pluginskills" }));
+  loadPluginSkills();
+
+  if (!items.length && !archived.length) {
     view.append(noMatches(IQ));
     view.append(catalogSearchLink(IQ));
   }
+}
+
+/* An archived skill: out of the way, not gone. No Edit button — the item
+   editor addresses a skill as (type, name, enabled), which cannot name one in
+   the archive — but the files are still openable by path, which is all the
+   editor was going to do anyway. */
+function archivedRow(s) {
+  const b = badge("archived", "secondary");
+  b.title = "In skills/archived/ — Claude Code does not load it from there";
+  const actions = el("div.li-actions", {},
+    mkbtn("btn-sm", "Restore", () => skillArchive(s.name, false),
+      "Move it back to skills/ — the same move, the other way"),
+    (() => {
+      const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
+        { label: "Copy path", icon: "copy", fn: () => copyText(s.path, "path") },
+        { label: "Open by path", icon: "file",
+          fn: () => openPath(s.path + "/SKILL.md") },
+        { label: "Delete…", icon: "trash", danger: true,
+          fn: () => archivedDelete(s) },
+      ]), "More actions");
+      more.append(icon("chevronDown"));
+      return more;
+    })());
+  return el("div.list-item.off", {},
+    el("div.li-main", {},
+      el("span.li-name", { title: s.path || "", text: s.name }),
+      b, ...itemBadges(s)),
+    el("span.li-desc", { text: s.description || "" }),
+    actions);
+}
+
+/* The old parking area. It still works, and a skill in it can still just be
+   enabled — the primary button is deliberately the same file move it always
+   was. What is new is the offer to move it somewhere better. */
+function parkedSection(view, parked) {
+  if (!parked.length) return;
+  view.append(sectionTitle("Parked in disabled/skills/", parked.length));
+  const hint = el("div.section-hint", {
+    text: "This app's own parking area, from before skills had a switch of "
+      + "their own. It still works. The archive is the better home: it is "
+      + "inside skills/, so a skill keeps its place in your config, and "
+      + "settings.json is where \"off\" is recorded. Commands, agents and "
+      + "output styles keep using disabled/ — they have no switch of their "
+      + "own to use instead." });
+  view.append(hint);
+  const bar = el("div.toolbar", {}, el("div.toolbar-end", {},
+    mkbtn("btn-sm btn-primary", "Migrate all " + parked.length,
+      () => archiveMigrate(parked.map((s) => s.name)),
+      "Enable each one, then move it into skills/archived/")));
+  view.append(bar);
+  const box = el("div.list");
+  for (const s of parked)
+    box.append(itemRow("skills", s, false, {
+      extraMenu: () => [{ label: "Archive instead", icon: "archive",
+        fn: () => archiveMigrate([s.name]) }],
+    }));
+  view.append(box);
+}
+
+/* --------------------------------------------------- skills from a plugin --
+
+   Rendered in a second pass. Installed is the default view of the default tab,
+   and awaiting /api/plugins before first paint would make it slower than it
+   was when it was three tabs. */
+async function loadPluginSkills() {
+  const box = document.getElementById("pluginskills");
+  if (!box) return;
+  if (!PLUGINS) {
+    try { PLUGINS = await api("/api/plugins"); }
+    catch (e) { return; }   // the Plugins segment says so properly; this is a bonus section
+  }
+  // a filter keystroke re-renders the whole view while this is in flight, and
+  // the node we were handed is detached by then
+  if (!onSeg("installed") || !box.isConnected) return;
+  const q = IQ.toLowerCase();
+  const rows = [];
+  for (const p of PLUGINS.plugins || [])
+    for (const c of p.components || [])
+      if (c.kind === "skills"
+          && (!q || c.name.toLowerCase().includes(q)
+              || (c.description || "").toLowerCase().includes(q)))
+        rows.push([p, c]);
+  if (!rows.length) return;
+  box.append(sectionTitle("From plugins", rows.length));
+  box.append(el("div.section-hint", {
+    text: "Shipped by an installed plugin, listed here because they load into "
+      + "your sessions exactly like your own. Read-only: a plugin skill has no "
+      + "switch of its own — its switch is the whole plugin's." }));
+  const list = el("div.list");
+  for (const [p, c] of rows) list.append(pluginSkillRow(p, c));
+  box.append(list);
+}
+
+/* One plugin's skill.
+
+   No override control, deliberately. From code.claude.com/docs/en/skills:
+   "Plugin skills are not affected by skillOverrides. Manage those through
+   /plugin instead." The key is a bare skill name while a plugin's skill
+   answers to plugin-name:skill-name, so an entry written here would name
+   whatever skill of your own shared the last segment and turn *that* off. See
+   plugins.skill_override_set(), which is the authority on this. No archive and
+   no edit either: this app never writes inside <config>/plugins/. */
+function pluginSkillRow(p, c) {
+  const from = badge(p.name, "outline");
+  from.title = "ships with " + p.id + " — read-only here";
+  const actions = el("div.li-actions", {},
+    mkbtn("btn-sm", "Copy into your skills",
+      () => pluginSplit(p, { kind: "skills", name: c.name }),
+      "Copies it into your config as an ordinary skill you own"),
+    ...(p.state === "enabled"
+      ? [mkbtn("btn-sm danger", "Disable plugin", () => pluginDisableConfirm(p),
+          "A plugin skill has no switch of its own")] : []),
+    (() => {
+      const more = mkbtn("btn-sm btn-icon btn-ghost", "", (e) => openMenu(e.currentTarget, [
+        { label: "Copy path", icon: "copy", fn: () => copyText(c.path, "path") },
+        { label: "Open by path", icon: "file",
+          fn: () => openPath(c.path + "/SKILL.md") },
+        { label: "Show the plugin", icon: "plug",
+          fn: () => { PQ = p.id; goSeg("plugins"); } },
+      ]), "More actions");
+      more.append(icon("chevronDown"));
+      return more;
+    })());
+  return el("div.list-item", { class: p.state === "enabled" ? "" : "off" },
+    el("div.li-main", {},
+      el("span.li-name", { title: c.path || "", text: c.name }),
+      from,
+      ...(p.state === "enabled" ? [] : [badge(p.state, "secondary")]),
+      ...itemBadges(c)),
+    el("span.li-desc", { text: c.description || "" }),
+    actions);
+}
+
+/* Turning a plugin off to turn one skill off takes everything else it ships
+   with it. Name those first, from the same payload the list above is built
+   from, so the confirm and the rows beneath it cannot disagree. */
+async function pluginDisableConfirm(p) {
+  const rest = (p.components || [])
+    .filter((c) => c.kind !== "skills")
+    .map((c) => KIND_LABEL[c.kind] + " " + c.name);
+  const ok = await mconfirm("Disable " + p.name + "?",
+    "A plugin skill has no switch of its own — the plugin's is the only one. "
+    + (rest.length
+       ? "Turning it off also turns off " + rest.slice(0, 6).join(", ")
+         + (rest.length > 6 ? " and " + (rest.length - 6) + " more" : "") + "."
+       : "It ships nothing else, so only its skills go off.")
+    + " To keep just the skill, use Copy into your skills instead.",
+    "Disable plugin");
+  if (ok) await pluginToggle(p.id, false);
+}
+
+/* ------------------------------------------------------- archive actions --
+   The rename between skills/<name>/ and skills/archived/<name>/. Undo is the
+   same call the other way, and it is honest: nothing was rewritten. What it
+   does not put back is a skillOverrides entry the archive cleared — archiving
+   supersedes an override, and nothing recorded the old value. */
+async function skillArchive(name, archived) {
+  await act("skill-archive", { name, archived },
+    archived ? name + " archived — moved to skills/archived/ · applies to new sessions"
+             : name + " restored to skills/ · applies to new sessions",
+    { undo: { label: "Undo", fn: () => skillArchive(name, !archived) } });
+}
+
+/* disabled/skills/ -> skills/archived/, per skill. The server does it in two
+   steps (enable, then archive) and reports each name on its own, so one
+   collision cannot strand the rest. A failure between the steps leaves that
+   skill enabled, which the message says. */
+async function archiveMigrate(names) {
+  await act("skill-archive-migrate", { names },
+    (r) => {
+      const moved = (r.moved || []).length;
+      const failed = r.failed || [];
+      if (!failed.length)
+        return { text: "Moved " + plural(moved, "skill") + " into "
+          + "skills/archived/ · applies to new sessions" };
+      return { text: "Moved " + moved + ", " + failed.length + " could not move: "
+        + failed.map((f) => f.name + " (" + f.error + ")").join("; "), err: true };
+    });
+}
+
+/* The one archive action that takes something away for good — the same
+   type-the-name gate deleteItem() uses, and no Undo, because nothing is held
+   to put back. */
+async function archivedDelete(s) {
+  const what = s.symlink
+    ? "Removes the link at " + (s.path || s.name) + ". Whatever it points at is "
+      + "left exactly as it is."
+    : "Permanently removes " + (s.path || s.name) + " and everything inside it. "
+      + "This cannot be undone from here.";
+  const ok = await mconfirmWord("Delete " + s.name + "?",
+    what + " It is already archived, so nothing in your live config changes.",
+    s.name, "Delete");
+  if (!ok) return;
+  await act("skill-archive-delete", { name: s.name }, s.name + " deleted");
 }
 
 /* ------------------------------------------------------------------ backup --
