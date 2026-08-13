@@ -59,10 +59,10 @@ owns, links, tracks, or syncs anything:
   skill archived while disabled comes back as an ordinary project skill,
   because a project has no `disabled/` area, and an item the project already
   has starts unticked and says so.
-- **Token saver** — a setup piece that points eight `settings.json` keys at
+- **Token saver** — a setup piece that points nine `settings.json` keys at
   cheaper defaults for pay-per-token API use: Sonnet main model, Haiku
-  subagents, medium effort, smaller workflows, and fewer model-generated
-  extras. Applied as one atomic write; Remove clears only the keys still at
+  subagents, medium effort, smaller workflows, earlier auto-compaction, and
+  fewer model-generated extras. Applied as one atomic write; Remove clears only the keys still at
   preset values, so anything you changed since stays yours.
 - **Local model** — a setup piece that generates an opt-in `claude-local`
   command running Claude Code against a local [oMLX](https://github.com/jundot/omlx)

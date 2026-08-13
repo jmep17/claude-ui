@@ -243,7 +243,7 @@ less.
 `setup.py`'s `PIECES` dict is documented as the extension point and now holds
 two entries: the second is the **token-saver settings preset**
 (`settings_presets.py` + `data/presets/settings/token-saver.json`), which
-points eight documented `settings.json` keys at cheaper defaults through
+points nine documented `settings.json` keys at cheaper defaults through
 `settings_set_many()` in one atomic write, and removes only values still at
 preset values. Remaining candidates following the same derived-state contract:
 a session-start git-identity hook, a stop-hook desktop notifier, a

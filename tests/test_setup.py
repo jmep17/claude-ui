@@ -30,10 +30,10 @@ class PresetData(unittest.TestCase):
     def entries(self):
         return settings_presets.preset_entries("token-saver")
 
-    def test_eight_unique_valid_keys_each_with_a_why(self):
+    def test_nine_unique_valid_keys_each_with_a_why(self):
         entries = self.entries()
         keys = [e["key"] for e in entries]
-        self.assertEqual(len(keys), 8)
+        self.assertEqual(len(keys), 9)
         self.assertEqual(len(keys), len(set(keys)))
         for e in entries:
             self.assertTrue(settings.SETTINGS_KEY_RE.match(e["key"]))
@@ -110,7 +110,7 @@ class PieceLifecycle(unittest.TestCase):
                              e["value"])
         st = self.state()
         self.assertTrue(st["installed"])
-        self.assertIn("all 8", st["detail"])
+        self.assertIn("all 9", st["detail"])
 
     def test_reapply_writes_nothing(self):
         settings_presets.preset_apply("token-saver")
@@ -131,7 +131,7 @@ class PieceLifecycle(unittest.TestCase):
         settings.settings_set("model", "opus")
         st = self.state()
         self.assertFalse(st["installed"])
-        self.assertIn("7 of 8", st["detail"])
+        self.assertIn("8 of 9", st["detail"])
 
     def test_remove_leaves_drift_and_user_siblings(self):
         self.write({"env": {"FOO": "bar"}})

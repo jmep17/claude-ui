@@ -21,7 +21,9 @@ load-bearing as what it sets:
   - ENABLE_PROMPT_CACHING_1H — cache writes bill higher; only wins for
     long-idle sessions, wrong as a default.
   - autoCompactEnabled: false — skipping compaction grows per-turn input to
-    the context ceiling; the default is already the cheap side.
+    the context ceiling; the default is already the cheap side. The preset
+    lowers the compaction threshold instead (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE),
+    which is the opposite lever: compaction still runs, just earlier.
   - CLAUDE_CODE_MAX_OUTPUT_TOKENS / MAX_MCP_OUTPUT_TOKENS caps — truncation
     causes retries and rework, which costs more than it saves.
   - includeGitInstructions: false — loses git/PR workflow competence for a
@@ -47,7 +49,8 @@ PRESETS = {
         "label": "Token saver",
         "desc": "Cheaper defaults for pay-per-token API use: Sonnet main "
                 "model, Haiku subagents, medium effort, smaller workflows, "
-                "and fewer model-generated extras. Only these keys are "
+                "earlier auto-compaction, and fewer model-generated extras. "
+                "Only these keys are "
                 "written; Remove clears just the ones still at preset values.",
     },
 }

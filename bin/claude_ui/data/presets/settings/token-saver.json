@@ -14,5 +14,7 @@
   {"key": "awaySummaryEnabled", "value": false,
    "why": "The return-to-terminal recap is model-generated on your key."},
   {"key": "env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "value": "1",
-   "why": "Terminal titles are Haiku-generated per session; a small but pure saving."}
+   "why": "Terminal titles are Haiku-generated per session; a small but pure saving."},
+  {"key": "env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "value": "80",
+   "why": "Compaction runs at the default share of the window, so every turn before it bills input near the ceiling; 80 compacts earlier and keeps the per-turn context smaller. The variable can only lower the threshold, never raise it, so it is safe as a default."}
 ]
