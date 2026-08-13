@@ -726,11 +726,16 @@ def get_entry(pid):
 
 def resolve_install(pid, scope=None):
     """The index's own stored key for `pid`, or a ValueError explaining the
-    refusal. Phase 2 stub: just the resolution/lookup logic, no install action.
+    refusal — the gate in front of server.py's catalog-install action, which
+    passes this return value (never the raw request string) to the `claude
+    plugin install` subprocess. Resolving here means an unknown id, a
+    non-installable component, or a blocked marketplace is refused before
+    anything shells out.
 
     `scope` is accepted for the same forward-compatibility reason `root` is on
-    search() — Phase 2's install wiring will care which store an install
-    targets; this phase does not act on it.
+    search(): the caller decides which store an install targets, and this
+    function does not act on it — it only answers "is this installable at
+    all".
     """
     idx = build_index()
     by_id = {e["id"]: e for e in idx["entries"]}

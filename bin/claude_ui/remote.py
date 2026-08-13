@@ -1,27 +1,42 @@
-"""Guarded fetch of Anthropic's two public plugin catalogs — the only network
+"""Guarded fetch of Anthropic's two public plugin catalogs, plus the two
+skills.sh lookups (per-skill audit, and free-text search) — the only network
 calls this app makes on the user's behalf against non-Anthropic-docs URLs.
 
-This module knows nothing about what a plugin or skill is. It is a generic
-fetch-a-pre-registered-document utility with a hardcoded, frozen allowlist of
-sources (_SOURCES below). There is deliberately no function anywhere in this
-module that accepts a URL from a caller — every fetchable thing is a key into
-that frozen dict, never a string built at runtime. That is the hard security
-invariant this module exists to enforce: a bug anywhere else in the codebase
-that calls fetch_source() with attacker-influenced input can, at worst, name
-an unknown key (refused before any network I/O) — it can never steer the
-request to a different host.
+This module knows nothing about what a plugin or skill is. The catalog half
+is a generic fetch-a-pre-registered-document utility with a hardcoded, frozen
+allowlist of sources (_SOURCES below). There is deliberately no function
+anywhere in this module that accepts a URL from a caller — every request is
+built here from a hardcoded prefix plus escaped/encoded arguments, never from
+a string a caller hands over. That is the hard security invariant this module
+exists to enforce: a bug anywhere else in the codebase that calls into this
+module with attacker-influenced input can, at worst, name an unknown source
+key (refused before any network I/O) or push text through urlencode() into a
+query string — it can never steer the request to a different host.
 
 Consent is enforced here too, not just by server.py choosing to gate its
-route: fetch_source() itself refuses to run when no consent is on record for
-that source. A caller bug elsewhere cannot fire an unconsented fetch.
+routes: every fetching function refuses to run when no consent is on record.
+A caller bug elsewhere cannot fire an unconsented fetch.
 
-Everything fetched is a public, static JSON document (a marketplace.json) —
-no query, no user data, ever leaves this machine. `ok` consent means exactly
-"you may download this document from this URL", nothing more.
+The three things that reach the network, and what each costs the user:
+
+  fetch_source()  — a public, static JSON document (a marketplace.json) from
+    GitHub. No query, no user data. `ok` consent for that source means
+    exactly "you may download this document from this URL", nothing more.
+
+  audit_skill()   — skills.sh's security verdict for one named skill the user
+    clicked Audit on. Sends that skill's name. Gated on skills_sh.ok.
+
+  search_skills() — skills.sh's search endpoint. This one sends *what the
+    user typed* to a third party, so it is gated on the separate, stronger
+    skills_sh.query_ok flag, and server.py only reaches it from an explicit
+    press of a Search button — never from the Discover tab's as-you-type
+    local search, which stays entirely offline. Results are never cached to
+    disk: a cache file of remote searches would be a record of what the user
+    typed sitting in their config directory.
 """
 
 from datetime import datetime, timezone
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 import json
 import urllib.error
 import urllib.request
@@ -79,9 +94,11 @@ DISCOVER_SOURCES = tuple(_SOURCES)  # ("official", "community") — consent_get(
 # Stored in .claude-ui.json (core.read_cfg/write_cfg — the existing gitignored
 # machine-local config file), under a "discover" key:
 #   {"discover": {"official": {"ok": true, "at": "..."},
-#                 "community": {"ok": false}}}
-# skills_sh is Phase 4's key; this phase never writes it, and passes an
-# existing value through untouched if the file already has one.
+#                 "community": {"ok": false},
+#                 "skills_sh": {"ok": true, "query_ok": false, "at": "..."}}}
+# skills_sh carries two flags, not one: `ok` (ask about one named skill) and
+# the strictly stronger `query_ok` (send what the user types to the search
+# endpoint). See consent_set_skills_sh().
 
 def _now_iso():
     """Real clock by default; a function (not a bare call site) so tests can
@@ -95,8 +112,8 @@ def consent_get():
     """The discover-consent block, defaults filled in for official/community
     and skills_sh. A source with nothing recorded reads as
     {"ok": False, "at": None} (skills_sh also carries "query_ok": False —
-    see audit_skill()'s docstring for what that flag means and why it is
-    not checked by anything in this phase)."""
+    see consent_set_skills_sh() for what that second flag means, and
+    search_skills() for the only thing that checks it)."""
     discover = read_cfg().get("discover")
     discover = discover if isinstance(discover, dict) else {}
     out = {}
@@ -129,24 +146,34 @@ def consent_set(source, ok, at=None):
     return discover[source]
 
 
-def consent_set_skills_sh(ok, at=None):
-    """Record consent (or its withdrawal) for the skills.sh audit lookup.
+def consent_set_skills_sh(ok, query_ok=None, at=None):
+    """Record consent (or its withdrawal) for the two skills.sh lookups.
 
     Kept separate from consent_set() rather than folded into DISCOVER_SOURCES:
     that dict/function pair's shape is {"ok", "at"} for a static-document
-    fetch; skills_sh's shape is {"ok", "query_ok", "at"} (see the module
-    docstring's consent-shape comment near _SOURCES). Only `ok` is settable
-    here — `query_ok` would gate the skills.sh *search* endpoint, which is
-    out of scope forever per the plan, so nothing in this codebase ever
-    writes it; it is preserved as-is (defaulting to False) if some future
-    caller ever sets it directly in the config file by hand.
+    fetch; skills_sh's shape is {"ok", "query_ok", "at"} (see the consent-shape
+    comment above). The two flags are nested, not parallel:
+
+      ok        — "you may ask skills.sh about this one named skill I clicked
+                   Audit on". Checked by audit_skill().
+      query_ok  — "you may send what I type to skills.sh's search endpoint".
+                   Strictly stronger. Checked by search_skills(), and by
+                   nothing else.
+
+    `query_ok=None` (the default) preserves whatever is already on disk, so
+    the audit-consent flow — which knows nothing about search — cannot
+    silently revoke a search consent granted earlier. Setting `ok=False`
+    forces `query_ok=False` regardless of what was passed or stored:
+    withdrawing the weaker consent must not leave the stronger one live.
     """
     cfg = read_cfg()
     discover = cfg.get("discover")
     discover = dict(discover) if isinstance(discover, dict) else {}
     existing = discover.get("skills_sh")
     existing = existing if isinstance(existing, dict) else {}
-    discover["skills_sh"] = {"ok": bool(ok), "query_ok": bool(existing.get("query_ok")),
+    ok = bool(ok)
+    query = bool(existing.get("query_ok")) if query_ok is None else bool(query_ok)
+    discover["skills_sh"] = {"ok": ok, "query_ok": query and ok,
                              "at": at or _now_iso()}
     cfg["discover"] = discover
     write_cfg(cfg)
@@ -291,9 +318,8 @@ def fetch_source(name):
 #
 # skills.sh's audit endpoint: a documented, public, multi-provider security
 # verdict lookup for one named skill the user already has in view — NOT a
-# search. skills.sh's *search* endpoint is undocumented and privacy-leaking
-# (it would send whatever the user is typing to a third party) and is out of
-# scope forever; nothing in this module builds a URL for it.
+# search. Search lives in search_skills() below, behind its own stronger
+# consent flag, because it is the one call that sends what the user typed.
 #
 # Different shape from _SOURCES on purpose: on-demand, per-skill, a small
 # JSON response, not part of the search index. It is deliberately NOT
@@ -308,7 +334,11 @@ _AUDIT_CAP = 100_000       # real response is a small JSON verdict blob
 _AUDIT_TIMEOUT = 8         # seconds — small lookup, no reason to wait longer
 _AUDIT_STR_LIMIT = 2000    # generous cap for a verdict/explanation string
 _AUDIT_KEY_LIMIT = 80
-_AUDIT_MAX_DEPTH = 3       # shallow nesting only — see _sanitize_audit_value
+# Shallow nesting only — see _sanitize_audit_value. 4, not 3: the real
+# response nests doc -> audits[] -> {provider…} -> categories[], and the
+# categories array (the most useful part of a verdict) sits at depth 3, so a
+# limit of 3 dropped it silently.
+_AUDIT_MAX_DEPTH = 4
 _AUDIT_LIST_LIMIT = 50     # a list this long from a "verdict" endpoint is not useful, cap it
 
 
@@ -366,14 +396,14 @@ def audit_skill(source, skill):
     Refuses (raises ValueError, matching fetch_source()'s error-signal
     convention) when:
       - skills_sh.ok consent is not recorded — this is the only flag this
-        function checks. skills_sh.query_ok is a *stricter* flag reserved
-        for skills.sh's free-text search endpoint (which this codebase never
-        calls): it guards "sending what I type to this company" as the user
-        types it. This function's `skill` argument is never free text — it
-        is the name of an entry the caller already resolved out of the LOCAL
-        catalog index (see server.py's /api/skill-audit, which resolves an
-        id server-side rather than trusting a raw name from the request
-        body) — so query_ok does not apply here.
+        function checks. skills_sh.query_ok is a *stricter* flag guarding
+        search_skills(), i.e. "sending what I type to this company". This
+        function's `skill` argument is never free text — it is the name of
+        an entry the caller already resolved server-side, either out of the
+        LOCAL catalog index or out of this server's own most recent search
+        response (see server.py's /api/skill-audit, which resolves an id
+        rather than trusting a raw name from the request body) — so
+        query_ok does not apply here.
       - the assembled URL, after quote(seg, safe="")'ing both segments
         (percent-encoding everything, including "/"), does not start with
         _AUDIT_PREFIX — belt-and-suspenders against a pathological encoding
@@ -412,3 +442,148 @@ def audit_skill(source, skill):
         raise ValueError("skills_sh: unexpected response shape (not a JSON object)")
 
     return {"ok": True, "data": _sanitize_audit_value(doc, 0)}
+
+
+# ------------------------------------------------------------------ search
+#
+# skills.sh's search endpoint — the only call in this codebase that sends
+# what the user typed to a third party, and the reason skills_sh consent has
+# two flags instead of one.
+#
+# It is reached only from an explicit press of the Discover tab's "Search
+# skills.sh" button (or Enter in that box, IME composition excluded). It is
+# deliberately NOT on the as-you-type debounce that drives the local index
+# search — that would ship partial keystrokes off-machine, which is the whole
+# thing query_ok exists to prevent.
+#
+# Not disk-cached, unlike fetch_source()'s marketplace documents: a cache of
+# remote search results is a log of what the user typed, sitting in their
+# config directory. Ephemeral or nothing.
+#
+# This is the same endpoint the official `skills` npm CLI calls. The
+# documented /api/v1/* API is Vercel-OIDC gated and unusable from here.
+
+_SEARCH_PREFIX = "https://skills.sh/api/search"
+assert _SEARCH_PREFIX.startswith("https://"), "search URL prefix must be https"
+
+_SEARCH_CAP = 200_000       # a result list, not a document
+_SEARCH_TIMEOUT = 8
+_SEARCH_LIMIT_MAX = 50
+_SEARCH_Q_MAX = 100
+_SEARCH_Q_MIN = 2           # shorter than this is refused without a network call
+
+# skills.sh page URLs are built here from the returned id, never taken from
+# the response body — the same "no URL from anyone else" rule the rest of
+# this module follows.
+_SKILL_PAGE_PREFIX = "https://www.skills.sh/"
+
+# The ids of the most recent search's results. server.py's /api/skill-audit
+# consults this to decide whether an id it cannot find in the local index is
+# nonetheless one this server itself just handed the client — see that route
+# for why that is the whole authorization story for auditing a remote hit.
+#
+# The server is threaded, so this is shared across request threads. It is
+# rebound whole (never mutated in place) so a reader always sees a complete,
+# self-consistent set. The worst a race can do is refuse an audit for an id a
+# newer search has just displaced, and the user clicks again.
+_last_search_ids = frozenset()
+
+
+def last_search_ids():
+    """The id set from the most recent successful search_skills() call."""
+    return _last_search_ids
+
+
+def _trim_search_records(skills):
+    """The name/source/installs subset the UI renders, sanitized with the
+    same helpers catalog.py applies to on-disk marketplace content — this
+    response is third-party and exactly as attacker-controlled. A record
+    missing any of id/name/source is dropped rather than half-rendered.
+
+    Note what is NOT here: the endpoint returns no description, and no URL
+    from the response is ever used — the skill page link is assembled from
+    the sanitized id and re-checked with catalog.safe_url().
+    """
+    out = []
+    for s in skills:
+        if not isinstance(s, dict):
+            continue
+        sid = catalog.clean_str(s.get("id"), 220)
+        name = catalog.clean_str(s.get("name"), 80)
+        source = catalog.clean_str(s.get("source"), 120)
+        if not sid or not name or not source:
+            continue
+        installs = s.get("installs")
+        installs = installs if isinstance(installs, int) and not isinstance(installs, bool) else None
+        out.append({
+            "id": sid,
+            "name": name,
+            "source": source,
+            "installs": installs,
+            "url": catalog.safe_url(_SKILL_PAGE_PREFIX + quote(sid, safe="/")),
+        })
+    return out
+
+
+def search_skills(q, limit=None):
+    """Search skills.sh for `q`. Returns {"ok": True, "query", "skills": [...]}.
+
+    Refuses (raises ValueError, matching fetch_source()'s error-signal
+    convention) when:
+      - skills_sh.query_ok consent is not recorded. Note `query_ok`, NOT
+        `ok`: consenting to a per-skill audit is not consenting to send what
+        you type. Checked first, before any I/O.
+      - `q` is under _SEARCH_Q_MIN characters after cleaning — refused
+        locally, no request made.
+      - the assembled URL does not start with _SEARCH_PREFIX. urlencode()
+        already escapes everything, so this is belt-and-braces against an
+        encoding bug, the same re-check audit_skill() does.
+      - the response is oversized, unreadable JSON, or not a JSON object.
+
+    `q` is a string, never a URL; `limit` is clamped into 1.._SEARCH_LIMIT_MAX.
+    """
+    consent = consent_get().get("skills_sh") or {}
+    if not consent.get("query_ok"):
+        raise ValueError("skills_sh: search is off — turn on skills.sh search first")
+
+    q = (catalog.clean_str(q, _SEARCH_Q_MAX) or "").strip()
+    if len(q) < _SEARCH_Q_MIN:
+        raise ValueError(f"skills_sh: type at least {_SEARCH_Q_MIN} characters to search")
+
+    try:
+        n = int(limit)
+    except (TypeError, ValueError):
+        n = _SEARCH_LIMIT_MAX
+    n = max(1, min(_SEARCH_LIMIT_MAX, n))
+
+    url = f"{_SEARCH_PREFIX}?{urlencode({'q': q, 'limit': n})}"
+    if not url.startswith(_SEARCH_PREFIX):
+        raise ValueError("skills_sh: assembled search URL escaped its prefix — refusing")
+
+    req = urllib.request.Request(url, headers={"user-agent": "claude-ui"})
+    try:
+        with _opener.open(req, timeout=_SEARCH_TIMEOUT) as resp:
+            # cap+1, never content-length — the server's claim is not a fact.
+            data = resp.read(_SEARCH_CAP + 1)
+    except urllib.error.URLError as e:
+        raise ValueError(f"skills_sh: search failed: {e.reason}") from None
+    except OSError as e:
+        raise ValueError(f"skills_sh: search failed: {e}") from None
+
+    if len(data) > _SEARCH_CAP:
+        raise ValueError(f"skills_sh: response exceeded {_SEARCH_CAP} bytes — refusing")
+
+    try:
+        doc = json.loads(data)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"skills_sh: unreadable JSON: {e}") from None
+
+    if not isinstance(doc, dict):
+        raise ValueError("skills_sh: unexpected response shape (not a JSON object)")
+
+    skills = doc.get("skills")
+    records = _trim_search_records(skills[:_SEARCH_LIMIT_MAX]) if isinstance(skills, list) else []
+
+    global _last_search_ids
+    _last_search_ids = frozenset(r["id"] for r in records)
+    return {"ok": True, "query": q, "skills": records}

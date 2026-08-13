@@ -534,13 +534,19 @@ class Handler(BaseHTTPRequestHandler):
                                   else marketplace_add(scope, source))
             elif action == "discover-consent":
                 # source is one of the two static-document keys, or skills_sh
-                # (Phase 4's per-skill audit lookup) — a different consent
-                # shape ({ok, query_ok}), so it gets its own setter rather
-                # than routing through consent_set().
+                # (the per-skill audit lookup and the search endpoint) — a
+                # different consent shape ({ok, query_ok}), so it gets its own
+                # setter rather than routing through consent_set().
+                #
+                # query_ok is passed through raw, not bool()'d: absent means
+                # "leave it as it is" (the audit-consent flow sends no
+                # query_ok and must not revoke a search consent), which only
+                # the setter can distinguish from an explicit false.
                 source = req.get("source", "")
                 if source == "skills_sh":
                     self.send(200, {"ok": True, "consent":
-                                    remote.consent_set_skills_sh(bool(req.get("ok")))})
+                                    remote.consent_set_skills_sh(
+                                        bool(req.get("ok")), req.get("query_ok"))})
                 elif source not in ("official", "community"):
                     self.send(400, {"error": f"{source!r}: not a source this app manages"})
                 else:
@@ -565,17 +571,42 @@ class Handler(BaseHTTPRequestHandler):
                         except ValueError as e:
                             results[name] = {"ok": False, "detail": str(e)}
                     self.send(200, {"results": results})
+            elif action == "skills-search":
+                # The one route that sends what the user typed off-machine.
+                # remote.search_skills() gates on skills_sh.query_ok before
+                # any I/O and builds the URL itself — nothing here does.
+                # POST, not GET, so it goes through the x-claude-ui token and
+                # host_ok() checks above like every other mutating action.
+                self.send(200, remote.search_skills(req.get("q", ""), req.get("limit")))
             elif action == "skill-audit":
-                # id is resolved server-side against the catalog index, same
-                # security property as catalog-install above: the request's
-                # copy of `id` is used only to look it up via
-                # catalog.get_entry(), then discarded — source/skill (what
-                # actually reaches remote.audit_skill(), and from there
-                # skills.sh) come from the resolved Entry, never the raw
+                # id is resolved server-side, same security property as
+                # catalog-install above: the request's copy of `id` is used
+                # only to look something up, then discarded — source/skill
+                # (what actually reaches remote.audit_skill(), and from there
+                # skills.sh) come from what the lookup returned, never the raw
                 # request body.
-                e = catalog.get_entry(req.get("id", ""))
+                rid = req.get("id", "")
+                e = catalog.get_entry(rid)
                 if e is None:
-                    raise ValueError(f"{req.get('id', '')!r}: not in the index")
+                    # Not in the local index — the one other thing it may be
+                    # is an id this server itself returned from the client's
+                    # most recent consented skills.sh search. Those ids were
+                    # sanitized by remote._trim_search_records() on the way
+                    # out, so no re-validation is needed on the way back in;
+                    # membership in that set IS the authorization.
+                    #
+                    # Deliberately no kind check on this branch, unlike the
+                    # local-index one below: skills.sh returns only skills,
+                    # and the id came from our own response.
+                    if rid not in remote.last_search_ids():
+                        raise ValueError(f"{rid!r}: not in the index")
+                    # "owner/repo/slug" — rsplit, so the owner/repo half keeps
+                    # its own slash and only the trailing slug is split off.
+                    source, _, skill = str(rid).rpartition("/")
+                    if not source or not skill:
+                        raise ValueError(f"{rid!r}: not an auditable skills.sh id")
+                    self.send(200, remote.audit_skill(source, skill))
+                    return
                 if e.get("kind") != "skill":
                     raise ValueError(f"{e['id']}: not a skill — only skills can be audited")
                 # skills.sh's audit path is an npm-style source/skill pair; the

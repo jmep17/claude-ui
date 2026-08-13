@@ -5491,16 +5491,32 @@ async function applyRestore() {
 
 // ---------------------------------------------------------------- discover
 /* Search over everything Claude Code can load, whether or not you own it —
-   your items, installed plugins, on-disk marketplaces, and (once you opt in,
-   a later phase) Anthropic's official and community catalogs. The query is
-   answered by GET /api/search, which never reaches the network — the index
-   is built from files already on this machine. */
+   your items, installed plugins, on-disk marketplaces, and (once you opt in)
+   Anthropic's official and community catalogs. All of that is answered by
+   GET /api/search, which never reaches the network: the index is built from
+   files already on this machine, and the two remote catalogs are static
+   documents downloaded once and cached to disk.
+
+   skills.sh search is the one exception, and it is kept visibly separate for
+   that reason — different state (DSH), its own section, its own consent, and
+   a button you have to press. Nothing you type reaches it by typing alone. */
 
 let DQ = "";
 let DHITS = null;   // null = not searched yet this tab-open; [] = no hits
 let DCATALOG = null;
 let DSEQ = 0;        // monotonic guard: a slow response cannot overwrite a newer one
 let DTIMER = null;
+
+/* skills.sh results are live third-party hits, not part of the local index —
+   kept in their own state rather than merged into DHITS so "local unless you
+   pressed the button" stays true by construction, not by convention.
+   DSH: null = never searched this tab-open, [] = searched, no hits.
+   DSHQ: the query those results are for, so the section can say so.
+   DSHSEQ: same monotonic guard DSEQ is, for the remote round-trip. */
+let DSH = null;
+let DSHQ = "";
+let DSHSEQ = 0;
+let DSHBUSY = false;
 
 /* Jump to the Discover tab with `q` pre-filled and searched — the one
    navigation every catalog bridge uses: the palette's catalog group, and the
@@ -5514,6 +5530,8 @@ function goDiscoverSearch(q) {
   if (TAB !== "discover") return;
   DQ = q;
   DHITS = null;
+  DSH = null;   // results for the old query — never carried onto a new one
+  DSHQ = "";
   render();
 }
 
@@ -5543,31 +5561,34 @@ const DISCOVER_TAB = { skill: "skills", command: "commands", agent: "agents",
 
 // One card per remote group (official/community) with no recorded consent —
 // or consent explicitly withdrawn. `ok` here means exactly one thing: "you
-// may download this static public document from this URL." There is no
-// query-leaking risk to word carefully around in this phase — search stays
-// local — so the copy just says what is actually happening.
+// may download this static public document from this URL." Still nothing to
+// word carefully around for query leaks: these are downloads, not searches —
+// what you type is never part of the request either way.
+//
+// Built on the same .card-header/.card-title/.card-description shape every
+// other card in the app uses (see the hooks card in renderSettings) so the
+// header's padding and border match, and the .drow rows below it sit at the
+// card's normal inset rather than flush against its border.
 function discoverConsentCard() {
   if (!DCATALOG || DCATALOG.error) return null;
   const consent = DCATALOG.discover_consent || {};
   const pending = DISCOVER_GROUPS.filter((g) => g.badge && !(consent[g.key] || {}).ok);
   if (!pending.length) return null;
-  const card = el("div.card", { style: "margin-bottom: 12px" });
-  const body = el("div.card-body", {},
-    el("div.card-title", { text: "Anthropic's plugin catalogs" }),
-    el("div.hint", {
-      text: "Discover searches this machine only by default. Turning one of "
-        + "these on downloads Anthropic's public plugin list from GitHub — a "
-        + "static JSON file, no query or personal data leaves this machine "
-        + "either way." }));
-  card.append(body);
+  const card = el("div.card", { style: { marginBottom: "1.25rem" } });
+  card.append(el("div.card-header", {},
+    el("div", {},
+      el("div.card-title", { text: "Anthropic's plugin catalogs" }),
+      el("div.card-description", {
+        text: "Turning one of these on downloads Anthropic's public plugin "
+          + "list from GitHub — a static JSON file, cached here and searched "
+          + "offline afterwards. What you type is not part of the request." }))));
   for (const g of pending) {
-    const row = el("div.drow", {},
+    card.append(el("div.drow", {},
       el("span.dmsg", {},
         el("div", {}, el("span.dmono", { text: g.header }), badge(g.badge, "outline")),
         g.hint ? el("div.hint", { text: g.hint }) : null),
       el("div.dactions", {}, mkbtn("btn-sm btn-primary", "Enable",
-        () => discoverEnable(g.key))));
-    body.append(row);
+        () => discoverEnable(g.key)))));
   }
   return card;
 }
@@ -5609,8 +5630,9 @@ async function renderDiscover(reload) {
   view.append(el("div.view-head", {
     html: "Search everything Claude Code can load on this machine — your own "
       + "items, installed plugins, and marketplaces you have registered — "
-      + "whether or not you own it yet. <b>The query never leaves this "
-      + "machine.</b>",
+      + "whether or not you own it yet. <b>Typing searches this machine "
+      + "only.</b> What you type leaves this machine only when you press "
+      + "Search skills.sh.",
   }));
 
   if (DCATALOG.error) {
@@ -5628,12 +5650,26 @@ async function renderDiscover(reload) {
     oninput: (e) => {
       DQ = inp.value;
       if (e.isComposing) return;
-      discoverSearch();
+      discoverSearch();   // local index only — never the remote one
+    },
+    // Enter is one of the two explicit triggers for the remote search (the
+    // button is the other). The isComposing/229 guard is not cosmetic here
+    // the way it is on oninput: the Enter that commits a Japanese or Chinese
+    // IME composition would otherwise fire a mid-word query at a third
+    // party. Same guard, much higher stakes.
+    onkeydown: (e) => {
+      if (e.key !== "Enter" || e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      DQ = inp.value;
+      skillsShSearch();
     },
   });
   const counts = DCATALOG.counts || {};
   const countLine = Object.entries(counts).map(([k, n]) => n + " " + k).join(" · ");
   view.append(el("div.toolbar", {}, inp,
+    mkbtn("btn-sm", "Search skills.sh", () => { DQ = inp.value; skillsShSearch(); },
+      "Sends what you type to skills.sh, a third party. Nothing is sent until "
+      + "you press this."),
     el("div.toolbar-end", {}, el("span.hint", { text: countLine }))));
 
   const box = el("div", { id: "discoverresults" });
@@ -5667,8 +5703,11 @@ function discoverSearch() {
 
 function discoverRenderResults(box) {
   box.innerHTML = "";
-  if (DHITS === null) { box.append(skeletonList()); return; }
-  if (!DHITS.length) { box.append(noMatches(DQ)); return; }
+  if (DHITS === null) { box.append(skeletonList()); box.append(skillsShSection()); return; }
+  // "nothing on this machine matches" is exactly when skills.sh is worth
+  // offering, so the section renders after the empty state rather than being
+  // skipped along with the groups.
+  if (!DHITS.length) { box.append(noMatches(DQ)); box.append(skillsShSection()); return; }
   for (const g of DISCOVER_GROUPS) {
     const hits = DHITS.filter((h) => h.entry.group === g.key);
     if (!hits.length) continue;
@@ -5686,6 +5725,7 @@ function discoverRenderResults(box) {
     for (const h of hits) list.append(discoverRow(h));
     box.append(list);
   }
+  box.append(skillsShSection());
 }
 
 function discoverRow(h) {
@@ -5706,9 +5746,8 @@ function discoverRow(h) {
   } else if (e.group === "installed" && e.kind === "plugin") {
     actions.append(mkbtn("btn-sm", "Show in Plugins", () => { PQ = e.name; goTab("plugins"); }));
   } else if (e.kind === "plugin" && e.installable && !e.blocked) {
-    // "ondisk" is the only group this can be true for today — official/community
-    // (Phase 3) are always empty for now, but the check is on the fields, not
-    // the group, so this keeps working once those groups gain entries.
+    // Reached from "ondisk" and from the two remote catalogs alike — the
+    // check is on the entry's own fields, not on which group it landed in.
     actions.append(mkbtn("btn-sm btn-primary", "Install", () => discoverInstall(e)));
   } else if (e.kind === "plugin" && e.blocked) {
     actions.append(badge("blocked by policy", "outline"));
@@ -5721,28 +5760,186 @@ function discoverRow(h) {
   return row;
 }
 
+// ----------------------------------------------------------- skills.sh search
+//
+// The public directory of agent skills, most of which are not on this machine
+// and so cannot appear in the local index at all. This is the one search in
+// the app that reaches the network, and everything about how it is presented
+// exists to keep that obvious:
+//
+//   - its own section, below the local groups, never merged into them;
+//   - its own state (DSH), never DHITS;
+//   - fired only by the Search skills.sh button or Enter, never by the
+//     as-you-type debounce that drives the local search;
+//   - its own consent flag (query_ok), asked for in its own words.
+//
+// Nothing here installs anything. skills.sh skills are not plugins — the CLI
+// path is `npx skills add`, which is arbitrary npm execution — so a result
+// offers Audit, a copyable install command, and a link. This app never runs
+// it for you.
+
+function skillsShConsentState() {
+  return (DCATALOG && DCATALOG.discover_consent
+          && DCATALOG.discover_consent.skills_sh) || {};
+}
+
+// Two consents stack, and each modal describes only its own grant: a user who
+// clicked Audit earlier granted "ask about this one named skill", which is
+// not the same as "send me what you type". Granting search implies audit, so
+// this one sets both.
+async function skillsShSearchConsent() {
+  const ok = await modal({
+    title: "Search skills.sh?",
+    text: "This sends what you type to skills.sh, a third party, every time "
+      + "you press Search. Nothing is sent while you type, and your local "
+      + "search stays on this machine either way. Nothing found here is "
+      + "installed or run — you get an audit, a link, and a command you can "
+      + "copy. You can turn this back off in the skills.sh section.",
+    ok: "Turn on skills.sh search",
+  });
+  if (!ok) return false;
+  await api("/api/discover-consent", { source: "skills_sh", ok: true, query_ok: true });
+  if (DCATALOG && DCATALOG.discover_consent)
+    DCATALOG.discover_consent.skills_sh = { ok: true, query_ok: true };
+  return true;
+}
+
+async function skillsShOff() {
+  try {
+    // ok stays true: withdrawing search does not withdraw the per-skill
+    // audit consent the user may have granted separately. The reverse is not
+    // true — remote.py forces query_ok off whenever ok goes off.
+    await api("/api/discover-consent", { source: "skills_sh", ok: true, query_ok: false });
+    if (DCATALOG && DCATALOG.discover_consent)
+      DCATALOG.discover_consent.skills_sh = { ok: true, query_ok: false };
+    DSH = null;
+    DSHQ = "";
+    toast("skills.sh search off — nothing you type leaves this machine");
+    const box = document.getElementById("discoverresults");
+    if (box) discoverRenderResults(box);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function skillsShSearch() {
+  const q = (DQ || "").trim();
+  if (q.length < 2) { toast("Type at least 2 characters to search skills.sh", true); return; }
+  if (!skillsShConsentState().query_ok) {
+    const granted = await skillsShSearchConsent();
+    if (!granted) return;
+  }
+  const seq = ++DSHSEQ;
+  DSHBUSY = true;
+  DSHQ = q;
+  const box0 = document.getElementById("discoverresults");
+  if (box0) discoverRenderResults(box0);
+  try {
+    const r = await api("/api/skills-search", { q, limit: 25 });
+    if (seq !== DSHSEQ || TAB !== "discover") return;
+    DSH = r.skills || [];
+  } catch (e) {
+    if (seq !== DSHSEQ || TAB !== "discover") return;
+    DSH = [];
+    toast(e.message, true);
+  } finally {
+    if (seq === DSHSEQ) DSHBUSY = false;
+  }
+  if (TAB !== "discover") return;
+  const box = document.getElementById("discoverresults");
+  if (box) discoverRenderResults(box);
+}
+
+function skillsShSection() {
+  const frag = document.createDocumentFragment();
+  const on = !!skillsShConsentState().query_ok;
+  const title = sectionTitle("skills.sh", DSH ? DSH.length : null);
+  title.append(badge(on ? "on" : "off", "outline"));
+  frag.append(title);
+
+  frag.append(el("div.hint", {
+    text: on
+      ? "The public skills directory — searched only when you press Search "
+        + "skills.sh, which sends what you type to a third party."
+      : "The public skills directory, including skills you don't have. Off: "
+        + "nothing you type leaves this machine until you turn it on." }));
+
+  const controls = el("div.hint", {},
+    mkbtn("btn-link btn-sm", DSHBUSY ? "Searching…" : "Search skills.sh",
+      () => skillsShSearch()));
+  if (on) {
+    controls.append(el("span", { text: " · " }));
+    controls.append(mkbtn("btn-link btn-sm", "Turn off", () => skillsShOff()));
+  }
+  frag.append(controls);
+
+  if (DSHBUSY) { frag.append(skeletonList()); return frag; }
+  if (DSH === null) return frag;
+  frag.append(el("div.hint", {
+    text: DSH.length ? "Results for “" + DSHQ + "”"
+                     : "No skills.sh results for “" + DSHQ + "”" }));
+  if (!DSH.length) return frag;
+  const list = el("div.list");
+  for (const s of DSH) list.append(skillsShRow(s));
+  frag.append(list);
+  return frag;
+}
+
+// Every field here is third-party text, so it goes in via `text:` only —
+// never `html:` — the same rule the rest of this view follows. The endpoint
+// returns no description, so a row is name / source / installs and nothing
+// more; there is no summary to show and none is invented.
+function skillsShRow(s) {
+  const meta = s.source + (s.installs != null
+    ? " · " + s.installs.toLocaleString() + " installs" : "");
+  const row = el("div.drow", {},
+    icon("sparkles"),
+    el("span.dmsg", {},
+      el("div", {}, el("span.dmono", { text: s.name })),
+      el("div.hint", { text: meta })));
+
+  const actions = el("div.dactions", {},
+    mkbtn("btn-sm", "Audit", () => skillAudit(s.id)),
+    mkbtn("btn-sm", "Copy install",
+      () => copyText("npx skills add " + s.source, "install command"),
+      "Copies `npx skills add " + s.source + "` — this app never runs it"));
+  // The URL was assembled server-side from the sanitized id, but it still
+  // passes safeHref before becoming an href; a value that fails simply loses
+  // its button rather than rendering an unclickable or unsafe one.
+  const href = s.url ? safeHref(s.url) : null;
+  if (href)
+    actions.append(el("a.btn.btn-sm",
+      { href, target: "_blank", rel: "noreferrer", text: "Open ↗" }));
+  row.append(actions);
+  return row;
+}
+
 // ------------------------------------------------------------ skills.sh audit
 //
 // skills.sh's audit endpoint: a documented, public, multi-provider security
 // verdict lookup for one named skill the user is already looking at — never
-// a search, never free-text. Its own consent flag (separate from
-// official/community — see remote.py's consent_get()/consent_set_skills_sh()):
-// `ok` means "you may ask skills.sh about this one named skill". No query
-// ever leaves this machine either, since the "query" is just the skill's own
-// name, chosen by the user by clicking Audit on an entry already in view.
+// a search, never free-text. The weaker of skills_sh's two consent flags
+// (see remote.py's consent_set_skills_sh()): `ok` means "you may ask
+// skills.sh about this one named skill". Nothing the user typed is part of
+// it — the "query" is the skill's own name, chosen by clicking Audit on a
+// row already in view, whether that row came from the local index or from a
+// skills.sh search the user already consented to.
 
 async function skillAuditConsent() {
   const ok = await modal({
     title: "Ask skills.sh for a security scan?",
     text: "This sends the skill's name to skills.sh, a third party, so it "
       + "can return a security verdict (risk level, provider findings from "
-      + "services like Socket/Snyk). No other data leaves this machine.",
+      + "services like Socket/Snyk). Nothing you typed is sent, and this "
+      + "does not turn on skills.sh search.",
     ok: "Send it",
   });
   if (!ok) return false;
   await api("/api/discover-consent", { source: "skills_sh", ok: true });
+  // query_ok is preserved, not reset: the server leaves it alone when the
+  // request omits it, so mirroring `false` here would wrongly re-prompt for
+  // search consent the user may already have granted.
   if (DCATALOG && DCATALOG.discover_consent)
-    DCATALOG.discover_consent.skills_sh = { ok: true, query_ok: false };
+    DCATALOG.discover_consent.skills_sh = {
+      ok: true, query_ok: !!skillsShConsentState().query_ok };
   return true;
 }
 

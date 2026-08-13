@@ -23,6 +23,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -86,9 +87,12 @@ class Base(unittest.TestCase):
             return self.response
 
         remote._opener.open = fake_open
+        self._last_ids = remote._last_search_ids
+        remote._last_search_ids = frozenset()
 
     def tearDown(self):
         remote._opener.open = self._opener_open
+        remote._last_search_ids = self._last_ids
         core.CONFIG_FILE = self._cfg_file
         for m, fn in self._saved:
             m.config_dir = fn
@@ -478,10 +482,271 @@ class TestAuditSkill(Base):
         self.assertNotIn("weird", result["data"])
 
 
+    def test_categories_at_depth_three_survive_sanitizing(self):
+        """The real response nests doc -> audits[] -> {provider} ->
+        categories[]; at _AUDIT_MAX_DEPTH = 3 that array was silently
+        dropped, which is the bug the limit of 4 fixes."""
+        self.consent_skills_sh()
+        self.audit_response({"audits": [
+            {"provider": "socket", "risk": "low",
+             "categories": ["network", "filesystem"]}]})
+        result = remote.audit_skill("acme", "helper")
+        self.assertEqual(result["data"]["audits"][0]["categories"],
+                         ["network", "filesystem"])
+
+
+class TestSearchSkills(Base):
+    """search_skills(): the one call that sends what the user typed to a
+    third party. Gated on the stronger query_ok flag, never disk-cached, and
+    the URL is always assembled here from a fixed prefix."""
+
+    def search_response(self, doc):
+        self.response = _FakeResponse(json.dumps(doc).encode())
+
+    def hit(self, i=0):
+        return {"id": f"acme/pkg/skill{i}", "skillId": f"skill{i}",
+                "name": f"skill{i}", "installs": 100 + i, "source": "acme/pkg"}
+
+    def allow_search(self):
+        remote.consent_set_skills_sh(True, True, at="2026-01-01T00:00:00+00:00")
+
+    def test_refuses_without_consent_zero_network_calls(self):
+        with self.assertRaises(ValueError):
+            remote.search_skills("react")
+        self.assertEqual(self.calls, [])
+
+    def test_audit_consent_alone_does_not_enable_search(self):
+        """ok is the weaker flag — it buys a per-skill audit, not the right
+        to send what the user types."""
+        remote.consent_set_skills_sh(True, at="2026-01-01T00:00:00+00:00")
+        self.assertFalse(remote.consent_get()["skills_sh"]["query_ok"])
+        with self.assertRaises(ValueError):
+            remote.search_skills("react")
+        self.assertEqual(self.calls, [])
+
+    def test_official_and_community_consent_do_not_enable_search(self):
+        self.consent("official")
+        self.consent("community")
+        with self.assertRaises(ValueError):
+            remote.search_skills("react")
+        self.assertEqual(self.calls, [])
+
+    def test_short_query_refused_before_any_open(self):
+        self.allow_search()
+        for q in ("", " ", "a", "  a  "):
+            self.calls.clear()
+            with self.assertRaises(ValueError):
+                remote.search_skills(q)
+            self.assertEqual(self.calls, [])
+
+    def test_consented_search_opens_the_expected_url(self):
+        self.allow_search()
+        self.search_response({"skills": [self.hit()]})
+        remote.search_skills("react", 3)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]["url"],
+                         "https://skills.sh/api/search?q=react&limit=3")
+
+    def test_every_open_call_has_a_timeout(self):
+        self.allow_search()
+        self.search_response({"skills": []})
+        remote.search_skills("react")
+        self.assertEqual(self.calls[0]["timeout"], remote._SEARCH_TIMEOUT)
+
+    def test_limit_clamped_into_range(self):
+        self.allow_search()
+        for given, expected in ((0, 1), (-5, 1), (9999, remote._SEARCH_LIMIT_MAX),
+                                (None, remote._SEARCH_LIMIT_MAX),
+                                ("nonsense", remote._SEARCH_LIMIT_MAX)):
+            self.calls.clear()
+            self.search_response({"skills": []})
+            remote.search_skills("react", given)
+            self.assertIn(f"limit={expected}", self.calls[0]["url"])
+
+    def test_url_always_starts_with_prefix_for_adversarial_queries(self):
+        self.allow_search()
+        adversarial = [
+            "../../etc/passwd",
+            "https://evil.example.com/",
+            "%2f%2e%2e%2f",
+            "react&limit=9999",
+            "react#fragment",
+            "a b\tc",
+            "スキル",
+            "?q=x",
+            "//evil.example.com",
+        ]
+        for q in adversarial:
+            self.calls.clear()
+            self.search_response({"skills": []})
+            remote.search_skills(q)
+            self.assertEqual(len(self.calls), 1)
+            url = self.calls[0]["url"]
+            self.assertTrue(url.startswith(remote._SEARCH_PREFIX + "?"), url)
+            # the whole query lives in the query string — nothing the user
+            # typed can add a path segment or a second host
+            self.assertEqual(urllib.parse.urlsplit(url).netloc, "skills.sh")
+            self.assertEqual(urllib.parse.urlsplit(url).path, "/api/search")
+
+    def test_query_truncated_to_max(self):
+        self.allow_search()
+        self.search_response({"skills": []})
+        remote.search_skills("x" * (remote._SEARCH_Q_MAX + 200))
+        q = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(self.calls[0]["url"]).query)["q"][0]
+        self.assertEqual(len(q), remote._SEARCH_Q_MAX)
+
+    def test_oversized_response_refused(self):
+        self.allow_search()
+        self.response = _FakeResponse(
+            b'{"skills": [], "pad": "' + b"x" * (remote._SEARCH_CAP + 10) + b'"}')
+        with self.assertRaises(ValueError):
+            remote.search_skills("react")
+
+    def test_unreadable_json_refused(self):
+        self.allow_search()
+        self.response = _FakeResponse(b"{not json")
+        with self.assertRaises(ValueError):
+            remote.search_skills("react")
+
+    def test_non_object_top_level_refused(self):
+        self.allow_search()
+        self.search_response(["not", "an", "object"])
+        with self.assertRaises(ValueError):
+            remote.search_skills("react")
+
+    def test_network_error_raises_valueerror(self):
+        self.allow_search()
+        self.response = urllib.error.URLError("offline")
+        with self.assertRaises(ValueError):
+            remote.search_skills("react")
+
+    def test_off_host_redirect_raises(self):
+        """The shared opener's redirect handler is the boundary — an off-host
+        target raises rather than being followed."""
+        handler = remote._SameHostHTTPSRedirect()
+        req = urllib.request.Request(remote._SEARCH_PREFIX + "?q=react&limit=5")
+        with self.assertRaises(ValueError):
+            handler.redirect_request(req, None, 302, "Found", {},
+                                     "https://evil.example.com/api/search")
+        with self.assertRaises(ValueError):
+            handler.redirect_request(req, None, 302, "Found", {},
+                                     "http://skills.sh/api/search")
+
+    def test_records_sanitized_and_page_url_built_here(self):
+        self.allow_search()
+        self.search_response({"skills": [self.hit(0)]})
+        r = remote.search_skills("react")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["query"], "react")
+        rec = r["skills"][0]
+        self.assertEqual(rec["name"], "skill0")
+        self.assertEqual(rec["source"], "acme/pkg")
+        self.assertEqual(rec["installs"], 100)
+        self.assertEqual(rec["url"], "https://www.skills.sh/acme/pkg/skill0")
+
+    def test_url_from_the_response_body_is_never_used(self):
+        self.allow_search()
+        bad = dict(self.hit(0), url="javascript:alert(1)",
+                   homepage="https://evil.example.com")
+        self.search_response({"skills": [bad]})
+        rec = remote.search_skills("react")["skills"][0]
+        self.assertEqual(rec["url"], "https://www.skills.sh/acme/pkg/skill0")
+        self.assertNotIn("homepage", rec)
+
+    def test_malformed_records_dropped(self):
+        self.allow_search()
+        self.search_response({"skills": [
+            "a string", 42, None, [],
+            {"id": "a/b/c"},                                  # no name/source
+            {"name": "n", "source": "s"},                     # no id
+            {"id": "a/b/c", "name": "n"},                     # no source
+            {"id": "a/b/c", "name": "n", "source": "s", "installs": True},
+            self.hit(1),
+        ]})
+        recs = remote.search_skills("react")["skills"]
+        self.assertEqual(len(recs), 2)
+        self.assertIsNone(recs[0]["installs"])   # True is a bool, not a count
+        self.assertEqual(recs[1]["name"], "skill1")
+
+    def test_missing_or_wrong_typed_skills_array_yields_no_records(self):
+        self.allow_search()
+        for doc in ({}, {"skills": None}, {"skills": "nope"}, {"skills": {}}):
+            self.search_response(doc)
+            self.assertEqual(remote.search_skills("react")["skills"], [])
+
+    def test_record_count_capped(self):
+        self.allow_search()
+        self.search_response(
+            {"skills": [self.hit(i) for i in range(remote._SEARCH_LIMIT_MAX + 40)]})
+        recs = remote.search_skills("react")["skills"]
+        self.assertLessEqual(len(recs), remote._SEARCH_LIMIT_MAX)
+
+    def test_results_are_not_written_to_disk(self):
+        """A cache of remote searches would be a record of what the user
+        typed sitting in their config directory."""
+        self.allow_search()
+        self.search_response({"skills": [self.hit()]})
+        remote.search_skills("something private")
+        discover_dir = self.tmp / "claude-ui-discover"
+        if discover_dir.is_dir():
+            self.assertEqual(list(discover_dir.iterdir()), [])
+        blob = json.dumps(json.loads(core.CONFIG_FILE.read_text()))
+        self.assertNotIn("something private", blob)
+
+    def test_last_search_ids_tracks_the_most_recent_search(self):
+        self.allow_search()
+        self.search_response({"skills": [self.hit(0), self.hit(1)]})
+        remote.search_skills("react")
+        self.assertEqual(remote.last_search_ids(),
+                         {"acme/pkg/skill0", "acme/pkg/skill1"})
+        self.search_response({"skills": [self.hit(2)]})
+        remote.search_skills("vue")
+        # replaced wholesale, not accumulated
+        self.assertEqual(remote.last_search_ids(), {"acme/pkg/skill2"})
+
+    def test_last_search_ids_is_immutable(self):
+        self.allow_search()
+        self.search_response({"skills": [self.hit(0)]})
+        remote.search_skills("react")
+        self.assertIsInstance(remote.last_search_ids(), frozenset)
+
+
 class TestSkillsShConsent(Base):
     def test_defaults_to_false_with_query_ok_flag(self):
         c = remote.consent_get()
         self.assertEqual(c["skills_sh"], {"ok": False, "query_ok": False, "at": None})
+
+    def test_query_ok_round_trip(self):
+        remote.consent_set_skills_sh(True, True, at="2026-02-01T00:00:00+00:00")
+        self.assertEqual(remote.consent_get()["skills_sh"],
+                         {"ok": True, "query_ok": True, "at": "2026-02-01T00:00:00+00:00"})
+
+    def test_query_ok_none_preserves_what_is_on_disk(self):
+        """The audit-consent flow sends no query_ok and must not silently
+        revoke a search consent granted earlier."""
+        remote.consent_set_skills_sh(True, True, at="2026-02-01T00:00:00+00:00")
+        remote.consent_set_skills_sh(True, at="2026-02-02T00:00:00+00:00")
+        self.assertTrue(remote.consent_get()["skills_sh"]["query_ok"])
+
+    def test_withdrawing_ok_also_clears_query_ok(self):
+        """Withdrawing the weaker consent must not leave the stronger live."""
+        remote.consent_set_skills_sh(True, True, at="2026-02-01T00:00:00+00:00")
+        remote.consent_set_skills_sh(False, at="2026-02-02T00:00:00+00:00")
+        c = remote.consent_get()["skills_sh"]
+        self.assertFalse(c["ok"])
+        self.assertFalse(c["query_ok"])
+
+    def test_query_ok_cannot_be_granted_without_ok(self):
+        remote.consent_set_skills_sh(False, True, at="2026-02-01T00:00:00+00:00")
+        self.assertFalse(remote.consent_get()["skills_sh"]["query_ok"])
+
+    def test_withdrawing_query_ok_leaves_audit_consent(self):
+        remote.consent_set_skills_sh(True, True, at="2026-02-01T00:00:00+00:00")
+        remote.consent_set_skills_sh(True, False, at="2026-02-02T00:00:00+00:00")
+        c = remote.consent_get()["skills_sh"]
+        self.assertTrue(c["ok"])
+        self.assertFalse(c["query_ok"])
 
     def test_round_trip(self):
         remote.consent_set_skills_sh(True, at="2026-02-01T00:00:00+00:00")
