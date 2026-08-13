@@ -20,8 +20,9 @@ from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
 from . import remote
 from .items import (Conflict, config_files_state, item_copy, item_create,
                     item_delete, item_move, item_read, item_save, item_scope,
-                    item_set_model, path_read, path_save, scan_items,
-                    set_enabled)
+                    item_set_model, path_read, path_save, scan_archived_skills,
+                    scan_items, set_enabled, skill_archive_delete,
+                    skill_archive_set)
 from .localmodel import local_config_set, local_probe, local_test
 from .mcp import mcp_machine_set, mcp_set_enabled, mcp_state, mcp_test
 from . import output_styles
@@ -160,6 +161,11 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/state":
             self.send(200, {
                 "items": {t: scan_items(t) for t in ITEM_TYPES},
+                # kept out of items["skills"] deliberately: every consumer of
+                # that key resolves a record back to a path with
+                # resolve_item(type, name, enabled), which cannot address an
+                # archived skill
+                "archived_skills": scan_archived_skills(),
                 "config_files": config_files_state(),
                 "settings": settings_state(),
                 "suggest": suggest_state(),
@@ -273,8 +279,9 @@ class Handler(BaseHTTPRequestHandler):
             get = lambda k, d="": (q.get(k) or [d])[0]
             try:
                 self.send(200, {"name": get("name"),
-                                "env": skill_env_vars(get("name"),
-                                                      get("enabled", "1") == "1")})
+                                "env": skill_env_vars(
+                                    get("name"), get("enabled", "1") == "1",
+                                    get("archived") == "1")})
             except (ValueError, OSError) as e:
                 self.send(400, {"error": str(e)})
         else:
@@ -488,6 +495,54 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "skill-override":
                 skill_override_set(req.get("name", ""), req.get("value"))
                 self.send(200, {"ok": True})
+            elif action == "skill-archive":
+                name = req.get("name", "")
+                archived = bool(req.get("archived"))
+                path = skill_archive_set(name, archived)
+                if archived:
+                    # An override for a skill no longer in <skills>/ names
+                    # nothing Claude Code can find, and would silently
+                    # re-apply on restore. Best-effort: an unparseable
+                    # settings.json must not undo a rename that has already
+                    # succeeded, and the archive itself is the stronger
+                    # statement anyway.
+                    try:
+                        skill_override_set(name, None)
+                    except (ValueError, OSError):
+                        pass
+                self.send(200, {"ok": True, "path": path})
+            elif action == "skill-archive-migrate":
+                # disabled/skills/ -> skills/archived/, one skill at a time.
+                # A server-side loop over two calls that already exist rather
+                # than a new domain function: which parking area a UI offers
+                # to empty is not something items.py should know.
+                #
+                # Per-name results, never all-or-nothing — one collision must
+                # not strand the other nine. A failure between the two steps
+                # leaves that skill *enabled*, which is loud and recoverable.
+                names = req.get("names")
+                if not isinstance(names, list):
+                    names = [it["name"] for it in scan_items("skills")
+                             if not it["enabled"]]
+                moved, failed = [], []
+                for name in names:
+                    try:
+                        set_enabled("skills", str(name), True)
+                    except (ValueError, OSError) as e:
+                        failed.append({"name": name, "error": str(e)})
+                        continue
+                    try:
+                        moved.append({"name": name,
+                                      "path": skill_archive_set(str(name), True)})
+                    except (ValueError, OSError) as e:
+                        failed.append({
+                            "name": name,
+                            "error": f"{e} — it is enabled now, not parked"})
+                self.send(200, {"ok": not failed, "moved": moved,
+                                "failed": failed})
+            elif action == "skill-archive-delete":
+                self.send(200, {"ok": True,
+                                **skill_archive_delete(req.get("name", ""))})
             elif action == "backup-dir":
                 set_backup_dir((req.get("path") or "").strip())
                 self.send(200, {"ok": True})

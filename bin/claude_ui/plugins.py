@@ -513,7 +513,7 @@ def plugin_env_set(name, value):
     settings_set("env." + name, value if value else None)
 
 
-def skill_env_vars(name, enabled=True):
+def skill_env_vars(name, enabled=True, archived=False):
     """The env vars one personal skill's own files read.
 
     A skill is a directory, so it can ship a scripts/ package that reads the
@@ -521,8 +521,12 @@ def skill_env_vars(name, enabled=True):
     names exist only in its source. Same scanner, same caveat in the UI, and
     the values land in the same settings.json `env`, because that is the only
     place Claude Code reads them from.
+
+    An archived skill answers too: it is not loaded, but what it would read is
+    exactly what you want to know before deciding whether to bring it back.
     """
-    root = resolve_item("skills", name, enabled, None)
+    root = (resolve_archived(name) if archived
+            else resolve_item("skills", name, enabled, None))
     if not root.is_dir():
         raise ValueError(f"no skill named {name}")
     return env_vars_in(root)
