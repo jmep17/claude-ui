@@ -4880,13 +4880,16 @@ function renderInstalled() {
       + "nothing is deleted. Changes apply to new sessions.",
   }));
 
+  // its own id, not the inventory's: a hidden view keeps its DOM, so after a
+  // visit to Commands there would be two #iq inputs and refilter() would put
+  // the caret back into the hidden one
   const inp = el("input", {
-    type: "search", id: "iq", placeholder: "Filter skills by name or description…",
+    type: "search", id: "skq", placeholder: "Filter skills by name or description…",
     value: IQ,
     oninput: (e) => {
       IQ = inp.value;
       if (e.isComposing) return;
-      refilter("iq", renderInstalled);
+      refilter("skq", renderInstalled);
     },
   });
   view.append(el("div.toolbar", {}, inp,
@@ -6228,7 +6231,10 @@ document.addEventListener("keydown", (e) => {
     if (EDITING) closeEditor();
   } else if (e.key === "/") {
     // whichever view is showing owns the only visible filter box
-    const f = document.querySelector(".toolbar input[type=search]");
+    // scoped to the view that is actually showing: a hidden view keeps its
+    // DOM, and an unscoped query finds whichever one is first in the markup
+    const f = document.querySelector(
+      "main > div:not([hidden]) .toolbar input[type=search]");
     if (f) { e.preventDefault(); f.focus(); f.select(); }
   } else if (e.key === "?") {
     openPalette();
