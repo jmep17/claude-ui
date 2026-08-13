@@ -9,10 +9,27 @@
 
 let DATA = { items: {}, config_files: [], config_dir: "", settings: {}, mcp: {}, statusline: {} };
 
+// skills stays in ITEM_TABS: the deep link #skills/<name>/<file> has to keep
+// opening the editor, and that is what ITEM_TABS means to routeFromHash().
+// What it is *not* any more is a plain inventory — hence the second list.
 const ITEM_TABS = ["skills", "commands", "agents", "output-styles"];
+const INVENTORY_TABS = ["commands", "agents", "output-styles"];
 // the types core.ITEM_TYPES calls kind "dir": a folder of files, not one file
 const DIR_TYPES = new Set(["skills"]);
-const TABS = [...ITEM_TABS, "mcp", "statusline", "projects", "setup", "settings", "insight", "context", "costs", "doctor", "discover", "plugins", "backup"];
+const TABS = [...ITEM_TABS, "mcp", "statusline", "projects", "setup", "settings", "insight", "context", "costs", "doctor", "backup"];
+
+/* The Skills tab's three segments. Three tabs used to answer overlapping
+   questions and could not answer each other's: what is in your skills folder,
+   what an installed plugin brings, and what exists that you do not have yet.
+   They are one tab with a segment each now, so a skill from a plugin lists
+   beside one of your own. */
+const SKILL_SEGS = [{ key: "installed", label: "Installed" },
+                    { key: "plugins", label: "Plugins" },
+                    { key: "browse", label: "Browse" }];
+// old bookmarks: #plugins and #discover land on the segment that replaced them
+const LEGACY_TABS = { plugins: "plugins", discover: "browse" };
+let SEG = "installed";
+const onSeg = (s) => TAB === "skills" && SEG === s;
 
 const TAB_META = {
   "skills": { icon: "sparkles", label: "Skills" },
@@ -28,12 +45,32 @@ const TAB_META = {
   "context": { icon: "layers", label: "Context" },
   "costs": { icon: "dollar", label: "Costs" },
   "doctor": { icon: "pulse", label: "Doctor" },
-  "discover": { icon: "search", label: "Discover" },
-  "plugins": { icon: "plug", label: "Plugins" },
   "backup": { icon: "archive", label: "Backup" },
 };
 
-let TAB = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "skills";
+/* The hash carries a query string as well as a path, so it cannot be read with
+   a bare slice(1) — `skills?seg=browse` is not an unknown tab, it is the Browse
+   segment, and reading it as the former silently drops the segment on reload. */
+const parseHash = () => {
+  const [head, query] = location.hash.slice(1).split("?");
+  return {
+    segs: head.split("/").filter(Boolean).map((s) => {
+      try { return decodeURIComponent(s); } catch (e) { return s; }
+    }),
+    params: new URLSearchParams(query || ""),
+  };
+};
+
+let TAB = "skills";
+{
+  const { segs, params } = parseHash();
+  if (LEGACY_TABS[segs[0]] && segs.length === 1) SEG = LEGACY_TABS[segs[0]];
+  else if (TABS.includes(segs[0])) {
+    TAB = segs[0];
+    if (TAB === "skills" && SKILL_SEGS.some((s) => s.key === params.get("seg")))
+      SEG = params.get("seg");
+  }
+}
 let IQ = "";  // inventory filter
 
 async function api(path, body) {
@@ -47,22 +84,41 @@ async function api(path, body) {
   return json;
 }
 
-function goTab(t) {
+/* `seg` names a Skills segment. Omitting it on a jump to Skills means
+   Installed: the tab bar is the tab, and the segment resets when you leave and
+   come back, which is what makes `#skills` mean one thing. A deep link that
+   wants another segment says so, and routeFromHash() reads it. */
+function goTab(t, seg) {
+  if (LEGACY_TABS[t]) { seg = LEGACY_TABS[t]; t = "skills"; }
   if (!TABS.includes(t) || (EDITING && !confirmDiscard())) return;
   EDITING = null;   // leaving for a tab closes the editor
   closeNewStyle();  // …and discards a half-filled new-style form
   TAB = t;
-  location.hash = t;
+  if (t === "skills")
+    SEG = SKILL_SEGS.some((s) => s.key === seg) ? seg : "installed";
+  location.hash = currentHash();
   render();
 }
+
+const goSeg = (seg) => goTab("skills", seg);
 
 /* ---------------------------------------------------------------- routing --
    The hash carries the open file, not just the tab: #skills/pdf/SKILL.md and
    #file/<path>, both with an optional ?line=. That is what makes "click a
-   doctor finding" survive a back button and a reload. */
+   doctor finding" survive a back button and a reload.
+
+   A Skills segment is a query param, not a path segment: routeFromHash() reads
+   `<item tab>/<something>` as "open this item's editor", so #skills/browse
+   would open a skill named "browse" — and a skill may legally be called that.
+
+   Four things have to agree on the string exactly — this function, goTab(),
+   routeFromHash() and the hashchange listener — or a segment click loops: the
+   hash is set, the listener sees a mismatch, it re-routes, and any open editor
+   prompts to discard. */
 
 const currentHash = () => {
-  if (!EDITING) return TAB;
+  if (!EDITING)
+    return TAB === "skills" && SEG !== "installed" ? "skills?seg=" + SEG : TAB;
   const enc = encodeURIComponent;
   // A project's item has the same type and name as one of yours, so the root
   // rides along as a query param — without it the hash names two different
@@ -83,11 +139,7 @@ function edSyncHash() {
 }
 
 function routeFromHash() {
-  const [head, query] = location.hash.slice(1).split("?");
-  const segs = head.split("/").filter(Boolean).map((s) => {
-    try { return decodeURIComponent(s); } catch (e) { return s; }
-  });
-  const params = new URLSearchParams(query || "");
+  const { segs, params } = parseHash();
   const line = +params.get("line") || 0;
   const locate = line ? { line } : null;
   const root = params.get("root") || null;
@@ -103,7 +155,31 @@ function routeFromHash() {
     if (!confirmDiscard()) { edSyncHash(); return; }
     EDITING = null;
   }
+  // A bare #plugins or #discover is an old bookmark: land on the segment that
+  // replaced it and rewrite the hash in place, so the back button goes where
+  // it came from rather than bouncing off a redirect. #plugins/foo is not a
+  // legacy hash and falls through to the default below.
+  if (LEGACY_TABS[segs[0]] && segs.length === 1) {
+    TAB = "skills";
+    SEG = LEGACY_TABS[segs[0]];
+    render();
+    location.replace("#" + currentHash());
+    return;
+  }
   TAB = TABS.includes(segs[0]) ? segs[0] : "skills";
+  if (TAB === "skills") {
+    SEG = SKILL_SEGS.some((s) => s.key === params.get("seg"))
+      ? params.get("seg") : "installed";
+    // #skills?seg=browse&q=… is addressable, so a search can be linked to.
+    // It is never written back: DQ changes on every keystroke, and a hash
+    // that follows the cursor fills the back button with noise.
+    if (SEG === "browse" && params.get("q") !== null) {
+      DQ = params.get("q");
+      DHITS = null;
+      DSH = null;
+      DSHQ = "";
+    }
+  }
   render();
 }
 
@@ -229,6 +305,10 @@ function configFilesCard() {
 // --------------------------------------------------------------------- tabs
 
 function tabBadge(t) {
+  // Skills counts by file location, not by settings: a skill turned off with
+  // skillOverrides still counts, deliberately. The badge says what is
+  // installed, and the file is still there. Archived skills are not in
+  // DATA.items and so do not count, which is the same rule.
   if (ITEM_TABS.includes(t))
     return String(((DATA.items || {})[t] || []).filter((i) => i.enabled).length);
   if (t === "settings") return String(Object.keys((DATA.settings || {}).data || {}).length);
@@ -236,8 +316,6 @@ function tabBadge(t) {
   if (t === "doctor" && DOCTOR && DOCTOR.warns) return String(DOCTOR.warns);
   if (t === "context" && CONTEXT)
     return String(CONTEXT.pointers.filter((f) => f.level === "warn").length);
-  if (t === "plugins" && PLUGINS)
-    return String(PLUGINS.plugins.filter((p) => p.enabled).length);
   if (t === "projects" && PROJECTS) return String(PROJECTS.projects.length);
   return null;
 }
@@ -1222,13 +1300,14 @@ const countLine = (p) =>
 const reloadPlugins = async () => { await refresh(); renderPlugins(true); };
 
 async function renderPlugins(reload) {
-  const view = document.getElementById("pluginsview");
+  if (!onSeg("plugins")) return;
+  const view = document.getElementById("skillseg");
   // a rescan re-reads the plugin tree, so the per-plugin detail cached from
   // the old one is stale by definition
   if (!PLUGINS || reload) PDETAIL = {};
-  if (!await cached({ view: "pluginsview", url: "/api/plugins", reload,
+  if (!await cached({ view: "skillseg", url: "/api/plugins", reload,
                       get: () => PLUGINS, set: (v) => { PLUGINS = v; },
-                      alive: () => TAB === "plugins" })) return;
+                      alive: () => onSeg("plugins") })) return;
   view.innerHTML = "";
   view.append(el("div.view-head", {
     html: "Plugins on disk under <b>" + esc(PLUGINS.root) + "</b>, as set in <b>settings.json</b>. "
@@ -1412,7 +1491,7 @@ async function userRegistryLoad() {
     UREG = { error: e.message, marketplaces: [], installed: [],
              available: [], suggested: [] };
   }
-  if (TAB === "plugins") renderPlugins();
+  if (onSeg("plugins")) renderPlugins();
 }
 
 async function userRegistryRun(action, body, msg) {
@@ -4370,12 +4449,19 @@ function palItems() {
   for (const t of TABS)
     out.push({ kind: "go to", label: TAB_META[t].label, icon: TAB_META[t].icon,
       run: () => goTab(t) });
+  // the two segments the tab bar cannot reach directly — the palette was how
+  // you got to Plugins and Discover by name, and it still is
+  for (const s of SKILL_SEGS.slice(1))
+    out.push({ kind: "go to", label: "Skills · " + s.label,
+      icon: s.key === "plugins" ? "plug" : "search", run: () => goSeg(s.key) });
   for (const t of ITEM_TABS)
     for (const s of (DATA.items || {})[t] || [])
       out.push({ kind: t.replace(/s$/, ""), label: s.name, icon: TAB_META[t].icon,
         hint: (s.enabled ? "" : "(disabled) ") + (s.description || ""),
+        // a broken item has no editor to open, so land on its tab with the
+        // filter set to it instead
         run: () => s.broken
-          ? (() => { TAB = t; location.hash = t; IQ = s.name; render(); })()
+          ? (() => { goTab(t); IQ = s.name; render(); })()
           : openItemEditor(t, s.name, null, s.enabled) });
   for (const id of ["CLAUDE.md", "settings.json", "keybindings.json"])
     out.push({ kind: "edit", label: id, icon: "file", run: () => openEditor(id) });
@@ -4678,12 +4764,16 @@ const toggleItemDetail = (ctx, s, enabled, btn, body) => toggleDetail(btn, body,
   load: () => api("/api/skill-detail?name=" + encodeURIComponent(s.name)
     + "&enabled=" + (enabled ? "1" : "0")),
   build: (d) => envPanel(d.env || [], body, "skill",
-    async () => { await refresh(); renderInventory(); }),
+    async () => { await refresh(); render(); }),
 });
 
-function renderInventory() {
+/* The three remaining plain inventories. `type` is a parameter rather than a
+   read of TAB because skills is no longer one of these: it has a tab of its
+   own with segments, and a function that decides what to draw by looking at a
+   global cannot be reused by it. */
+function renderInventory(type) {
   const view = document.getElementById("itemsview");
-  const all = (DATA.items || {})[TAB] || [];
+  const all = (DATA.items || {})[type] || [];
   const q = IQ.toLowerCase();
   const items = all.filter((s) =>
     !q || s.name.toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q));
@@ -4691,33 +4781,33 @@ function renderInventory() {
   const off = items.filter((s) => !s.enabled);
 
   view.innerHTML = "";
-  if (TAB === "output-styles" && NEWSTYLE) { renderStyleForm(view); return; }
+  if (type === "output-styles" && NEWSTYLE) { renderStyleForm(view); return; }
   view.append(el("div.view-head", {
-    html: TAB + " in <b>" + esc(DATA.config_dir) + "/" + TAB + "</b> — everything real on this machine. "
-      + "Disabling moves an item to <b>disabled/" + TAB + "/</b>; nothing is deleted. "
+    html: type + " in <b>" + esc(DATA.config_dir) + "/" + type + "</b> — everything real on this machine. "
+      + "Disabling moves an item to <b>disabled/" + type + "/</b>; nothing is deleted. "
       + "Changes apply to new sessions.",
   }));
 
   const inp = el("input", {
-    type: "search", id: "iq", placeholder: "Filter " + TAB + " by name or description…",
+    type: "search", id: "iq", placeholder: "Filter " + type + " by name or description…",
     value: IQ,
     oninput: (e) => {
       IQ = inp.value;
       if (e.isComposing) return;
-      refilter("iq", renderInventory);
+      refilter("iq", () => renderInventory(type));
     },
   });
   // Output styles are the one type you are more likely to want than to have,
   // and the only one this app can compose from scratch — see output-styles.js.
-  if (TAB === "output-styles") view.append(styleDocsCard());
+  if (type === "output-styles") view.append(styleDocsCard());
 
   const end = el("div.toolbar-end", {},
     el("span.hint", {
       text: on.length + " enabled · " + off.length + " disabled"
         + (items.length !== all.length ? " · " + items.length + " of " + all.length + " shown" : "")
-        + (TAB === "output-styles"
+        + (type === "output-styles"
            ? " · active: " + (settingsGet("outputStyle") || "default") : "") }));
-  if (TAB === "output-styles") {
+  if (type === "output-styles") {
     const nb = mkbtn("btn-sm btn-primary", "New output style", openNewStyle);
     nb.prepend(icon("plus"));
     end.append(nb);
@@ -4725,42 +4815,121 @@ function renderInventory() {
   view.append(el("div.toolbar", {}, inp, end));
 
   if (!all.length) {
-    view.append(emptyState("No " + TAB + " yet",
-      "Anything you put in " + DATA.config_dir + "/" + TAB + " shows up here.",
-      TAB_META[TAB].icon));
+    view.append(emptyState("No " + type + " yet",
+      "Anything you put in " + DATA.config_dir + "/" + type + " shows up here.",
+      TAB_META[type].icon));
     return;
   }
 
   // Which style outputStyle actually selects, so the list can say so. The
   // file being enabled only makes it selectable; this key is what applies it.
-  const activeStyle = TAB === "output-styles"
+  const activeStyle = type === "output-styles"
     ? (settingsGet("outputStyle") || "default") : null;
 
   const section = (list, label, enabled) => {
     if (!list.length) return;
     view.append(sectionTitle(label, list.length));
     const box = el("div.list");
-    const ctx = { activeStyle };
-    if (TAB === "skills") {
-      // skillOverrides is Claude Code's own switch and does something the
-      // file move cannot: it hides a skill from the model while leaving it
-      // typable, and it never touches the file. Both belong on the row.
-      const ov = settingsGet("skillOverrides") || {};
-      ctx.extraBadges = (s) => {
-        if (!ov[s.name] || ov[s.name] === "on") return [];
-        const b = badge(ov[s.name] === "off" ? "off for you" : ov[s.name], "outline");
-        b.title = "skillOverrides in settings.json — the file is untouched";
-        return [b];
-      };
-      ctx.extraMenu = (s) => [{
-        label: ov[s.name] === "off" ? "Turn back on for me" : "Turn off for me",
-        icon: "power",
-        fn: () => skillOverride(s.name, ov[s.name] === "off" ? null : "off"),
-      }];
-      // The panel itself is built on expand; this only says the row has one.
-      ctx.detail = true;
-    }
-    for (const s of list) box.append(itemRow(TAB, s, enabled, ctx));
+    for (const s of list) box.append(itemRow(type, s, enabled, { activeStyle }));
+    view.append(box);
+  };
+
+  section(on, "Enabled", true);
+  section(off, "Disabled", false);
+
+  if (!items.length) {
+    view.append(noMatches(IQ));
+    // the bridge to Browse works unchanged for these three: goDiscoverSearch
+    // routes through the segment now, and they never knew where it went
+    view.append(catalogSearchLink(IQ));
+  }
+}
+
+/* ------------------------------------------------------------------ skills --
+   One tab, three segments. Installed is your skills folder and what installed
+   plugins bring; Plugins is the plugin inventory those skills come from;
+   Browse searches both plus the catalogs. They were three tabs that each
+   answered part of "what skills do I have, and what else is there", and could
+   not answer each other's part. */
+
+function renderSkills() {
+  const view = document.getElementById("skillsview");
+  view.innerHTML = "";
+  view.append(segmented(SKILL_SEGS, SEG, goSeg));
+  // every segment renders into this, so a redraw of one (a rescan, a write)
+  // never has to rebuild the bar above it
+  view.append(el("div", { id: "skillseg" }));
+  if (SEG === "plugins") { renderPlugins(); return; }
+  if (SEG === "browse") { renderDiscover(); return; }
+  renderInstalled();
+}
+
+function renderInstalled() {
+  const view = document.getElementById("skillseg");
+  const all = (DATA.items || {}).skills || [];
+  const q = IQ.toLowerCase();
+  const items = all.filter((s) =>
+    !q || s.name.toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q));
+  const on = items.filter((s) => s.enabled);
+  const off = items.filter((s) => !s.enabled);
+
+  view.innerHTML = "";
+  view.append(el("div.view-head", {
+    html: "Skills in <b>" + esc(DATA.config_dir) + "/skills</b> — everything real "
+      + "on this machine. Disabling moves a skill to <b>disabled/skills/</b>; "
+      + "nothing is deleted. Changes apply to new sessions.",
+  }));
+
+  const inp = el("input", {
+    type: "search", id: "iq", placeholder: "Filter skills by name or description…",
+    value: IQ,
+    oninput: (e) => {
+      IQ = inp.value;
+      if (e.isComposing) return;
+      refilter("iq", renderInstalled);
+    },
+  });
+  view.append(el("div.toolbar", {}, inp,
+    el("div.toolbar-end", {},
+      el("span.hint", {
+        text: on.length + " enabled · " + off.length + " disabled"
+          + (items.length !== all.length
+             ? " · " + items.length + " of " + all.length + " shown" : "") }))));
+
+  if (!all.length) {
+    view.append(emptyState("No skills yet",
+      "Anything you put in " + DATA.config_dir + "/skills shows up here.",
+      "sparkles"));
+    return;
+  }
+
+  // skillOverrides is Claude Code's own switch and does something the file
+  // move cannot: it hides a skill from the model while leaving it typable, and
+  // it never touches the file. Read from your settings.json only — a project's
+  // settings.local.json can turn a skill off too, and this view does not know
+  // which project you are in.
+  const ov = settingsGet("skillOverrides") || {};
+  const ctx = {
+    extraBadges: (s) => {
+      if (!ov[s.name] || ov[s.name] === "on") return [];
+      const b = badge(ov[s.name] === "off" ? "off for you" : ov[s.name], "outline");
+      b.title = "skillOverrides in settings.json — the file is untouched";
+      return [b];
+    },
+    extraMenu: (s) => [{
+      label: ov[s.name] === "off" ? "Turn back on for me" : "Turn off for me",
+      icon: "power",
+      fn: () => skillOverride(s.name, ov[s.name] === "off" ? null : "off"),
+    }],
+    // the panel itself is built on expand; this only says the row has one
+    detail: true,
+  };
+
+  const section = (list, label, enabled) => {
+    if (!list.length) return;
+    view.append(sectionTitle(label, list.length));
+    const box = el("div.list");
+    for (const s of list) box.append(itemRow("skills", s, enabled, ctx));
     view.append(box);
   };
 
@@ -5470,16 +5639,18 @@ let DSHQ = "";
 let DSHSEQ = 0;
 let DSHBUSY = false;
 
-/* Jump to the Discover tab with `q` pre-filled and searched — the one
-   navigation every catalog bridge uses: the palette's catalog group, and the
-   Plugins/inventory tabs' "search the whole catalog" empty-state links.
+/* Jump to Browse with `q` pre-filled and searched — the one navigation every
+   catalog bridge uses: the palette's catalog group, and the Plugins segment's
+   and inventory tabs' "search the whole catalog" empty-state links. Keeps its
+   name because those callers know it by it.
+
    Routes through goTab() for its unsaved-changes guard; if that guard sends
-   the user nowhere (they declined to discard an edit), TAB will not actually
-   be "discover" afterward, and DQ is left alone rather than primed for a
+   the user nowhere (they declined to discard an edit), the segment will not
+   actually be Browse afterward, and DQ is left alone rather than primed for a
    navigation that did not happen. */
 function goDiscoverSearch(q) {
-  goTab("discover");
-  if (TAB !== "discover") return;
+  goSeg("browse");
+  if (!onSeg("browse")) return;
   DQ = q;
   DHITS = null;
   DSH = null;   // results for the old query — never carried onto a new one
@@ -5569,14 +5740,15 @@ const discoverEnable = (source) => catalogFetch(source, true);
 const discoverRefresh = (source) => catalogFetch(source, false);
 
 async function renderDiscover(reload) {
-  const view = document.getElementById("discoverview");
+  if (!onSeg("browse")) return;
+  const view = document.getElementById("skillseg");
   // the one cached() caller whose failure is payload rather than an alert: the
   // consent card has to render even when the index could not be read, because
   // an unfetched catalog is exactly when you need it
-  if (!await cached({ view: "discoverview", url: "/api/catalog", reload,
+  if (!await cached({ view: "skillseg", url: "/api/catalog", reload,
                       skeleton: 0, errorAsPayload: true,
                       get: () => DCATALOG, set: (v) => { DCATALOG = v; },
-                      alive: () => TAB === "discover" })) return;
+                      alive: () => onSeg("browse") })) return;
 
   view.innerHTML = "";
   view.append(el("div.view-head", {
@@ -5635,14 +5807,14 @@ function discoverSearch() {
       const r = await api("/api/search?q=" + encodeURIComponent(DQ) + "&limit=60");
       hits = r.hits || [];
     } catch (e) {
-      if (seq !== DSEQ || TAB !== "discover") return;
+      if (seq !== DSEQ || !onSeg("browse")) return;
       DHITS = [];
       toast(e.message, true);
       const box = document.getElementById("discoverresults");
       if (box) discoverRenderResults(box);
       return;
     }
-    if (seq !== DSEQ || TAB !== "discover") return;
+    if (seq !== DSEQ || !onSeg("browse")) return;
     DHITS = hits;
     const box = document.getElementById("discoverresults");
     if (box) discoverRenderResults(box);
@@ -5692,7 +5864,7 @@ function discoverRow(h) {
     actions.append(mkbtn("btn-sm", "Open", () =>
       openItemEditor(DISCOVER_TAB[e.kind], e.name, null, e.state === "enabled")));
   } else if (e.group === "installed" && e.kind === "plugin") {
-    actions.append(mkbtn("btn-sm", "Show in Plugins", () => { PQ = e.name; goTab("plugins"); }));
+    actions.append(mkbtn("btn-sm", "Show in Plugins", () => { PQ = e.name; goSeg("plugins"); }));
   } else if (e.kind === "plugin" && e.installable && !e.blocked) {
     // Reached from "ondisk" and from the two remote catalogs alike — the
     // check is on the entry's own fields, not on which group it landed in.
@@ -5782,16 +5954,16 @@ async function skillsShSearch() {
   if (box0) discoverRenderResults(box0);
   try {
     const r = await api("/api/skills-search", { q, limit: 25 });
-    if (seq !== DSHSEQ || TAB !== "discover") return;
+    if (seq !== DSHSEQ || !onSeg("browse")) return;
     DSH = r.skills || [];
   } catch (e) {
-    if (seq !== DSHSEQ || TAB !== "discover") return;
+    if (seq !== DSHSEQ || !onSeg("browse")) return;
     DSH = [];
     toast(e.message, true);
   } finally {
     if (seq === DSHSEQ) DSHBUSY = false;
   }
-  if (TAB !== "discover") return;
+  if (!onSeg("browse")) return;
   const box = document.getElementById("discoverresults");
   if (box) discoverRenderResults(box);
 }
@@ -5977,12 +6149,11 @@ function render() {
   renderTabs();
   const views = { settings: "settingsview", mcp: "mcpview", statusline: "stlview",
     projects: "projectsview", setup: "setupview", insight: "insightview",
-    context: "contextview", costs: "costsview",
-    doctor: "doctorview", discover: "discoverview", plugins: "pluginsview",
-    backup: "backupview" };
+    context: "contextview", costs: "costsview", doctor: "doctorview",
+    skills: "skillsview", backup: "backupview" };
   const isEditor = !!EDITING;
   document.getElementById("editorview").hidden = !isEditor;
-  document.getElementById("itemsview").hidden = isEditor || !ITEM_TABS.includes(TAB);
+  document.getElementById("itemsview").hidden = isEditor || !INVENTORY_TABS.includes(TAB);
   if (isEditor) {
     for (const v of Object.values(views)) document.getElementById(v).hidden = true;
     renderEditor();
@@ -5990,7 +6161,8 @@ function render() {
   }
   for (const [t, v] of Object.entries(views))
     document.getElementById(v).hidden = TAB !== t;
-  if (ITEM_TABS.includes(TAB)) { renderInventory(); return; }
+  if (TAB === "skills") { renderSkills(); return; }
+  if (INVENTORY_TABS.includes(TAB)) { renderInventory(TAB); return; }
   if (TAB === "settings") { renderSettings(); return; }
   if (TAB === "mcp") { renderMcp(); return; }
   if (TAB === "statusline") { renderStatusline(); return; }
@@ -6000,8 +6172,6 @@ function render() {
   if (TAB === "context") { renderContext(); return; }
   if (TAB === "costs") { renderCosts(); return; }
   if (TAB === "doctor") { renderDoctor(); return; }
-  if (TAB === "discover") { renderDiscover(); return; }
-  if (TAB === "plugins") { renderPlugins(); return; }
   if (TAB === "backup") { renderBackup(); return; }
 }
 
