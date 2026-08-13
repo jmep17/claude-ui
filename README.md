@@ -8,19 +8,35 @@ It shows everything actually on this machine and edits it in place — it never
 owns, links, tracks, or syncs anything:
 
 - **Inventory** of `<config>/skills/`, `commands/`, `agents/`, and
-  `output-styles/`, with enable/disable (disabled items move to
-  `<config>/disabled/`, a plain visible directory outside everything Claude
-  Code scans — the filesystem is the entire state, no manifest). Expanding a
-  skill shows **the environment variables it reads**, found the same way as
-  the plugin scan below.
+  `output-styles/`. Commands, agents and output styles enable/disable by moving
+  in and out of `<config>/disabled/`, a plain visible directory outside
+  everything Claude Code scans — the filesystem is the entire state, no
+  manifest. A **skill has three states**: enabled; off, which writes
+  `skillOverrides` in `settings.json` (Claude Code's own switch — the file
+  never moves); and **archived**, which renames the directory into
+  `<config>/skills/archived/`. Personal skills load one level deep, so nothing
+  in there loads, and the bytes are never rewritten — restoring is the same
+  move back. `disabled/skills/` still works and is still listed, with a
+  one-press migration into the archive. Expanding a skill shows **the
+  environment variables it reads**, found the same way as the plugin scan
+  below.
 - **Editor** for item files and the config-dir files `CLAUDE.md`,
   `settings.json`, and `keybindings.json`.
 - **Settings** form editor for every documented `settings.json` key, with
   valid-option dropdowns and live value suggestions fetched from the public
   Claude Code docs.
 - **MCP** inventory and toggling of user-scope servers (`~/.claude.json`).
-- **Plugins** inventory of everything under `<config>/plugins/`, with per-plugin
-  enablement (`enabledPlugins`) and **Split** — Claude Code enables a plugin as
+- **Skills** is one tab with three segments, because three tabs used to answer
+  overlapping questions and could not answer each other's. *Installed* is your
+  skills folder plus **the skills installed plugins bring**, listed beside your
+  own because that is how they load. Those rows are read-only and carry no
+  per-skill switch: *"Plugin skills are not affected by `skillOverrides`.
+  Manage those through `/plugin` instead."* — a plugin skill's switch is its
+  whole plugin's, so the row offers "Copy into your skills" and "Disable
+  plugin" (behind a confirm naming everything else that goes off) and nothing
+  else. *Plugins* is the inventory of everything under `<config>/plugins/`,
+  with per-plugin enablement (`enabledPlugins`) and **Split** — Claude Code
+  enables a plugin as
   a whole, so splitting copies just the components you tick into your own
   `agents/`, `commands/` and `skills/`, then turns the plugin off. Copies rather
   than masks, because a marketplace is a tarball extract with no git history and
@@ -33,7 +49,11 @@ owns, links, tracks, or syncs anything:
   reading its code: Claude Code has no per-agent model setting, so a plugin that
   wants one ships its own (caveman's `CAVECREW_REVIEWER_MODEL` and friends,
   documented in a README table three directories deep). They are ordinary
-  `env` entries in `settings.json` once you know the names.
+  `env` entries in `settings.json` once you know the names. *Browse* searches
+  the union — your items, installed plugins, and marketplaces you have
+  registered — plus Anthropic's public catalogs and skills.sh, each behind its
+  own consent. Typing searches this machine only; what you type leaves it only
+  when you press **Search skills.sh**.
 - **Statusline** generator — a setup piece that writes a dependency-free
   statusline script into the config dir and points the `statusLine` key at it.
   Setup pieces are idempotent, derive their installed state by inspection, and
@@ -156,6 +176,13 @@ Keyboard: <kbd>⌘K</kbd> command palette, <kbd>1</kbd>–<kbd>9</kbd> for tabs,
 <kbd>/</kbd> to focus the current filter, <kbd>⌘S</kbd> to save in the editor,
 <kbd>Esc</kbd> to close.
 
+The Skills tab is segmented, and each segment is addressable: `#skills`,
+`#skills?seg=plugins`, `#skills?seg=browse` (with an optional `&q=` to link a
+search). A query param rather than a path segment, because `#skills/<name>`
+already means "open this skill's editor" and a skill may legally be called
+`browse`. Old `#discover` and `#plugins` bookmarks land on the segment that
+replaced them and rewrite the hash in place.
+
 ## Run
 
 ```sh
@@ -180,9 +207,10 @@ The Claude Code config dir is resolved in this order:
 
 `bin/claude-ui` is a thin launcher; the code lives in `bin/claude_ui/*.py`
 (core → schema → settings → items/mcp/plugins → statusline/localmodel/insight/assist/setup
-→ doctor → server, a clean DAG). The frontend is plain files in `bin/claude_ui/static/`
-(no build step), layered theme → components → app, with `ui.js` and `editor.js`
-before `app.js`.
+→ doctor → server, a clean DAG). `items.skill_facts()` is the one reader of a
+skill directory; `plugins` decorates its result rather than parsing again. The
+frontend is plain files in `bin/claude_ui/static/` (no build step), layered
+theme → components → app, with `ui.js` and `editor.js` before `app.js`.
 
 Tests are stdlib `unittest`: `python3 -m unittest discover tests`.
 
@@ -193,7 +221,7 @@ in:
 
 | Group | What it holds |
 | :--- | :--- |
-| Skills, commands, agents, output styles | Every file of every item, enabled and in `disabled/` |
+| Skills, commands, agents, output styles | Every file of every item — enabled, archived, and in `disabled/` |
 | CLAUDE.md, settings.json, keybindings.json | Your memory file, all settings, key bindings |
 | Statusline | `statusline.json` and the generated `statusline.sh`, executable bit kept |
 | MCP servers | The `mcpServers` map from `~/.claude.json` |

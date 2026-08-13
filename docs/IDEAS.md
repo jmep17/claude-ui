@@ -40,6 +40,15 @@ Shipped in the editor pass. The editor moved out of `app.js` into `static/editor
 | Config files are reachable | `DATA.config_files` was computed by `/api/state` and read by nothing; a **Config files** card on the settings tab now spends it. |
 | Adopted items are visible | `adopted_items()` was computed for the doctor only. `/api/plugins` now returns it, and a **Split into your config** section lists each one with **Edit**, **Plugin's copy** (read-only, to see what "differs" means) and **Re-sync** — which finally calls the `plugin-resync` action that shipped with no caller. `scan_items()` also reports `source`, so an adopted item is badged *from plugin* in the inventory where you actually edit it. |
 
+Shipped in the merged-tab pass.
+
+| Idea | Notes |
+| :--- | :--- |
+| Skills, Plugins and Discover become one tab | Three tabs answered overlapping questions and could not answer each other's. One **Skills** tab with *Installed* / *Plugins* / *Browse*; the skills installed plugins bring list beside your own, read-only, because a plugin skill's switch is its whole plugin's (`plugins.skill_override_set()` is the authority). Segments are addressable as `#skills?seg=…`; old `#discover` / `#plugins` bookmarks rewrite in place. |
+| A third state for a skill: archived | `<config>/skills/archived/<name>/`, reached by a rename. Personal skills load one level deep, so nothing in there loads and the bytes are never rewritten. `archived` and `synced` become reserved directory names, excluded at `items._scan_dir_type` — the single point that keeps the archive out of the inventory, the doctor, the context budget, backup's units and the catalog at once. `disabled/skills/` still works, and the tab offers a one-press migration. |
+| One reader for a skill directory | `items.skill_facts()`. `items._dir_item` and `plugins._skill_components` each used to walk a skills directory and parse its frontmatter, producing two record shapes `catalog.py` needed two adapters to read. |
+| Two shared frontend shapes | `cached()` for the fetch-once-then-render preamble nine views repeated, `act()` for the write→toast→redraw triplet nine actions repeated, plus `envPanel`/`toggleDetail`/`setEnvVar`/`catalogFetch`/`errorAlert`/`segmented`. |
+
 ---
 
 ## High value
@@ -69,6 +78,12 @@ Add `item_create(type_, name, template)` writing frontmatter stubs, `item_copy`,
 `item_rename` (a rename inside `disabled/` too), and a delete that moves to
 `disabled/` first rather than unlinking. Templates per type — a skill with a
 `Use when …` trigger already filled in is a teaching moment.
+
+Create, copy, move and delete have since shipped; **rename has not**, and when
+it does it needs the same two guards the others grew: `items._need_free`, which
+refuses a name held by either side of `disabled/` *or* by `skills/archived/`,
+and the reserved-name check in `resolve_item` that keeps `archived` and
+`synced` from being skill names at all.
 
 ### 3. Doctor check pack — S
 
@@ -178,7 +193,10 @@ of them, marketplace management, has since shipped too.
 a `name taken` badge and cannot be ticked; the only way through is to rename
 your own item first. An inline rename input per conflicting row would fix that,
 but it breaks the one-decision-one-confirm shape the dialog was built around, so
-it wants its own thought.
+it wants its own thought. `plugins._conflict()` has since grown two more
+reasons a name is unusable — one held by `skills/archived/`, and a reserved
+directory name — so the rename input would have to re-check on every keystroke
+against all four.
 
 **Marketplaces — done.** `registry.py` shells out to `claude plugin` for both
 scopes: the project card added it first, and the Plugins tab's "Marketplaces &
@@ -264,6 +282,26 @@ machine whose marketplace has since vanished cannot rebuild them.
 Keybindings have exactly the properties that reward a UI: a chord you'd rather
 press than spell, a fixed vocabulary of action names nobody remembers, and
 conflicts invisible in a text file.
+
+### 26. The two duplications the merged tab left open — S each
+
+The merged-tab pass closed four (two skill-directory readers, two env panels,
+four copies of write→toast→refresh, two copies of the cached-view skeleton).
+Two were deliberately left, because neither is a copy-paste:
+
+**Two marketplace sources of truth.** `plugins._marketplaces()` reads disk;
+`registry.py` shells out to `claude plugin marketplace list`. `pluginBrings()`
+in `app.js` reconciles them in the browser. These are genuinely different
+answers — disk truth is what is installed, CLI truth is what the CLI believes
+is registered, and they legitimately disagree mid-install. Closing it means
+picking a winner and changing what the marketplace card reports, which is a
+behaviour decision, not a cleanup. Cheapest honest form: a server-side join in
+the `/api/user-registry` handler, after which `pluginBrings()` is deleted.
+
+**`core.plugins_dir()` vs `plugins.plugins_root()`.** The same path twice, by
+comment (`core.py`): `plugins.py` imports `core`, and `core.resolve_editable()`
+has to know about plugins to mark them read-only. A one-function fix, unrelated
+to anything else, worth doing alone.
 
 ---
 
