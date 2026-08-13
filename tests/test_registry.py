@@ -17,12 +17,16 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "bin"))
 
-from claude_ui import core, projects, registry  # noqa: E402
+from claude_ui import (catalog, core, items, plugins, projects, registry,  # noqa: E402
+                       server, settings)
 
 
 class _Done:
@@ -276,6 +280,84 @@ class State(Base):
         self.json_results([], {})
         self.assertEqual(registry.registry_state(self.proj)["suggested"][0]["source"],
                          registry.SUGGESTED[0]["source"])
+
+
+class CatalogEndpoints(unittest.TestCase):
+    """POST /api/catalog-install and /api/catalog-marketplace-add, through a
+    real running server — the same posture test_server_static.py takes,
+    because what is under test (headers, dispatch, the 400-before-subprocess
+    ordering) is plumbing a hand-rolled fake handler would not exercise
+    honestly. registry.subprocess.run is replaced as in Base above: nothing
+    here should ever start a real `claude`."""
+
+    _CFG_USERS = (core, items, settings, plugins, catalog, projects, registry)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = pathlib.Path(self.tmp.name) / "claude"
+        self.cfg.mkdir()
+        self._saved = [(m, m.config_dir) for m in self._CFG_USERS]
+        for m, _ in self._saved:
+            m.config_dir = lambda t=self.cfg: t
+        catalog._CACHE = None
+
+        self.calls = []
+        self._run = registry.subprocess.run
+        registry.subprocess.run = self.fake_run
+
+        self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
+        registry.subprocess.run = self._run
+        for m, fn in self._saved:
+            m.config_dir = fn
+        catalog._CACHE = None
+        self.tmp.cleanup()
+
+    def fake_run(self, argv, **kw):
+        self.calls.append((argv, kw))
+        return _Done(0, "{}")
+
+    def post(self, path, body):
+        req = urllib.request.Request(
+            "http://127.0.0.1:%d%s" % (self.port, path),
+            data=json.dumps(body).encode(), method="POST",
+            headers={"content-type": "application/json", "x-claude-ui": core.TOKEN})
+        try:
+            resp = urllib.request.urlopen(req, timeout=5)
+        except urllib.error.HTTPError as e:
+            resp = e
+        return resp.status, json.loads(resp.read())
+
+    def test_catalog_install_unknown_id_shells_out_to_nothing(self):
+        status, body = self.post("/api/catalog-install",
+                                 {"id": "nope@nowhere", "scope": "user"})
+        self.assertEqual(status, 400)
+        self.assertIn("nope@nowhere", body["error"])
+        self.assertEqual(self.calls, [])
+
+    def test_catalog_marketplace_add_blocked_shells_out_to_nothing(self):
+        write = lambda path, obj: (path.parent.mkdir(parents=True, exist_ok=True),
+                                   path.write_text(json.dumps(obj)))
+        write(self.cfg / "settings.json", {"blockedMarketplaces": ["owner/repo"]})
+        status, body = self.post("/api/catalog-marketplace-add",
+                                 {"source": "owner/repo"})
+        self.assertEqual(status, 400)
+        self.assertIn("owner/repo", body["error"])
+        self.assertEqual(self.calls, [])
+
+    def test_catalog_marketplace_add_unblocked_runs_the_cli(self):
+        status, body = self.post("/api/catalog-marketplace-add",
+                                 {"source": "owner/repo"})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("owner/repo", self.calls[0][0])
 
 
 if __name__ == "__main__":

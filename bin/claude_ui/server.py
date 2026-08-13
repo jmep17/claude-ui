@@ -6,6 +6,8 @@ import argparse
 import errno
 import json
 import os
+import re
+import secrets
 import sys
 import urllib.parse
 import webbrowser
@@ -13,7 +15,9 @@ import webbrowser
 from .backup import (backup_create, backup_delete, backup_inspect, backup_list,
                      backup_plan, backup_restore, fresh_start,
                      project_restore, project_restore_inspect, set_backup_dir)
+from . import catalog
 from .core import ITEM_TYPES, TOKEN, config_dir, read_cfg, set_config_dir, tilde
+from . import remote
 from .items import (Conflict, config_files_state, item_copy, item_create,
                     item_delete, item_move, item_read, item_save, item_scope,
                     item_set_model, path_read, path_save, scan_items,
@@ -56,6 +60,20 @@ STATIC_FILES = {
     for n in _STATIC_NAMES
 }
 
+# json.dumps leaves <, >, & and the two line-separator code points alone, so
+# remote catalog/schema text containing "</script>" (or a U+2028 that some
+# JS parsers treat as a line break) can close the inlining script block.
+# All five escapes below are valid \uXXXX JSON escapes and parse back
+# identical to the source value.
+_JS_ESCAPES = {"<": "\\u003c", ">": "\\u003e", "&": "\\u0026",
+               "\u2028": "\\u2028", "\u2029": "\\u2029"}
+_JS_ESCAPE_RE = re.compile("[<>&\u2028\u2029]")
+
+
+def _js_json(obj):
+    return _JS_ESCAPE_RE.sub(lambda m: _JS_ESCAPES[m.group()], json.dumps(obj))
+
+
 # Brand mark, matching the header chip: a rounded square with a "C" cut out.
 ICON_SVG = (
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
@@ -77,6 +95,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("content-type", ctype)
         self.send_header("content-length", str(len(data)))
+        # Sent from here, not per-endpoint, so no future handler can forget
+        # them. script-src carries a nonce (see do_GET's "/" branch) rather
+        # than 'unsafe-inline' — the four static JS files have zero inline
+        # event handlers (grepped), so nothing else needs it.
+        nonce = getattr(self, "_csp_nonce", None) or secrets.token_urlsafe(16)
+        self.send_header(
+            "content-security-policy",
+            "default-src 'none'; script-src 'self' 'nonce-" + nonce + "'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "connect-src 'self'; font-src 'self'; base-uri 'none'; "
+            "form-action 'none'; frame-ancestors 'none'")
+        self.send_header("x-frame-options", "DENY")
+        self.send_header("referrer-policy", "no-referrer")
+        self.send_header("x-content-type-options", "nosniff")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -99,10 +131,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/":
             page = (STATIC / "index.html").read_text()
+            self._csp_nonce = secrets.token_urlsafe(16)
+            # __TOKEN__ first: it's hex and can't contain another marker, so
+            # substituting it before __SCHEMA__ means schema content (remote,
+            # from schemastore) can never steer a later substitution by
+            # containing the literal string "__TOKEN__".
             # a call, not the module constant: a live schema fetch that landed
             # after start-up is picked up on the next page render
-            self.send(200, page.replace("__SCHEMA__", json.dumps(settings_schema()))
-                              .replace("__TOKEN__", TOKEN),
+            page = (page.replace("__TOKEN__", TOKEN)
+                        .replace("__SCHEMA__", _js_json(settings_schema()))
+                        .replace("__NONCE__", self._csp_nonce))
+            self.send(200, page,
                       "text/html; charset=utf-8", {"cache-control": "no-store"})
         elif self.path in STATIC_FILES:
             fname, ctype = STATIC_FILES[self.path]
@@ -207,6 +246,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, {"id": pid, "env": plugin_env_vars(pid)})
             except (ValueError, OSError) as e:
                 self.send(400, {"error": str(e)})
+        elif self.path == "/api/catalog":
+            # index metadata only — counts per source, cache freshness, policy
+            # as configured. No search here; that's /api/search below.
+            # discover_consent rides along here (not catalog.catalog_state()
+            # itself) because catalog.py cannot import remote.py — remote.py
+            # already imports catalog.py for its sanitization helpers, and the
+            # reverse would be a cycle.
+            self.send(200, {**catalog.catalog_state(),
+                            "discover_consent": remote.consent_get()})
+        elif self.path == "/api/search" or self.path.startswith("/api/search?"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            get = lambda k, d="": (q.get(k) or [d])[0]
+            try:
+                limit = int(get("limit") or 20)
+            except ValueError:
+                limit = 20
+            self.send(200, {"hits": catalog.search(
+                get("q"), limit=limit, root=get("root") or None)})
         elif self.path.startswith("/api/skill-detail?"):
             # the env vars one skill reads — same walk as plugin-detail, and
             # off the /api/state path for the same reason
@@ -447,6 +504,90 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "assist":
                 self.send(200, assist(req.get("mode", ""), req.get("custom", ""),
                                       req.get("content", ""), req.get("path", "")))
+            elif action == "catalog-install":
+                # resolve_install is the gate: an unknown id, a non-installable
+                # component, or a blocked marketplace raises ValueError *before*
+                # any subprocess runs — caught below, with no `claude` call made.
+                # The resolved id (the index's own copy) is what goes to the
+                # CLI, never the raw request string past this point.
+                scope = req.get("scope") or "user"
+                pid = catalog.resolve_install(req.get("id", ""), scope)
+                self.send(200, user_plugin_install(pid) if scope == "user"
+                              else plugin_install(scope, pid))
+            elif action == "catalog-marketplace-add":
+                # the policy chokepoint: blockedMarketplaces/strictKnownMarketplaces
+                # are checked here, before anything shells out. The source string
+                # itself stands in for both the eventual marketplace name and its
+                # owner/repo form — is_blocked() matches whichever applies.
+                source = req.get("source", "")
+                scope = req.get("scope") or "user"
+                settings_data = settings_state()["data"]
+                if catalog.is_blocked(source, source, settings_data):
+                    self.send(400, {"error": f"{source}: blocked by your settings "
+                                    "(blockedMarketplaces or strictKnownMarketplaces). "
+                                    "That is Claude Code's rule, not ours — this app "
+                                    "just won't offer you the button."})
+                else:
+                    self.send(200, user_marketplace_add(source) if scope == "user"
+                                  else marketplace_add(scope, source))
+            elif action == "discover-consent":
+                # source is one of the two static-document keys, or skills_sh
+                # (Phase 4's per-skill audit lookup) — a different consent
+                # shape ({ok, query_ok}), so it gets its own setter rather
+                # than routing through consent_set().
+                source = req.get("source", "")
+                if source == "skills_sh":
+                    self.send(200, {"ok": True, "consent":
+                                    remote.consent_set_skills_sh(bool(req.get("ok")))})
+                elif source not in ("official", "community"):
+                    self.send(400, {"error": f"{source!r}: not a source this app manages"})
+                else:
+                    self.send(200, {"ok": True,
+                                    "consent": remote.consent_set(source, bool(req.get("ok")))})
+            elif action == "catalog-refresh":
+                # `sources` is a list of source KEYS, never URLs — remote.py's
+                # fetch_source() enforces that on its own, but the request
+                # shape here never carries anything else to enforce.
+                sources = req.get("sources")
+                if not isinstance(sources, list) or not sources:
+                    self.send(400, {"error": "sources: non-empty list of source keys required"})
+                else:
+                    results = {}
+                    for name in sources:
+                        if not isinstance(name, str) or name not in ("official", "community"):
+                            results[str(name)] = {"ok": False,
+                                                  "detail": f"{name!r}: not a known discover source"}
+                            continue
+                        try:
+                            results[name] = remote.fetch_source(name)
+                        except ValueError as e:
+                            results[name] = {"ok": False, "detail": str(e)}
+                    self.send(200, {"results": results})
+            elif action == "skill-audit":
+                # id is resolved server-side against the catalog index, same
+                # security property as catalog-install above: the request's
+                # copy of `id` is used only to look it up via
+                # catalog.get_entry(), then discarded — source/skill (what
+                # actually reaches remote.audit_skill(), and from there
+                # skills.sh) come from the resolved Entry, never the raw
+                # request body.
+                e = catalog.get_entry(req.get("id", ""))
+                if e is None:
+                    raise ValueError(f"{req.get('id', '')!r}: not in the index")
+                if e.get("kind") != "skill":
+                    raise ValueError(f"{e['id']}: not a skill — only skills can be audited")
+                # skills.sh's audit path is an npm-style source/skill pair; the
+                # closest thing an Entry has to "source" for a skill is the
+                # marketplace it came from (set on skill entries by every
+                # corpus that produces them — installed/ondisk/discover), not
+                # the plugin's own package name, which the index does not
+                # carry separately. A "yours" skill (not from any
+                # marketplace) has no marketplace field and is refused.
+                source = e.get("marketplace")
+                if not source:
+                    raise ValueError(f"{e['id']}: no marketplace/source on record — "
+                                     "cannot audit a skill that isn't from a marketplace")
+                self.send(200, remote.audit_skill(source, e["name"]))
             else:
                 self.send(404, {"error": "not found"})
         except Conflict as e:  # a ValueError — must be caught first

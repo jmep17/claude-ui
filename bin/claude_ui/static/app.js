@@ -12,7 +12,7 @@ let DATA = { items: {}, config_files: [], config_dir: "", settings: {}, mcp: {},
 const ITEM_TABS = ["skills", "commands", "agents", "output-styles"];
 // the types core.ITEM_TYPES calls kind "dir": a folder of files, not one file
 const DIR_TYPES = new Set(["skills"]);
-const TABS = [...ITEM_TABS, "mcp", "statusline", "projects", "setup", "settings", "insight", "context", "costs", "doctor", "plugins", "backup"];
+const TABS = [...ITEM_TABS, "mcp", "statusline", "projects", "setup", "settings", "insight", "context", "costs", "doctor", "discover", "plugins", "backup"];
 
 const TAB_META = {
   "skills": { icon: "sparkles", label: "Skills" },
@@ -28,6 +28,7 @@ const TAB_META = {
   "context": { icon: "layers", label: "Context" },
   "costs": { icon: "dollar", label: "Costs" },
   "doctor": { icon: "pulse", label: "Doctor" },
+  "discover": { icon: "search", label: "Discover" },
   "plugins": { icon: "plug", label: "Plugins" },
   "backup": { icon: "archive", label: "Backup" },
 };
@@ -1137,6 +1138,11 @@ let PQ = "";
 const KIND_LABEL = { agents: "agent", commands: "command", skills: "skill",
   "output-styles": "output style", mcp: "MCP server", hooks: "hooks" };
 
+// Both registry cards wait on the same thing: `claude plugin marketplace list`
+// and `claude plugin list --available`, two subprocesses. Nothing is asked of a
+// model, and saying otherwise made a slow CLI call look like a slow answer.
+const CLI_WAIT = "Running claude plugin list…";
+
 const pluralKind = (k, n) =>
   n + " " + KIND_LABEL[k] + (n === 1 || k === "hooks" ? "" : "s");
 
@@ -1205,6 +1211,7 @@ async function renderPlugins(reload) {
   }
   if (!shown.length) {
     view.append(noMatches(PQ));
+    view.append(catalogSearchLink(PQ));
     return;
   }
 
@@ -1248,7 +1255,7 @@ function userRegistryCard() {
   const toggle = mkbtn("btn-sm btn-icon btn-ghost", "", () => {
     UREGOPEN = !UREGOPEN;
     if (UREGOPEN && !UREG) userRegistryLoad(); else renderPlugins();
-  }, UREGOPEN ? "Collapse" : "Ask claude what you can install");
+  }, UREGOPEN ? "Collapse" : "Load marketplaces and installable plugins (runs claude plugin list)");
   toggle.append(icon("chevronDown"));
 
   const card = el("div.card", {},
@@ -1263,7 +1270,7 @@ function userRegistryCard() {
       el("div.dactions", {}, toggle)));
   if (!UREGOPEN) return card;
   if (!UREG) {
-    card.append(el("div.drow", {}, el("span.dmsg", { text: "Asking claude…" })));
+    card.append(el("div.drow", {}, el("span.dmsg", { text: CLI_WAIT })));
     return card;
   }
 
@@ -1338,7 +1345,7 @@ function pluginBrings(id) {
 }
 
 async function userRegistryLoad() {
-  renderPlugins();                // draw the "Asking claude…" line first
+  renderPlugins();                // draw the CLI_WAIT line first
   try { UREG = await api("/api/user-registry", {}); }
   catch (e) {
     UREG = { error: e.message, marketplaces: [], installed: [],
@@ -1348,7 +1355,7 @@ async function userRegistryLoad() {
 }
 
 async function userRegistryRun(action, body, msg) {
-  const t = toast({ title: "Running claude…", variant: "loading", duration: 0 });
+  const t = toast({ title: "Running claude plugin…", variant: "loading", duration: 0 });
   try {
     const r = await api("/api/" + action, body);
     t.close();
@@ -2847,7 +2854,7 @@ function projRegistryRow(st) {
   const toggle = mkbtn("btn-sm btn-icon btn-ghost", "", () => {
     if (open) { POPENITEMS.delete(key); renderProjects(); }
     else { POPENITEMS.add(key); projRegistryLoad(st); }
-  }, open ? "Collapse" : "Ask claude what this project can install");
+  }, open ? "Collapse" : "Load this project's marketplaces (runs claude plugin list)");
   toggle.append(icon("chevronDown"));
 
   const head = el("div.drow", {},
@@ -2860,7 +2867,7 @@ function projRegistryRow(st) {
     el("div.dactions", {}, toggle));
   if (!open) return head;
   if (!reg) return el("div", {}, head,
-    el("div.drow", {}, el("span.dmsg", { text: "Asking claude…" })));
+    el("div.drow", {}, el("span.dmsg", { text: CLI_WAIT })));
 
   const rows = [];
   if (reg.error)
@@ -2923,7 +2930,7 @@ function projRegistryRow(st) {
 }
 
 async function projRegistryLoad(st) {
-  renderProjects();               // draw the "Asking claude…" line first
+  renderProjects();               // draw the CLI_WAIT line first
   try { PREG[st.root] = await api("/api/project-registry", { root: st.root }); }
   catch (e) {
     PREG[st.root] = { error: e.message, marketplaces: [], installed: [],
@@ -2933,7 +2940,7 @@ async function projRegistryLoad(st) {
 }
 
 async function projRegistryRun(st, action, body, msg) {
-  const t = toast({ title: "Running claude…", variant: "loading", duration: 0 });
+  const t = toast({ title: "Running claude plugin…", variant: "loading", duration: 0 });
   try {
     const r = await api("/api/" + action, { root: st.root, ...body });
     t.close();
@@ -4240,7 +4247,7 @@ function closePalette() {
 }
 
 function openPalette() {
-  PAL = { q: "", sel: 0, items: palItems() };
+  PAL = { q: "", sel: 0, items: palItems(), catalogHits: [] };
   const p = document.getElementById("palette");
   p.hidden = false;
   p.className = "dialog-overlay palette-overlay";
@@ -4252,15 +4259,45 @@ function openPalette() {
   });
   const listEl = el("div.command-list", { role: "listbox" });
 
+  // The catalog group is appended after the local matches, never merged into
+  // their fuzzy ranking — it is its own labeled group, per palMatches() below.
+  // Every row's run() navigates to Discover with the *typed query* pre-filled;
+  // it never opens or installs the specific hit. A command palette is too easy
+  // to fire by Enter-muscle-memory to let it clone a repo or run an install.
+  const palRows = () => {
+    const q = PAL.q.trim();
+    const rows = palMatches();
+    if (q.length >= 2 && PAL.catalogHits.length)
+      for (const h of PAL.catalogHits)
+        rows.push({ kind: "discover catalog", label: h.entry.name,
+          icon: DISCOVER_ICON[h.entry.kind] || "search",
+          hint: h.entry.description || "", run: () => goDiscoverSearch(q) });
+    return rows;
+  };
+
+  let catTimer = null;
+  const catalogSearch = (q) => {
+    clearTimeout(catTimer);
+    if (q.length < 2) { PAL.catalogHits = []; renderList(); return; }
+    catTimer = setTimeout(async () => {
+      let hits = [];
+      try { hits = (await api("/api/search?q=" + encodeURIComponent(q) + "&limit=8")).hits || []; }
+      catch (e) { hits = []; }
+      if (!PAL || PAL.q.trim() !== q) return;   // stale answer, or palette closed
+      PAL.catalogHits = hits;
+      renderList();
+    }, 150);
+  };
+
   const renderList = () => {
-    const list = palMatches();
+    const rows = palRows();
     listEl.innerHTML = "";
-    if (!list.length) {
+    if (!rows.length) {
       listEl.append(el("div.command-empty", { text: "No results." }));
       return;
     }
     let lastKind = null;
-    list.forEach((it, i) => {
+    rows.forEach((it, i) => {
       if (it.kind !== lastKind) {
         listEl.append(el("div.command-group-label", { text: it.kind }));
         lastKind = it.kind;
@@ -4277,19 +4314,24 @@ function openPalette() {
     });
   };
 
-  inp.oninput = () => { PAL.q = inp.value; PAL.sel = 0; renderList(); };
+  inp.oninput = () => {
+    PAL.q = inp.value;
+    PAL.sel = 0;
+    renderList();
+    catalogSearch(inp.value.trim());
+  };
   inp.onkeydown = (e) => {
-    const list = palMatches();
+    const rows = palRows();
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      PAL.sel = Math.min(PAL.sel + 1, list.length - 1);
+      PAL.sel = Math.min(PAL.sel + 1, rows.length - 1);
       renderList();
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       PAL.sel = Math.max(PAL.sel - 1, 0);
       renderList();
     } else if (e.key === "Enter") {
-      const it = list[PAL.sel];
+      const it = rows[PAL.sel];
       if (it) { closePalette(); it.run(); }
     } else if (e.key === "Escape") {
       closePalette();
@@ -4616,8 +4658,10 @@ function renderInventory() {
   section(on, "Enabled", true);
   section(off, "Disabled", false);
 
-  if (!items.length)
+  if (!items.length) {
     view.append(noMatches(IQ));
+    view.append(catalogSearchLink(IQ));
+  }
 }
 
 /* ------------------------------------------------------------------ backup --
@@ -5294,6 +5338,345 @@ async function applyRestore() {
   } catch (e) { toast(e.message, true); }
 }
 
+// ---------------------------------------------------------------- discover
+/* Search over everything Claude Code can load, whether or not you own it —
+   your items, installed plugins, on-disk marketplaces, and (once you opt in,
+   a later phase) Anthropic's official and community catalogs. The query is
+   answered by GET /api/search, which never reaches the network — the index
+   is built from files already on this machine. */
+
+let DQ = "";
+let DHITS = null;   // null = not searched yet this tab-open; [] = no hits
+let DCATALOG = null;
+let DSEQ = 0;        // monotonic guard: a slow response cannot overwrite a newer one
+let DTIMER = null;
+
+/* Jump to the Discover tab with `q` pre-filled and searched — the one
+   navigation every catalog bridge uses: the palette's catalog group, and the
+   Plugins/inventory tabs' "search the whole catalog" empty-state links.
+   Routes through goTab() for its unsaved-changes guard; if that guard sends
+   the user nowhere (they declined to discard an edit), TAB will not actually
+   be "discover" afterward, and DQ is left alone rather than primed for a
+   navigation that did not happen. */
+function goDiscoverSearch(q) {
+  goTab("discover");
+  if (TAB !== "discover") return;
+  DQ = q;
+  DHITS = null;
+  render();
+}
+
+// The empty-state bridge itself: "Search the whole catalog for “q” →",
+// wired to goDiscoverSearch. Shared by renderPlugins()'s and
+// renderInventory()'s noMatches() branches.
+function catalogSearchLink(q) {
+  return el("div", {},
+    mkbtn("btn-link btn-sm", "Search the whole catalog for “" + q + "” →",
+      () => goDiscoverSearch(q)));
+}
+
+const DISCOVER_GROUPS = [
+  { key: "yours", header: "In your config" },
+  { key: "installed", header: "Installed on this machine" },
+  { key: "ondisk", header: "In your marketplaces, not installed" },
+  { key: "official", header: "Anthropic catalog", badge: "official" },
+  { key: "community", header: "Anthropic community catalog", badge: "community",
+    hint: "Passed Anthropic's automated validation and safety screening. "
+      + "Screened is not endorsed." },
+];
+
+const DISCOVER_ICON = { skill: "sparkles", command: "terminal", agent: "bot",
+  "output-style": "droplet", mcp: "server", plugin: "plug", marketplace: "download" };
+const DISCOVER_TAB = { skill: "skills", command: "commands", agent: "agents",
+  "output-style": "output-styles" };
+
+// One card per remote group (official/community) with no recorded consent —
+// or consent explicitly withdrawn. `ok` here means exactly one thing: "you
+// may download this static public document from this URL." There is no
+// query-leaking risk to word carefully around in this phase — search stays
+// local — so the copy just says what is actually happening.
+function discoverConsentCard() {
+  if (!DCATALOG || DCATALOG.error) return null;
+  const consent = DCATALOG.discover_consent || {};
+  const pending = DISCOVER_GROUPS.filter((g) => g.badge && !(consent[g.key] || {}).ok);
+  if (!pending.length) return null;
+  const card = el("div.card", { style: "margin-bottom: 12px" });
+  const body = el("div.card-body", {},
+    el("div.card-title", { text: "Anthropic's plugin catalogs" }),
+    el("div.hint", {
+      text: "Discover searches this machine only by default. Turning one of "
+        + "these on downloads Anthropic's public plugin list from GitHub — a "
+        + "static JSON file, no query or personal data leaves this machine "
+        + "either way." }));
+  card.append(body);
+  for (const g of pending) {
+    const row = el("div.drow", {},
+      el("span.dmsg", {},
+        el("div", {}, el("span.dmono", { text: g.header }), badge(g.badge, "outline")),
+        g.hint ? el("div.hint", { text: g.hint }) : null),
+      el("div.dactions", {}, mkbtn("btn-sm btn-primary", "Enable",
+        () => discoverEnable(g.key))));
+    body.append(row);
+  }
+  return card;
+}
+
+async function discoverEnable(source) {
+  const t = toast({ title: "Fetching the " + source + " catalog…", variant: "loading", duration: 0 });
+  try {
+    await api("/api/discover-consent", { source, ok: true });
+    const res = await api("/api/catalog-refresh", { sources: [source] });
+    t.close();
+    const r = (res.results || {})[source];
+    toast(r && r.ok ? "Fetched · " + r.detail : ((r || {}).detail || "fetch failed"),
+         !(r && r.ok));
+    await renderDiscover(true);
+  } catch (err) { t.close(); toast(err.message, true); }
+}
+
+async function discoverRefresh(source) {
+  const t = toast({ title: "Refreshing the " + source + " catalog…", variant: "loading", duration: 0 });
+  try {
+    const res = await api("/api/catalog-refresh", { sources: [source] });
+    t.close();
+    const r = (res.results || {})[source];
+    toast(r && r.ok ? "Refreshed · " + r.detail : ((r || {}).detail || "refresh failed"),
+         !(r && r.ok));
+    await renderDiscover(true);
+  } catch (err) { t.close(); toast(err.message, true); }
+}
+
+async function renderDiscover(reload) {
+  const view = document.getElementById("discoverview");
+  if (reload || !DCATALOG) {
+    try { DCATALOG = await api("/api/catalog"); }
+    catch (e) { DCATALOG = { error: e.message }; }
+    if (TAB !== "discover") return;
+  }
+
+  view.innerHTML = "";
+  view.append(el("div.view-head", {
+    html: "Search everything Claude Code can load on this machine — your own "
+      + "items, installed plugins, and marketplaces you have registered — "
+      + "whether or not you own it yet. <b>The query never leaves this "
+      + "machine.</b>",
+  }));
+
+  if (DCATALOG.error) {
+    view.append(el("div.alert.alert-destructive", {},
+      el("span.alert-icon", {}, icon("error")),
+      el("div.alert-body", { text: DCATALOG.error })));
+  }
+
+  const consentCard = discoverConsentCard();
+  if (consentCard) view.append(consentCard);
+
+  const inp = el("input", {
+    type: "search", id: "dq", placeholder: "Search skills, commands, agents, plugins, MCP servers…",
+    value: DQ,
+    oninput: (e) => {
+      DQ = inp.value;
+      if (e.isComposing) return;
+      discoverSearch();
+    },
+  });
+  const counts = DCATALOG.counts || {};
+  const countLine = Object.entries(counts).map(([k, n]) => n + " " + k).join(" · ");
+  view.append(el("div.toolbar", {}, inp,
+    el("div.toolbar-end", {}, el("span.hint", { text: countLine }))));
+
+  const box = el("div", { id: "discoverresults" });
+  view.append(box);
+  discoverRenderResults(box);
+  if (DHITS === null) discoverSearch();
+}
+
+function discoverSearch() {
+  clearTimeout(DTIMER);
+  DTIMER = setTimeout(async () => {
+    const seq = ++DSEQ;
+    let hits;
+    try {
+      const r = await api("/api/search?q=" + encodeURIComponent(DQ) + "&limit=60");
+      hits = r.hits || [];
+    } catch (e) {
+      if (seq !== DSEQ || TAB !== "discover") return;
+      DHITS = [];
+      toast(e.message, true);
+      const box = document.getElementById("discoverresults");
+      if (box) discoverRenderResults(box);
+      return;
+    }
+    if (seq !== DSEQ || TAB !== "discover") return;
+    DHITS = hits;
+    const box = document.getElementById("discoverresults");
+    if (box) discoverRenderResults(box);
+  }, 120);
+}
+
+function discoverRenderResults(box) {
+  box.innerHTML = "";
+  if (DHITS === null) { box.append(skeletonList()); return; }
+  if (!DHITS.length) { box.append(noMatches(DQ)); return; }
+  for (const g of DISCOVER_GROUPS) {
+    const hits = DHITS.filter((h) => h.entry.group === g.key);
+    if (!hits.length) continue;
+    const title = sectionTitle(g.header, hits.length);
+    if (g.badge) title.append(badge(g.badge, "outline"));
+    box.append(title);
+    if (g.hint) box.append(el("div.hint", { text: g.hint }));
+    if (g.badge) {
+      const fetchedAt = (DCATALOG.discover_fetched_at || {})[g.key];
+      box.append(el("div.hint", {},
+        el("span", { text: (fetchedAt ? "fetched " + relTime(fetchedAt) : "not fetched yet") + " · " }),
+        mkbtn("btn-link btn-sm", "Refresh", () => discoverRefresh(g.key))));
+    }
+    const list = el("div.list");
+    for (const h of hits) list.append(discoverRow(h));
+    box.append(list);
+  }
+}
+
+function discoverRow(h) {
+  const e = h.entry;
+  const row = el("div.drow", { title: (h.why || []).join(", ") },
+    icon(DISCOVER_ICON[e.kind] || "plug"),
+    el("span.dmsg", {},
+      el("div", {},
+        el("span.dmono", { text: e.name }),
+        e.parent ? el("span.hint", { text: " from " + e.parent }) : null),
+      el("div.hint", { text: e.description || "" })),
+    e.marketplace ? badge(e.marketplace, "outline") : null);
+
+  const actions = el("div.dactions");
+  if (e.group === "yours" && DISCOVER_TAB[e.kind]) {
+    actions.append(mkbtn("btn-sm", "Open", () =>
+      openItemEditor(DISCOVER_TAB[e.kind], e.name, null, e.state === "enabled")));
+  } else if (e.group === "installed" && e.kind === "plugin") {
+    actions.append(mkbtn("btn-sm", "Show in Plugins", () => { PQ = e.name; goTab("plugins"); }));
+  } else if (e.kind === "plugin" && e.installable && !e.blocked) {
+    // "ondisk" is the only group this can be true for today — official/community
+    // (Phase 3) are always empty for now, but the check is on the fields, not
+    // the group, so this keeps working once those groups gain entries.
+    actions.append(mkbtn("btn-sm btn-primary", "Install", () => discoverInstall(e)));
+  } else if (e.kind === "plugin" && e.blocked) {
+    actions.append(badge("blocked by policy", "outline"));
+  }
+  // Audit is additive, not exclusive with the actions above — a skill from a
+  // marketplace can be both "installed" (Show in Plugins) and auditable.
+  if (e.kind === "skill" && e.marketplace)
+    actions.append(mkbtn("btn-sm", "Audit", () => skillAudit(e.id)));
+  row.append(actions);
+  return row;
+}
+
+// ------------------------------------------------------------ skills.sh audit
+//
+// skills.sh's audit endpoint: a documented, public, multi-provider security
+// verdict lookup for one named skill the user is already looking at — never
+// a search, never free-text. Its own consent flag (separate from
+// official/community — see remote.py's consent_get()/consent_set_skills_sh()):
+// `ok` means "you may ask skills.sh about this one named skill". No query
+// ever leaves this machine either, since the "query" is just the skill's own
+// name, chosen by the user by clicking Audit on an entry already in view.
+
+async function skillAuditConsent() {
+  const ok = await modal({
+    title: "Ask skills.sh for a security scan?",
+    text: "This sends the skill's name to skills.sh, a third party, so it "
+      + "can return a security verdict (risk level, provider findings from "
+      + "services like Socket/Snyk). No other data leaves this machine.",
+    ok: "Send it",
+  });
+  if (!ok) return false;
+  await api("/api/discover-consent", { source: "skills_sh", ok: true });
+  if (DCATALOG && DCATALOG.discover_consent)
+    DCATALOG.discover_consent.skills_sh = { ok: true, query_ok: false };
+  return true;
+}
+
+// Rendered generically/defensively — the sanitized response's exact fields
+// are not a schema this codebase pins down (skills.sh is third-party, and
+// remote.py's sanitizer only guarantees types, not field names), so this
+// just formats whatever keys came back rather than assuming e.g. a fixed
+// "risk"/"providers" shape.
+function auditVerdictText(data) {
+  if (!data || typeof data !== "object" || !Object.keys(data).length)
+    return "skills.sh returned no data for this skill.";
+  return Object.entries(data).map(([k, v]) =>
+    k + ": " + (typeof v === "object" && v !== null ? JSON.stringify(v) : String(v))
+  ).join("\n");
+}
+
+async function skillAudit(id) {
+  const consent = (DCATALOG && DCATALOG.discover_consent && DCATALOG.discover_consent.skills_sh) || {};
+  if (!consent.ok) {
+    const granted = await skillAuditConsent();
+    if (!granted) return;
+  }
+
+  const t = toast({ title: "Asking skills.sh for a security scan…", variant: "loading", duration: 0 });
+  try {
+    const res = await api("/api/skill-audit", { id });
+    t.close();
+    await modal({ title: "skills.sh audit", text: auditVerdictText(res.data), ok: "Close" });
+  } catch (err) { t.close(); toast(err.message, true); }
+}
+
+// Xk / Yk phrasing for the install-confirm dialog's token-cost line, or null
+// when the entry carries neither number (most "ondisk" entries: the cache
+// does not report token cost, only the catalog phases after this one will).
+function tokensLine(tokens) {
+  const always = tokens && tokens.always_on;
+  const invoke = tokens && tokens.on_invoke;
+  if (always == null && invoke == null) return null;
+  const fmt = (n) => (n / 1000).toFixed(1) + "k";
+  if (always != null && invoke != null)
+    return "Adds ~" + fmt(always) + " always-on tokens to every session, "
+      + fmt(invoke) + " when invoked.";
+  if (always != null)
+    return "Adds ~" + fmt(always) + " always-on tokens to every session.";
+  return "Adds ~" + fmt(invoke) + " tokens when invoked.";
+}
+
+async function discoverInstall(e) {
+  const src = e.source || {};
+  const lines = ["Runs `claude plugin install " + e.id + " --scope user`."];
+  if (src.kind || src.path)
+    lines.push("Source: " + (src.kind || "?") + (src.path ? " " + src.path : "") + ".");
+  // safeHref() mirrors editor.js's markdown-link discipline: the URL is shown
+  // only once it passes the same http(s)-with-a-real-host check, even though
+  // catalog.py already validated it server-side — belt and suspenders. modal()
+  // renders this paragraph as plain text (never markup), so an unsafe value
+  // could never become a clickable/executable link either way; the check just
+  // decides whether it is worth showing at all.
+  if (src.url && safeHref(src.url)) lines.push("URL: " + src.url);
+  if (src.ref) lines.push("Ref: " + src.ref + ".");
+  if (src.sha) lines.push("Commit: " + src.sha + ".");
+  if (e.hooks) lines.push("This plugin ships hooks. Hooks run shell commands on "
+    + "Claude Code lifecycle events — before you see anything, and every session.");
+  if (e.pinned === false) lines.push("This entry is not pinned to a commit. You get "
+    + "whatever that branch holds today, and whatever it holds tomorrow.");
+  const tl = tokensLine(e.tokens);
+  if (tl) lines.push(tl);
+
+  const r = await modal({ title: "Install " + e.name, text: lines.join(" "), ok: "Install" });
+  if (!r) return;
+
+  const t = toast({ title: "Running claude plugin…", variant: "loading", duration: 0 });
+  try {
+    // scope is always "user" for now — a project-scope install picker is a
+    // follow-up; every Discover install lands in every project on this
+    // machine, same as the existing user-plugin-install flow on the Plugins
+    // tab.
+    const res = await api("/api/catalog-install", { id: e.id, scope: "user" });
+    t.close();
+    toast(res.ok ? "Installed · " + res.detail : res.detail, !res.ok);
+    await refresh();
+    discoverSearch();
+  } catch (err) { t.close(); toast(err.message, true); }
+}
+
 // ------------------------------------------------------------------ render
 
 function render() {
@@ -5303,7 +5686,8 @@ function render() {
   const views = { settings: "settingsview", mcp: "mcpview", statusline: "stlview",
     projects: "projectsview", setup: "setupview", insight: "insightview",
     context: "contextview", costs: "costsview",
-    doctor: "doctorview", plugins: "pluginsview", backup: "backupview" };
+    doctor: "doctorview", discover: "discoverview", plugins: "pluginsview",
+    backup: "backupview" };
   const isEditor = !!EDITING;
   document.getElementById("editorview").hidden = !isEditor;
   document.getElementById("itemsview").hidden = isEditor || !ITEM_TABS.includes(TAB);
@@ -5324,6 +5708,7 @@ function render() {
   if (TAB === "context") { renderContext(); return; }
   if (TAB === "costs") { renderCosts(); return; }
   if (TAB === "doctor") { renderDoctor(); return; }
+  if (TAB === "discover") { renderDiscover(); return; }
   if (TAB === "plugins") { renderPlugins(); return; }
   if (TAB === "backup") { renderBackup(); return; }
 }

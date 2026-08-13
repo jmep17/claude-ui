@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="/theme.css">
 <link rel="stylesheet" href="/components.css">
 <link rel="stylesheet" href="/app.css">
-<script>
+<script nonce="__NONCE__">
 // Apply the stored theme before first paint so there is no light flash on a
 // dark setup (and no dark flash on a light one). ui.js owns it from here on.
 (function () {
@@ -71,6 +71,7 @@
   <div id="costsview" hidden></div>
   <div id="doctorview" hidden></div>
   <div id="pluginsview" hidden></div>
+  <div id="discoverview" hidden></div>
   <div id="backupview" hidden></div>
 </main>
 
@@ -78,9 +79,9 @@
 <div id="modal" hidden></div>
 <div id="palette" hidden></div>
 
-<script>
-const SCHEMA = __SCHEMA__;
+<script nonce="__NONCE__">
 const TOKEN = "__TOKEN__";
+const SCHEMA = __SCHEMA__;
 </script>
 <script src="/ui.js"></script>
 <script src="/editor.js"></script>

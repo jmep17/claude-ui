@@ -17,6 +17,17 @@ const esc = (t) =>
   String(t == null ? "" : t).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+// Allowlist for anything that becomes an href: http(s), mailto, or an
+// in-page anchor. Everything else — javascript:, data:, vbscript: — comes
+// back null so the caller renders the link as inert text instead of markup.
+function safeHref(u) {
+  const s = String(u == null ? "" : u).trim();
+  if (/^#/.test(s)) return s;
+  if (/^mailto:[^\s<>"']+$/i.test(s)) return s;
+  if (/^https?:\/\/[^\s<>"']+$/i.test(s)) return s;
+  return null;
+}
+
 /* el("div.card", {onclick}, child, "text", …) — the tag accepts a css-ish
    shorthand ("button.btn.btn-sm") so markup reads close to the class names in
    components.css. Attributes go in the props object; anything that is not a

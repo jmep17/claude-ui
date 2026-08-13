@@ -493,12 +493,27 @@ function edRefreshFindings() {
    dependency and this file has none. Everything is escaped before any markup
    is added, on every path. */
 
+// The [text](href) capture below runs after esc(), so hrefEsc is
+// HTML-entity-escaped already. Decode it back to a real URL to validate the
+// scheme, then re-escape whatever safeHref() approved for the attribute.
+function mdUnescape(s) {
+  return s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+}
+
 function mdInlineHtml(s) {
   return esc(s)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, "<em>[image: $1]</em>")
-    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,
-      '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, text, hrefEsc) => {
+      const safe = safeHref(mdUnescape(hrefEsc));
+      // A rejected URL still renders — visible and inert — rather than being
+      // silently dropped, which would hide the attack instead of defusing it.
+      return safe
+        ? '<a href="' + esc(safe) + '" target="_blank" rel="noreferrer noopener">'
+          + text + "</a>"
+        : text + " (" + hrefEsc + ")";
+    })
     .replace(/(\*\*|__)(?=\S)([\s\S]+?)\1/g, "<b>$2</b>")
     .replace(/(?<![*\w])\*(?=\S)([^*]+?)\*(?![*\w])/g, "<i>$1</i>")
     .replace(/~~(?=\S)([\s\S]+?)~~/g, "<s>$1</s>");

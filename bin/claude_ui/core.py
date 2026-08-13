@@ -79,6 +79,16 @@ def set_config_dir(path):
         cfg["config_dir"] = str(p)
     write_cfg(cfg)
 
+DISCOVER_DIR = "claude-ui-discover"
+
+def discover_cache_path(source):
+    """<config_dir()>/claude-ui-discover/<source>.json — the on-disk cache for
+    a remote-catalog fetch (remote.py writes it, catalog.py reads it). Lives
+    here, not in either module, so neither has to import the other — remote.py
+    already imports catalog.py for its sanitization helpers, and catalog.py
+    importing remote.py back would be a cycle."""
+    return config_dir() / DISCOVER_DIR / f"{source}.json"
+
 def disabled_dir():
     """Parked home for disabled things — outside every dir Claude Code scans."""
     return config_dir() / "disabled"
