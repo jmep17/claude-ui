@@ -506,5 +506,70 @@ class MixedRatesInOneDay(unittest.TestCase):
         self.assertEqual(r["days"][0]["by"], {"claude-opus-5": 15.0})
 
 
+class DroppedModelsAreReported(unittest.TestCase):
+    """A model pricing refuses must be named, or the tab reads $0 with no reason."""
+
+    def setUp(self):
+        self._real = insight.transcript_stats
+        self._cfg = insight.read_cfg
+        insight.read_cfg = lambda: {}   # no local `pricing` overrides
+        self.today = datetime.date.today().isoformat()
+
+    def tearDown(self):
+        insight.transcript_stats = self._real
+        insight.read_cfg = self._cfg
+
+    def stats(self, rows):
+        """rows: {model: row} on today -> cost_stats()."""
+        table = {self.today: {insight._rate_key(m, 1.0): r
+                              for m, r in rows.items()}}
+        insight.transcript_stats = lambda rescan=False: {
+            "days": table, "projects": {}, "sessions": 1, "dir": "d",
+            "available": True}
+        return insight.cost_stats()
+
+    def test_alias_only_transcript_reports_why_it_is_zero(self):
+        r = self.stats({"internal-gateway-alias": row(tin=1_000_000, msgs=4)})
+        self.assertEqual(r["totals"]["all"], 0)
+        self.assertEqual(r["excluded_models"], ["internal-gateway-alias"])
+        self.assertEqual(r["dropped_msgs"], 4)
+        self.assertEqual(r["by_model"], [])
+
+    def test_mixed_prices_the_claude_one_and_still_names_the_alias(self):
+        r = self.stats({"claude-opus-5": row(tin=1_000_000, msgs=2),
+                        "sonnet-4-5": row(tin=1_000_000, msgs=3)})
+        self.assertAlmostEqual(r["totals"]["all"], 5.0, places=2)
+        self.assertEqual(r["excluded_models"], ["sonnet-4-5"])
+        self.assertEqual(r["dropped_msgs"], 3)
+        self.assertEqual([m["model"] for m in r["by_model"]], ["claude-opus-5"])
+
+    def test_synthetic_placeholder_is_not_reported_as_a_gap(self):
+        """<synthetic> messages were never billed — warning about them would
+        cry wolf on every healthy machine."""
+        r = self.stats({"claude-opus-5": row(tin=1_000_000, msgs=2),
+                        "<synthetic>": row(tin=1_000, msgs=9)})
+        self.assertEqual(r["excluded_models"], [])
+        self.assertEqual(r["dropped_msgs"], 0)
+
+    def test_anthropic_prefixed_id_is_priced_and_flagged_unknown(self):
+        r = self.stats({"anthropic.brand-new-9": row(tin=1_000_000, msgs=1)})
+        self.assertEqual(r["excluded_models"], [])
+        self.assertEqual(r["unknown_models"], ["anthropic.brand-new-9"])
+        # priced at the opus-tier guess rather than silently dropped
+        self.assertAlmostEqual(r["totals"]["all"], 5.0, places=2)
+
+
+class AnthropicFamilyIsNotExcluded(unittest.TestCase):
+    def test_family_ids_pass(self):
+        for model in ("claude-opus-5", "us.anthropic.claude-sonnet-4-5-v1:0",
+                      "claude-sonnet-5@20250514", "anthropic.whatever"):
+            self.assertFalse(insight._excluded(model, {}), model)
+
+    def test_others_still_dropped(self):
+        for model in ("sonnet-4-5", "internal-gateway-alias", "default",
+                      "<synthetic>", ""):
+            self.assertTrue(insight._excluded(model, {}), model)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

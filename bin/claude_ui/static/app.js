@@ -4048,6 +4048,26 @@ async function renderCosts(rescan) {
     return;
   }
 
+  // Transcripts exist but nothing priced: a grid of $0.000 is the symptom, not
+  // the story. Say which model ids were dropped and how to price them.
+  if (!c.totals.all) {
+    view.append(el("div.alert.alert-warning", { style: { marginBottom: "1rem" } },
+      el("span.alert-icon", {}, icon("warn")),
+      el("div.alert-body", {
+        html: "Read " + c.sessions + " transcript" + (c.sessions === 1 ? "" : "s")
+          + ", but no message matched a known Claude model, so nothing could be priced."
+          + ((c.excluded_models || []).length
+            ? " Dropped model ids: <b>" + c.excluded_models.map(esc).join(", ") + "</b> ("
+              + c.dropped_msgs + " message" + (c.dropped_msgs === 1 ? "" : "s") + ")."
+              + " If these are Claude models behind a gateway or proxy alias, price them "
+              + "with the <code>pricing</code> key in <b>.claude-ui.json</b>, e.g. "
+              + "<code>{\"pricing\": {\"" + esc(c.excluded_models[0])
+              + "\": [3, 15]}}</code> — input and output dollars per million tokens."
+            : " No model ids were recorded on the messages that carried usage."),
+      })));
+    return;
+  }
+
   view.append(el("div.stat-grid", { style: { marginBottom: "1.25rem" } },
     statCard(usd(c.totals.today), "today", { accent: true }),
     statCard(usd(c.totals.last7), "last 7 days"),
@@ -4086,6 +4106,15 @@ async function renderCosts(rescan) {
       c.by_project.map((p) =>
         `<td class="mono">${esc(p.cwd.replace(/^\/(home|Users)\/[^/]+/, "~"))}</td>`
         + `<td class="num">${usd(p.cost)}</td><td class="num dim">${p.msgs}</td>`)));
+  }
+
+  if ((c.excluded_models || []).length) {
+    view.append(el("div.alert.alert-warning", { style: { marginBottom: "1rem" } },
+      el("span.alert-icon", {}, icon("warn")),
+      el("div.alert-body", { text: "Not counted: " + c.excluded_models.join(", ")
+        + " — " + c.dropped_msgs + " message" + (c.dropped_msgs === 1 ? "" : "s")
+        + " dropped as non-Claude models; price them via 'pricing' in .claude-ui.json "
+        + "to include them" })));
   }
 
   if (c.unknown_models.length) {

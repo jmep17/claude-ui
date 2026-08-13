@@ -13,6 +13,7 @@ import time
 
 from .core import (CLAUDE_JSON, ITEM_TYPES, _read_json_object, config_dir,
                    tilde)
+from .insight import cost_stats
 from .items import scan_items
 from .mcp import mcp_state
 from .output_styles import normalize_setting, setting_name
@@ -255,6 +256,20 @@ def doctor():
                 f"{a['name']}: differs from {a['source']} — the plugin may have "
                 "been updated, or you edited your copy",
                 _at_item(a, a["type"], file=_main_file(a["type"])))
+
+    # transcripts on disk that price to nothing — a gateway/proxy alias that
+    # doesn't look like a Claude id costs the whole Costs tab, silently
+    try:
+        cst = cost_stats()
+    except Exception:
+        cst = None
+    if cst and cst["sessions"] and not cst["totals"]["all"]:
+        ids = ", ".join(cst["excluded_models"]) or "none recorded"
+        add("warn", "costs",
+            f"{cst['sessions']} transcripts read but nothing could be priced — "
+            f"no message matched a known Claude model (dropped model ids: {ids}); "
+            "price them via 'pricing' in .claude-ui.json",
+            {"kind": "tab", "tab": "costs"})
 
     order = {"warn": 0, "info": 1}
     finds.sort(key=lambda f: (order[f["level"]], f["area"]))

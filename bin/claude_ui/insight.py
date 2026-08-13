@@ -422,12 +422,18 @@ def _row_cost(row, pin, pout, mult=1.0):
              + row[R_CR] * pin * 0.1) * mult / 1e6
             + row[R_WEB] * WEB_SEARCH_USD)
 
-# The dashboard prices Claude models only. Anything else served through the same
-# CLI — local models via ollama/proxies, the "<synthetic>" placeholder — is
-# dropped entirely (no row, no tokens, no total). A `pricing` override opts a
+# The dashboard prices the Anthropic family only. Anything else served through
+# the same CLI — local models via ollama/proxies, the "<synthetic>" placeholder —
+# is dropped entirely (no row, no tokens, no total). A `pricing` override opts a
 # non-Claude id back in, since setting a price signals intent to count it.
+# "anthropic" counts as family too (Bedrock-style `anthropic.claude-…` already
+# matched, but a bare `anthropic.something` did not): an unrecognised id there
+# prices at the opus-tier guess and lands in `unknown_models`, which is a visible,
+# overridable estimate rather than a silent zero. Whatever is dropped is reported
+# back through `excluded_models`, so a $0 screen can say why.
 def _excluded(model, overrides=None):
-    if "claude" in (model or "").lower():
+    m = (model or "").lower()
+    if "claude" in m or "anthropic" in m:
         return False
     if overrides is None:
         overrides = read_cfg().get("pricing")
@@ -449,6 +455,11 @@ def cost_stats(rescan=False):
     totals = {"today": 0, "last7": 0, "last30": 0, "month": 0, "all": 0}
     cache_savings = 0.0
     unknown = set()
+    # What pricing threw away, so the UI can name it instead of showing a grid of
+    # $0.000 with no explanation. Collected in the days loop only — the by_project
+    # loop below re-walks the same rows and would double-count.
+    excluded = set()
+    dropped_msgs = 0
     # Read once: the overrides are consulted for every (day, model, rate) row, and
     # re-reading mid-computation could price two days off different config.
     overrides = read_cfg().get("pricing")
@@ -458,6 +469,12 @@ def cost_stats(rescan=False):
         for rkey, row in st["days"][day].items():
             model, mult = _split_rate_key(rkey)
             if _excluded(model, overrides):
+                # "<synthetic>" marks CLI-generated messages that were never
+                # billed, so reporting it as a pricing gap would cry wolf on
+                # every machine. Everything else is a real dropped id.
+                if model != "<synthetic>":
+                    excluded.add(model or "(no model id)")
+                    dropped_msgs += row[R_MSGS]
                 continue
             pin, pout, known = model_price(model, day, overrides)
             if not known:
@@ -517,5 +534,6 @@ def cost_stats(rescan=False):
             "by_project": by_project[:12],
             "cache_savings": round(cache_savings, 2),
             "unknown_models": sorted(unknown),
+            "excluded_models": sorted(excluded), "dropped_msgs": dropped_msgs,
             "sessions": st["sessions"], "dir": st["dir"],
             "available": st["available"]}
