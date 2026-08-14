@@ -48,13 +48,16 @@ from .insight import cost_diagnostics, cost_stats, usage_stats
 from .context import context_state
 from .assist import assist
 from .doctor import doctor
+# PROTOTYPE — throwaway (see prototype_transcript.py); delete with the tab.
+from .prototype_transcript import entry_raw, session_state, sessions_state
 
 
 STATIC = Path(__file__).resolve().parent / "static"
 # Explicit allowlist rather than path joining — nothing user-supplied ever
 # reaches the filesystem here.
 _STATIC_NAMES = ("theme.css", "components.css", "app.css", "ui.js", "editor.js",
-                 "output-styles.js", "app.js")
+                 "output-styles.js", "app.js",
+                 "prototype-transcript.js")   # PROTOTYPE — throwaway
 STATIC_FILES = {
     "/" + n: (n, ("text/css" if n.endswith(".css") else "text/javascript")
               + "; charset=utf-8")
@@ -130,7 +133,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.host_ok():
             return
-        if self.path == "/":
+        # PROTOTYPE — the transcript-viewer prototype puts ?variant= on the root
+        # URL, so the page has to be served with a query string on it too.
+        if self.path == "/" or self.path.startswith("/?"):
             page = (STATIC / "index.html").read_text()
             self._csp_nonce = secrets.token_urlsafe(16)
             # __TOKEN__ first: it's hex and can't contain another marker, so
@@ -220,6 +225,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, cost_stats(rescan="rescan" in self.path))
         elif self.path.startswith("/api/context"):
             self.send(200, context_state(rescan="rescan" in self.path))
+        elif self.path.startswith("/api/prototype/"):
+            # PROTOTYPE — throwaway transcript viewer. Read-only.
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            get = lambda k, d="": (q.get(k) or [d])[0]
+            route = urllib.parse.urlparse(self.path).path
+            try:
+                if route == "/api/prototype/sessions":
+                    self.send(200, sessions_state())
+                elif route == "/api/prototype/session":
+                    start = get("start")
+                    self.send(200, session_state(
+                        get("path"), None if start == "" else int(start),
+                        int(get("count") or 300)))
+                elif route == "/api/prototype/entry":
+                    self.send(200, entry_raw(get("path"), int(get("i") or 0)))
+                else:
+                    self.send(404, {"error": "no such prototype route"})
+            except (ValueError, OSError) as e:
+                self.send(400, {"error": str(e)})
         elif self.path == "/api/doctor":
             self.send(200, doctor())
         elif self.path == "/api/setup":

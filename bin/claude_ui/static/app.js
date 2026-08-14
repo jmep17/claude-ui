@@ -16,7 +16,8 @@ const ITEM_TABS = ["skills", "commands", "agents", "output-styles"];
 const INVENTORY_TABS = ["commands", "agents", "output-styles"];
 // the types core.ITEM_TYPES calls kind "dir": a folder of files, not one file
 const DIR_TYPES = new Set(["skills"]);
-const TABS = [...ITEM_TABS, "mcp", "statusline", "projects", "setup", "settings", "insight", "context", "costs", "doctor", "backup"];
+const TABS = [...ITEM_TABS, "mcp", "statusline", "projects", "setup", "settings", "insight", "context", "costs", "doctor", "backup",
+  "prototype-transcript"];   // PROTOTYPE — throwaway, see prototype-transcript.js
 
 /* The Skills tab's three segments. Three tabs used to answer overlapping
    questions and could not answer each other's: what is in your skills folder,
@@ -46,6 +47,7 @@ const TAB_META = {
   "costs": { icon: "dollar", label: "Costs" },
   "doctor": { icon: "pulse", label: "Doctor" },
   "backup": { icon: "archive", label: "Backup" },
+  "prototype-transcript": { icon: "book", label: "Transcripts (proto)" },
 };
 
 /* The hash carries a query string as well as a path, so it cannot be read with
@@ -6408,7 +6410,8 @@ function render() {
   const views = { settings: "settingsview", mcp: "mcpview", statusline: "stlview",
     projects: "projectsview", setup: "setupview", insight: "insightview",
     context: "contextview", costs: "costsview", doctor: "doctorview",
-    skills: "skillsview", backup: "backupview" };
+    skills: "skillsview", backup: "backupview",
+    "prototype-transcript": "prototype-transcriptview" };
   const isEditor = !!EDITING;
   document.getElementById("editorview").hidden = !isEditor;
   document.getElementById("itemsview").hidden = isEditor || !INVENTORY_TABS.includes(TAB);
@@ -6431,6 +6434,7 @@ function render() {
   if (TAB === "costs") { renderCosts(); return; }
   if (TAB === "doctor") { renderDoctor(); return; }
   if (TAB === "backup") { renderBackup(); return; }
+  if (TAB === "prototype-transcript") { renderPrototypeTranscript(); return; }
 }
 
 async function refresh() {
