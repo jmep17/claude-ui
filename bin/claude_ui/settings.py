@@ -108,6 +108,28 @@ ENV_READONLY = frozenset({
 
 ENV_VARS = sorted((set(ENV_EXTRA) | schema.env_var_names()) - ENV_READONLY)
 
+# Built-in tool names, suggested in the permission-rule pickers: a bare name
+# allows, asks or denies the whole tool (and a bare deny also drops its schema
+# from context — the Insight tab's off switch writes exactly these). The
+# classic set comes from the official tools list; the newer harness tools
+# (Workflow, Artifact, the background-task and agent-team family…) from the
+# CLI itself. A vocabulary, not a gate: the rows stay free text, and
+# tooluse.py's advisor roster is asserted to be a subset in tests.
+TOOL_NAMES = sorted([
+    "Agent", "Artifact", "AskUserQuestion", "Bash", "BashOutput",
+    "CronCreate", "CronDelete", "CronList", "Edit", "EnterPlanMode",
+    "EnterWorktree", "ExitPlanMode", "ExitWorktree", "Glob", "Grep",
+    "KillShell", "ListAgents", "ListConnectors", "ListMcpResourcesTool",
+    "ListPlugins", "ListSkills", "Monitor", "NotebookEdit",
+    "PushNotification", "Read", "ReadMcpResourceTool", "ReadNotifications",
+    "ScheduleWakeup", "SearchMcpRegistry", "SearchPlugins", "SearchSkills",
+    "SendMessage", "SendUserFile", "Skill", "SlashCommand",
+    "SuggestConnectors", "SuggestPluginInstall", "SuggestSkills", "Task",
+    "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
+    "TaskUpdate", "TodoWrite", "ToolSearch", "WebFetch", "WebSearch",
+    "Workflow", "Write",
+])
+
 SETTINGS_RAW = [
     {"key": "model", "type": "combo", "values": MODEL_ALIASES, "cat": "model",
      "aka": ["main", "session"],
@@ -168,18 +190,24 @@ SETTINGS_RAW = [
     {"key": "permissions.defaultMode", "type": "enum", "cat": "permissions",
      "values": ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions", "manual"],
      "desc": "Startup permission mode: prompt on first use / auto-accept edits / read-only plan / auto with safety checks / deny unless pre-approved / skip prompts / manual (alias of default)"},
+    # The three rule pickers suggest a few argument-filter examples (they
+    # teach the syntax) and then every bare tool name — the whole-tool form
+    # the Insight tab's off switch writes. "mcp__github" covers all of one
+    # server's tools; MCP rule names take no wildcards, so no mcp__x__* here.
+    # Your own servers' mcp__ names join live from LIVE_SUGGEST in app.js.
     {"key": "permissions.allow", "type": "list", "cat": "permissions",
      "item_values": ["Bash(git diff *)", "Bash(npm run *)", "Read(~/notes/**)",
                      "Edit(docs/**)", "WebFetch(domain:docs.example.com)",
-                     "WebSearch", "mcp__github__*"],
+                     "mcp__github"] + TOOL_NAMES,
      "desc": "Rules to auto-approve, e.g. Bash(npm run test *)"},
     {"key": "permissions.ask", "type": "list", "cat": "permissions",
-     "item_values": ["Bash(git push *)", "Bash(rm *)", "Edit(**)", "WebFetch"],
+     "item_values": ["Bash(git push *)", "Bash(rm *)", "Edit(**)"] + TOOL_NAMES,
      "desc": "Rules that always require confirmation"},
     {"key": "permissions.deny", "type": "list", "cat": "permissions",
-     "item_values": ["Read(./.env)", "Read(./secrets/**)", "Bash(curl *)",
-                     "WebFetch"],
-     "desc": "Rules to block, e.g. Read(./.env)"},
+     "item_values": ["Read(./.env)", "Read(./secrets/**)", "Bash(curl *)"]
+                    + TOOL_NAMES,
+     "desc": "Rules to block — a bare tool name (e.g. WebSearch) turns the "
+             "whole tool off and drops its schema from context"},
     {"key": "permissions.additionalDirectories", "type": "list", "cat": "permissions",
      "item_values": ["~/src", "~/notes"],
      "desc": "Extra directories Claude may access (like --add-dir)"},

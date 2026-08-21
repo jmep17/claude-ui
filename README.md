@@ -36,7 +36,11 @@ owns, links, tracks, or syncs anything:
   `Bash(git:*)`-style rules with argument filters are never touched. MCP
   rows offer the bigger lever, the same server disable the MCP tab has,
   because a server injects every one of its tool schemas into every session
-  that loads it.
+  that loads it. The same tool roster autofills the
+  `permissions.allow`/`ask`/`deny` editors on the Settings tab: a
+  filter-as-you-type dropdown of every built-in tool name (Workflow,
+  Artifact, WebSearch, …), a few argument-filter examples that teach the
+  rule syntax, and your own MCP servers' `mcp__<name>` rules joined live.
 - **Skills** is one tab with three segments, because three tabs used to answer
   overlapping questions and could not answer each other's. *Installed* is your
   skills folder plus **the skills installed plugins bring**, listed beside your

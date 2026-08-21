@@ -222,5 +222,40 @@ class Report(TmpConfig):
         self.assertEqual(rep["deny"], [])
 
 
+class Vocabulary(unittest.TestCase):
+    """settings.TOOL_NAMES feeds the permission-rule pickers; keep it and the
+    advisor's roster from drifting apart."""
+
+    PERM_KEYS = ("permissions.allow", "permissions.ask", "permissions.deny")
+
+    def test_advisor_roster_is_a_subset(self):
+        names = {n for n, _, _ in tooluse.BUILTIN_TOOLS}
+        self.assertLessEqual(names, set(settings.TOOL_NAMES))
+
+    def test_names_are_valid_bare_rules(self):
+        """Every suggested name must be one the off switch would accept —
+        a suggestion the app itself refuses to write is a trap."""
+        for n in settings.TOOL_NAMES:
+            self.assertRegex(n, tooluse.TOOL_NAME_RE)
+        self.assertEqual(settings.TOOL_NAMES, sorted(set(settings.TOOL_NAMES)))
+
+    def test_permission_pickers_carry_the_roster(self):
+        raw = {s["key"]: s for s in settings.SETTINGS_RAW}
+        for key in self.PERM_KEYS:
+            vals = raw[key]["item_values"]
+            for n in settings.TOOL_NAMES:
+                self.assertIn(n, vals, key)
+            self.assertEqual(len(vals), len(set(vals)), key)
+
+    def test_no_wildcard_mcp_examples(self):
+        """MCP rule names take no wildcards — mcp__github already covers the
+        whole server — so a suggested mcp__x__* would never match anything."""
+        raw = {s["key"]: s for s in settings.SETTINGS_RAW}
+        for key in self.PERM_KEYS:
+            for v in raw[key]["item_values"]:
+                if v.startswith("mcp__"):
+                    self.assertNotIn("*", v, key)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -483,6 +483,10 @@ const styleSettingName = (it) =>
 const styleNames = () =>
   ((DATA.items || {})["output-styles"] || [])
     .map(styleSettingName).filter(Boolean);
+// a bare mcp__<server> rule covers every tool that server exposes; per-tool
+// mcp__<server>__<tool> rules exist too, but a server's tools can't be
+// enumerated without a handshake, so only the server form is suggested
+const mcpRuleNames = () => mcpNames().map((n) => "mcp__" + n);
 const LIVE_SUGGEST = {
   "outputStyle": styleNames,
   "skillOverrides:key": () => itemNames("skills"),
@@ -491,6 +495,9 @@ const LIVE_SUGGEST = {
   "disabledMcpjsonServers": mcpNames,
   "agents:key": () => itemNames("agents"),
   "alwaysAllowedSkills": () => itemNames("skills"),
+  "permissions.allow": mcpRuleNames,
+  "permissions.ask": mcpRuleNames,
+  "permissions.deny": mcpRuleNames,
 };
 function suggestFor(key, base) {
   const out = (base || []).map(String);
