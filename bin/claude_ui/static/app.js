@@ -3830,9 +3830,11 @@ async function renderInsight(rescan) {
 
   if (u.available && u.sessions) {
     const rows = [];
-    for (const [kind, names] of Object.entries(used))
+    for (const [kind, names] of Object.entries(used)) {
+      if (kind === "tool") continue; // tools have their own section below
       for (const [name, rec] of Object.entries(names))
         rows.push({ kind, name, count: rec.count, last: rec.last });
+    }
     rows.sort((a, b2) => b2.count - a.count);
     view.append(sectionTitle("Most used", rows.length));
     view.append(dataTable(["Name", "Kind", "Uses", "Last used"],
@@ -3850,6 +3852,130 @@ async function renderInsight(rescan) {
     view.append(emptyState("No transcripts found",
       "Usage analytics appear once Claude Code has recorded sessions on this machine. Looked in "
       + u.dir + ".", "chart"));
+  }
+
+  // tools: what every session pays schemas for, with the off switch. Turning
+  // one off writes a bare tool name into permissions.deny — Claude Code's own
+  // switch (the settings equivalent of --disallowedTools), which takes the
+  // whole tool out of new sessions, schema included.
+  const tl = INSIGHT.tools;
+  if (tl) {
+    const toolToggle = async (name, enabled) => {
+      try {
+        await api("/api/tool-toggle", { name, enabled });
+        toast(enabled ? name + " removed from permissions.deny · applies to new sessions"
+          : name + " added to permissions.deny · applies to new sessions");
+        await refresh();
+        INSIGHT = null;
+        renderInsight();
+      } catch (e) { toast(e.message, true); }
+    };
+    view.append(sectionTitle("Tools — turn off what you never use",
+      tl.builtin.filter((r) => r.denied).length || undefined));
+    view.append(el("div.view-head", {
+      text: "Every tool Claude Code loads sends its schema with every request, "
+        + "used or not. Turn off writes the bare tool name into permissions.deny, "
+        + "which removes the whole tool from new sessions; Turn on removes exactly "
+        + "that entry. Bash(git:*)-style rules with argument filters are never "
+        + "touched. Uses are counted from the transcripts above." }));
+    if (tl.settings_error)
+      view.append(errorAlert(tl.settings_error + " — the on/off states below may be "
+        + "stale, and the switch is disabled until settings.json parses.",
+        "settings.json has a problem"));
+    const t = el("table.table");
+    t.append(el("thead", {}, el("tr", {},
+      el("th", { text: "Tool" }), el("th", { text: "What it does" }),
+      el("th", { text: "Uses" }), el("th", { text: "Last used" }), el("th"))));
+    const body = el("tbody");
+    for (const r of tl.builtin) {
+      const btn = tl.settings_error ? null : mkbtn(
+        "btn-sm",
+        r.denied ? "Turn on" : "Turn off",
+        async () => {
+          if (!r.denied && r.core && !(await mconfirm("Turn off " + r.name + "?",
+            r.name + " is a core tool (" + r.blurb + "). Without it most "
+            + "sessions can't do their job — turn it off only if you know "
+            + "exactly why.", "Turn off"))) return;
+          toolToggle(r.name, r.denied);
+        },
+        r.denied ? "Remove the \"" + r.name + "\" entry from permissions.deny"
+                 : "Add \"" + r.name + "\" to permissions.deny");
+      const tr = el("tr", {},
+        el("td.mono", {}, el("span", { text: r.name }),
+          r.core ? badge("core", "outline") : null,
+          r.denied ? badge("off", "destructive") : null),
+        el("td.dim", { text: r.blurb || "seen in your transcripts" }),
+        el("td.num", { text: String(r.count) }),
+        el("td.dim", { text: r.last ? relTime(r.last) : "never" }),
+        el("td", { style: { textAlign: "right" } }, btn));
+      if (r.denied) tr.classList.add("dim");
+      body.append(tr);
+    }
+    t.append(body);
+    view.append(el("div.table-wrap", { style: { marginBottom: "1.25rem" } }, t));
+
+    if (tl.mcp.length) {
+      view.append(sectionTitle("MCP servers", tl.mcp.length));
+      view.append(el("div.view-head", {
+        text: "An MCP server injects every one of its tool schemas into every "
+          + "session that loads it — usually the biggest context saving on this "
+          + "page. Disabling moves the server to disabled/mcp-servers.json "
+          + "(config kept, re-enable any time, here or on the MCP tab)." }));
+      const mt = el("table.table");
+      mt.append(el("thead", {}, el("tr", {},
+        el("th", { text: "Server" }), el("th", { text: "Tools called" }),
+        el("th", { text: "Uses" }), el("th", { text: "Last used" }), el("th"))));
+      const mbody = el("tbody");
+      for (const s of tl.mcp) {
+        const shownTools = s.tools.slice(0, 3)
+          .map(([name, n]) => name + " ×" + n).join(", ")
+          + (s.tools.length > 3 ? " +" + (s.tools.length - 3) + " more" : "");
+        let action = null;
+        if (s.enabled === true) {
+          action = mkbtn("btn-sm", "Disable server",
+            async () => {
+              if (!(await mconfirm("Disable " + s.name + "?",
+                (s.count ? "Called " + plural(s.count, "time")
+                         + " in your transcripts. "
+                         : "Never called in your transcripts. ")
+                + "Its tool schemas stop loading in new sessions; the config "
+                + "is kept and can be re-enabled any time.", "Disable"))) return;
+              try {
+                await api("/api/mcp-toggle", { name: s.name, enabled: false });
+                toast(s.name + " disabled · applies to new sessions");
+                await refresh();
+                INSIGHT = null;
+                renderInsight();
+              } catch (e) { toast(e.message, true); }
+            });
+        } else if (s.enabled === false) {
+          action = mkbtn("btn-sm", "Enable", async () => {
+            try {
+              await api("/api/mcp-toggle", { name: s.name, enabled: true });
+              toast(s.name + " enabled · applies to new sessions");
+              await refresh();
+              INSIGHT = null;
+              renderInsight();
+            } catch (e) { toast(e.message, true); }
+          });
+        }
+        const tr = el("tr", {},
+          el("td.mono", {}, el("span", { text: s.name }),
+            s.enabled === false ? badge("off", "destructive") : null,
+            s.enabled === null ? badge("not user-scope", "outline") : null),
+          el("td.dim.mono", { text: shownTools || "—",
+            title: s.enabled === null ? "Seen in transcripts but not in "
+              + "~/.claude.json — a project-scope or since-removed server"
+              : "" }),
+          el("td.num", { text: String(s.count) }),
+          el("td.dim", { text: s.last ? relTime(s.last) : "never" }),
+          el("td", { style: { textAlign: "right" } }, action));
+        if (s.enabled === false) tr.classList.add("dim");
+        mbody.append(tr);
+      }
+      mt.append(mbody);
+      view.append(el("div.table-wrap", { style: { marginBottom: "1.25rem" } }, mt));
+    }
   }
 
   // permission advisor: Bash prefixes approved often -> propose allow rules

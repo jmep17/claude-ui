@@ -19,7 +19,7 @@ USAGE_CACHE = Path.home() / ".cache" / "claude-ui-usage.json"
 
 # Bump whenever the shape or meaning of the cached per-file data changes, so
 # stale entries are re-scanned instead of being mixed with the current format.
-CACHE_V = 7
+CACHE_V = 8
 
 def projects_dir():
     """Transcripts live under the resolved config dir, not always ~/.claude."""
@@ -190,9 +190,11 @@ def _scan_transcript(path):
     try:
         with open(path, errors="replace") as f:
             for lineno, line in enumerate(f, 1):
+                # Every line holding a tool_use block carries the literal
+                # '"tool_use"', which covers what the '"Skill"'/'"Task"'/
+                # '"Bash"' markers used to approximate.
                 if ('"usage"' not in line and "command-name" not in line
-                        and '"Skill"' not in line and '"Task"' not in line
-                        and '"Bash"' not in line and '"cwd"' not in line):
+                        and '"tool_use"' not in line and '"cwd"' not in line):
                     continue
                 try:
                     d = json.loads(line)
@@ -251,6 +253,10 @@ def _scan_transcript(path):
                 for b in content if isinstance(content, list) else []:
                     if not (isinstance(b, dict) and b.get("type") == "tool_use"):
                         continue
+                    # every call, by tool name — mcp__server__tool included —
+                    # which is what tooluse.py's off switch reasons over
+                    if isinstance(b.get("name"), str) and b["name"]:
+                        bump("tool", b["name"], ts)
                     inp = b.get("input") or {}
                     if b.get("name") == "Skill" and inp.get("skill"):
                         bump("skill", str(inp["skill"]), ts)

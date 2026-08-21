@@ -49,6 +49,12 @@ Shipped in the merged-tab pass.
 | One reader for a skill directory | `items.skill_facts()`. `items._dir_item` and `plugins._skill_components` each used to walk a skills directory and parse its frontmatter, producing two record shapes `catalog.py` needed two adapters to read. |
 | Two shared frontend shapes | `cached()` for the fetch-once-then-render preamble nine views repeated, `act()` for the write→toast→redraw triplet nine actions repeated, plus `envPanel`/`toggleDetail`/`setEnvVar`/`catalogFetch`/`errorAlert`/`segmented`. |
 
+Shipped in the tool-advisor pass.
+
+| Idea | Notes |
+| :--- | :--- |
+| **#6** Tool and MCP usage analytics, with an off switch | `_scan_transcript()` now counts every `tool_use` name (kind `tool`, `CACHE_V` 8), so `mcp__server__tool` pairs split into (server, tool) for free. `tooluse.py` joins that histogram with `permissions.deny` and the MCP inventory; the Insight tab lists every built-in tool and MCP server with measured uses and a **Turn off** that writes a bare tool name into `permissions.deny` — Claude Code's own switch, the settings equivalent of `--disallowedTools`, removing the tool (schema included) from new sessions. Argument-filter rules like `Bash(git:*)` are never touched, and turning back on removes exactly the bare entry. MCP rows reuse `mcp_set_enabled()`, the bigger lever. |
+
 ---
 
 ## High value
@@ -122,13 +128,12 @@ existing `fuzzy()` ranking covers file contents, not just names.
 
 "Which of my skills mentions ripgrep?" currently has one answer: `rg ~/.claude`.
 
-### 6. Tool and MCP usage analytics — S
+### 6. Tool and MCP usage analytics — *(shipped; see Done)*
 
-`_scan_transcript()` already inspects every `tool_use` block but records only
-three names: `Skill`, `Task`, `Bash`. Add a per-tool histogram and a split of
-`mcp__<server>__<tool>` into (server, tool) pairs in the same loop; bump
-`CACHE_V`. A dozen lines, and it answers the question the app most wants to
-answer: **which MCP servers are you paying context for and never using?**
+What is left of it: the histogram counts *calls*, not context — the actual
+token size of each MCP server's schemas still needs the real handshake,
+which is idea 8. And the advisor reasons over user scope only; a
+project-scope server it saw in transcripts is reported but not togglable.
 
 ### 7. Frontmatter-aware form editing — M
 

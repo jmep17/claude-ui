@@ -43,6 +43,7 @@ from .registry import (marketplace_add, marketplace_remove, plugin_install,
 from .settings import (hook_test, settings_schema, settings_set, settings_state,
                        start_docs_fetch, suggest_state)
 from .statusline import statusline_save, statusline_state
+from .tooluse import tool_set_enabled, tools_report
 from .setup import setup_apply, setup_config, setup_remove, setup_state
 from .insight import cost_diagnostics, cost_stats, usage_stats
 from .context import context_state
@@ -211,9 +212,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(400, {"error": str(e)})
         elif self.path.startswith("/api/insight"):
             rescan = "rescan" in self.path
-            self.send(200, {"usage": usage_stats(rescan=rescan),
+            usage = usage_stats(rescan=rescan)
+            self.send(200, {"usage": usage,
                             "allow": (settings_state()["data"]
-                                      .get("permissions", {}) or {}).get("allow", [])})
+                                      .get("permissions", {}) or {}).get("allow", []),
+                            # the same scan's per-tool histogram, joined with
+                            # permissions.deny and the MCP inventory — the
+                            # tab's "turn off what you never use" section
+                            "tools": tools_report(
+                                (usage.get("by") or {}).get("tool"))})
         elif self.path.startswith("/api/costs/diagnose"):
             self.send(200, cost_diagnostics(rescan="rescan" in self.path))
         elif self.path.startswith("/api/costs"):
@@ -454,6 +461,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, {"ok": True, **project_setting_set(
                     req.get("root", ""), req.get("key", ""), req.get("value"),
                     bool(req.get("local", True)))})
+            elif action == "tool-toggle":
+                tool_set_enabled(req.get("name", ""), bool(req.get("enabled")))
+                self.send(200, {"ok": True})
             elif action == "mcp-move":
                 self.send(200, {"ok": True, **mcp_move(
                     req.get("name", ""), req.get("from"), req.get("to"))})

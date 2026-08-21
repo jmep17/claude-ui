@@ -26,6 +26,17 @@ owns, links, tracks, or syncs anything:
   valid-option dropdowns and live value suggestions fetched from the public
   Claude Code docs.
 - **MCP** inventory and toggling of user-scope servers (`~/.claude.json`).
+- **Tool advisor** — the Insight tab counts every `tool_use` in your
+  transcripts and lists each built-in tool and MCP server with its measured
+  uses, so the ones you never use can be turned off to stop paying context
+  for their schemas. Off is Claude Code's own switch: a bare tool name
+  written into `permissions.deny` (the settings equivalent of
+  `--disallowedTools`), which drops the whole tool — schema included — from
+  new sessions. Turning back on removes exactly that entry;
+  `Bash(git:*)`-style rules with argument filters are never touched. MCP
+  rows offer the bigger lever, the same server disable the MCP tab has,
+  because a server injects every one of its tool schemas into every session
+  that loads it.
 - **Skills** is one tab with three segments, because three tabs used to answer
   overlapping questions and could not answer each other's. *Installed* is your
   skills folder plus **the skills installed plugins bring**, listed beside your
