@@ -3865,6 +3865,14 @@ async function renderInsight(rescan) {
   // one off writes a bare tool name into permissions.deny — Claude Code's own
   // switch (the settings equivalent of --disallowedTools), which takes the
   // whole tool out of new sessions, schema included.
+  //
+  // After a write here, the cached INSIGHT is patched in place and the view
+  // redrawn synchronously — dropping the cache would flash a skeleton,
+  // refetch the transcript scan, and throw the scroll position away for a
+  // change the server just confirmed in one line. DATA (which other tabs
+  // read) is reconciled by a background /api/state fetch with no re-render.
+  const reconcile = () => api("/api/state").then((d) => { DATA = d; })
+    .catch(() => {});
   const tl = INSIGHT.tools;
   if (tl) {
     const toolToggle = async (name, enabled) => {
@@ -3872,9 +3880,9 @@ async function renderInsight(rescan) {
         await api("/api/tool-toggle", { name, enabled });
         toast(enabled ? name + " removed from permissions.deny · applies to new sessions"
           : name + " added to permissions.deny · applies to new sessions");
-        await refresh();
-        INSIGHT = null;
+        for (const r of tl.builtin) if (r.name === name) r.denied = !enabled;
         renderInsight();
+        reconcile();
       } catch (e) { toast(e.message, true); }
     };
     view.append(sectionTitle("Tools — turn off what you never use",
@@ -3964,9 +3972,9 @@ async function renderInsight(rescan) {
               try {
                 await api("/api/mcp-toggle", { name: s.name, enabled: false });
                 toast(s.name + " disabled · applies to new sessions");
-                await refresh();
-                INSIGHT = null;
+                s.enabled = false;
                 renderInsight();
+                reconcile();
               } catch (e) { toast(e.message, true); }
             });
         } else if (s.enabled === false) {
@@ -3974,9 +3982,9 @@ async function renderInsight(rescan) {
             try {
               await api("/api/mcp-toggle", { name: s.name, enabled: true });
               toast(s.name + " enabled · applies to new sessions");
-              await refresh();
-              INSIGHT = null;
+              s.enabled = true;
               renderInsight();
+              reconcile();
             } catch (e) { toast(e.message, true); }
           });
         }
@@ -4028,9 +4036,11 @@ async function renderInsight(rescan) {
           try {
             await api("/api/settings-set", { key: "permissions.allow", value: [...allow, rule] });
             toast(rule + " added to permissions.allow");
-            await refresh();
-            INSIGHT = null;
+            // same in-place redraw as the tools section: the new rule joins
+            // the cached allow list, so covered() hides this row on redraw
+            INSIGHT.allow = [...allow, rule];
             renderInsight();
+            reconcile();
           } catch (e) { toast(e.message, true); }
         });
         body.append(el("tr", {},
