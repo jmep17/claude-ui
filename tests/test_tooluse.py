@@ -19,7 +19,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "bin"))
 
-from claude_ui import insight, mcp, settings, tooluse  # noqa: E402
+from claude_ui import insight, mcp, settings, toolinfo, tooluse  # noqa: E402
 
 
 class ScanTools(unittest.TestCase):
@@ -154,6 +154,16 @@ class ToolSwitch(TmpConfig):
             with self.assertRaises(ValueError):
                 tooluse.tool_set_enabled(bad, False)
 
+    def test_deny_proof_tool_is_refused(self):
+        """Turning EndConversation 'off' would write a rule Claude Code
+        documents as ineffective; turning it 'on' still cleans up a stale
+        entry someone wrote by hand."""
+        with self.assertRaises(ValueError):
+            tooluse.tool_set_enabled("EndConversation", False)
+        self.write({"permissions": {"deny": ["EndConversation"]}})
+        tooluse.tool_set_enabled("EndConversation", True)
+        self.assertEqual(self.read(), {})
+
     def test_broken_settings_are_refused(self):
         self.settings_path.write_text("{nope")
         with self.assertRaises(ValueError):
@@ -168,6 +178,7 @@ class Report(TmpConfig):
 
     BY = {"Read": {"count": 7, "last": "2026-07-30T00:00:00Z"},
           "FooTool": {"count": 2, "last": "2026-07-01T00:00:00Z"},
+          "Task": {"count": 4, "last": "2026-06-01T00:00:00Z"},
           "mcp__github__get_me": {"count": 3, "last": "2026-07-02T00:00:00Z"},
           "mcp__github__create_pr": {"count": 1, "last": "2026-07-03T00:00:00Z"},
           "mcp__gone__x": {"count": 5, "last": "2026-07-04T00:00:00Z"}}
@@ -187,6 +198,14 @@ class Report(TmpConfig):
         # observed but uncatalogued: still a row, still switchable
         self.assertIn("FooTool", rows)
         self.assertFalse(rows["FooTool"]["core"])
+        self.assertTrue(rows["FooTool"]["switch"])
+        # an observed legacy name is labeled and gets no switch — it no
+        # longer loads, so there is nothing to turn off
+        self.assertTrue(rows["Task"]["legacy"])
+        self.assertFalse(rows["Task"]["switch"])
+        self.assertIn("Agent", rows["Task"]["blurb"])
+        # the documented exception to bare-name removal carries no switch
+        self.assertFalse(rows["EndConversation"]["switch"])
         # mcp__ names never masquerade as built-ins
         self.assertNotIn("mcp__github__get_me", rows)
         servers = {s["name"]: s for s in rep["mcp"]}
@@ -207,7 +226,7 @@ class Report(TmpConfig):
             json.dumps({"mcpServers": {"parked": {"command": "x"}}}))
         rep = tooluse.tools_report(None)
         names = [r["name"] for r in rep["builtin"]]
-        for expected in ("WebSearch", "Bash", "Task"):
+        for expected in ("WebSearch", "Bash", "Agent", "Monitor", "DesignSync"):
             self.assertIn(expected, names)
         (srv,) = rep["mcp"]
         self.assertEqual((srv["name"], srv["enabled"], srv["count"]),
@@ -223,14 +242,34 @@ class Report(TmpConfig):
 
 
 class Vocabulary(unittest.TestCase):
-    """settings.TOOL_NAMES feeds the permission-rule pickers; keep it and the
-    advisor's roster from drifting apart."""
+    """toolinfo.py is the one catalog behind the advisor and the pickers."""
 
     PERM_KEYS = ("permissions.allow", "permissions.ask", "permissions.deny")
 
-    def test_advisor_roster_is_a_subset(self):
-        names = {n for n, _, _ in tooluse.BUILTIN_TOOLS}
-        self.assertLessEqual(names, set(settings.TOOL_NAMES))
+    def test_catalog_shape(self):
+        names = toolinfo.TOOL_NAMES
+        self.assertEqual(names, sorted(set(names)))
+        for t in toolinfo.TOOLS:
+            self.assertRegex(t["name"], tooluse.TOOL_NAME_RE)
+            self.assertTrue(t["blurb"].strip(), t["name"])
+        self.assertLessEqual(set(toolinfo.NO_DENY), set(names))
+        # a legacy name is by definition not a current tool
+        self.assertFalse(set(toolinfo.LEGACY) & set(names))
+
+    def test_the_asked_for_tools_are_present(self):
+        """The roster answers 'ALL available tools' — pin the ones whose
+        absence prompted it, plus the reference's own additions."""
+        for n in ("DesignSync", "Monitor", "Workflow", "Artifact", "Agent",
+                  "LSP", "PowerShell", "RemoteTrigger", "WaitForMcpServers"):
+            self.assertIn(n, toolinfo.TOOL_NAMES)
+
+    def test_rule_names_skip_the_deny_proof_tool(self):
+        """EndConversation's bare-name deny is documented not to work, so it
+        is in the roster (the advisor shows it) but never suggested as a
+        rule, and the off switch refuses it."""
+        self.assertIn("EndConversation", toolinfo.TOOL_NAMES)
+        self.assertNotIn("EndConversation", toolinfo.RULE_NAMES)
+        self.assertEqual(settings.TOOL_NAMES, toolinfo.RULE_NAMES)
 
     def test_names_are_valid_bare_rules(self):
         """Every suggested name must be one the off switch would accept —
@@ -248,8 +287,9 @@ class Vocabulary(unittest.TestCase):
             self.assertEqual(len(vals), len(set(vals)), key)
 
     def test_no_wildcard_mcp_examples(self):
-        """MCP rule names take no wildcards — mcp__github already covers the
-        whole server — so a suggested mcp__x__* would never match anything."""
+        """mcp__github covers a whole server with no wildcard, and allow-rule
+        tool names accept none (deny/ask do take glob names like mcp__*), so
+        every suggested mcp__ entry is a plain name that matches somewhere."""
         raw = {s["key"]: s for s in settings.SETTINGS_RAW}
         for key in self.PERM_KEYS:
             for v in raw[key]["item_values"]:

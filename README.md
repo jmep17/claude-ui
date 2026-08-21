@@ -27,20 +27,28 @@ owns, links, tracks, or syncs anything:
   Claude Code docs.
 - **MCP** inventory and toggling of user-scope servers (`~/.claude.json`).
 - **Tool advisor** — the Insight tab counts every `tool_use` in your
-  transcripts and lists each built-in tool and MCP server with its measured
+  transcripts and lists every built-in tool and MCP server with its measured
   uses, so the ones you never use can be turned off to stop paying context
-  for their schemas. Off is Claude Code's own switch: a bare tool name
-  written into `permissions.deny` (the settings equivalent of
-  `--disallowedTools`), which drops the whole tool — schema included — from
-  new sessions. Turning back on removes exactly that entry;
-  `Bash(git:*)`-style rules with argument filters are never touched. MCP
-  rows offer the bigger lever, the same server disable the MCP tab has,
-  because a server injects every one of its tool schemas into every session
-  that loads it. The same tool roster autofills the
-  `permissions.allow`/`ask`/`deny` editors on the Settings tab: a
-  filter-as-you-type dropdown of every built-in tool name (Workflow,
-  Artifact, WebSearch, …), a few argument-filter examples that teach the
-  rule syntax, and your own MCP servers' `mcp__<name>` rules joined live.
+  for their schemas. The roster (`toolinfo.py`) is the official [tools
+  reference](https://code.claude.com/docs/en/tools-reference)'s full list —
+  Workflow, Artifact, Monitor, LSP, the Cron and Task families, all of it —
+  plus the tools current sessions expose before the docs list them
+  (DesignSync, the skill/plugin discovery family), badged *unverified* under
+  the same rule as the unverified settings keys: absence is not disproof.
+  Off is Claude Code's own switch: a bare tool name written into
+  `permissions.deny`, which the permissions doc says "removes the tool from
+  Claude's context entirely". Turning back on removes exactly that entry;
+  `Bash(git:*)`-style rules with argument filters are never touched. The two
+  documented edge cases are honored: `EndConversation` (deny can't remove
+  it) gets no switch, and a legacy name seen in old transcripts (`Task`,
+  `BashOutput`…) is labeled instead of offered — it no longer loads, so
+  there is nothing to turn off. MCP rows offer the bigger lever, the same
+  server disable the MCP tab has, because a server injects every one of its
+  tool schemas into every session that loads it. The same roster autofills
+  the `permissions.allow`/`ask`/`deny` editors on the Settings tab: a
+  filter-as-you-type dropdown of every tool name, a few argument-filter
+  examples that teach the rule syntax, and your own MCP servers'
+  `mcp__<name>` rules joined live.
 - **Skills** is one tab with three segments, because three tabs used to answer
   overlapping questions and could not answer each other's. *Installed* is your
   skills folder plus **the skills installed plugins bring**, listed beside your
@@ -221,7 +229,7 @@ The Claude Code config dir is resolved in this order:
 ## Layout
 
 `bin/claude-ui` is a thin launcher; the code lives in `bin/claude_ui/*.py`
-(core → schema → settings → items/mcp/plugins → statusline/localmodel/insight/assist/setup
+(core/toolinfo → schema → settings → items/mcp/plugins → statusline/localmodel/insight/assist/setup
 → doctor → server, a clean DAG). `items.skill_facts()` is the one reader of a
 skill directory; `plugins` decorates its result rather than parsing again. The
 frontend is plain files in `bin/claude_ui/static/` (no build step), layered

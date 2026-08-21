@@ -10,6 +10,7 @@ import urllib.request
 
 from . import schema
 from .core import atomic_write, config_dir, read_cfg, tilde
+from .toolinfo import RULE_NAMES
 
 
 # User-scope settings.json keys. The entries below are hand-written and carry
@@ -108,27 +109,14 @@ ENV_READONLY = frozenset({
 
 ENV_VARS = sorted((set(ENV_EXTRA) | schema.env_var_names()) - ENV_READONLY)
 
-# Built-in tool names, suggested in the permission-rule pickers: a bare name
-# allows, asks or denies the whole tool (and a bare deny also drops its schema
-# from context — the Insight tab's off switch writes exactly these). The
-# classic set comes from the official tools list; the newer harness tools
-# (Workflow, Artifact, the background-task and agent-team family…) from the
-# CLI itself. A vocabulary, not a gate: the rows stay free text, and
-# tooluse.py's advisor roster is asserted to be a subset in tests.
-TOOL_NAMES = sorted([
-    "Agent", "Artifact", "AskUserQuestion", "Bash", "BashOutput",
-    "CronCreate", "CronDelete", "CronList", "Edit", "EnterPlanMode",
-    "EnterWorktree", "ExitPlanMode", "ExitWorktree", "Glob", "Grep",
-    "KillShell", "ListAgents", "ListConnectors", "ListMcpResourcesTool",
-    "ListPlugins", "ListSkills", "Monitor", "NotebookEdit",
-    "PushNotification", "Read", "ReadMcpResourceTool", "ReadNotifications",
-    "ScheduleWakeup", "SearchMcpRegistry", "SearchPlugins", "SearchSkills",
-    "SendMessage", "SendUserFile", "Skill", "SlashCommand",
-    "SuggestConnectors", "SuggestPluginInstall", "SuggestSkills", "Task",
-    "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
-    "TaskUpdate", "TodoWrite", "ToolSearch", "WebFetch", "WebSearch",
-    "Workflow", "Write",
-])
+# Built-in tool names for the permission-rule pickers: a bare name allows,
+# asks or denies the whole tool, and a bare deny also removes its schema from
+# context — the Insight tab's off switch writes exactly these. The catalog
+# lives in toolinfo.py (data-only, shared with tooluse.py so the two
+# vocabularies cannot drift); RULE_NAMES is every current tool minus
+# EndConversation, whose bare-name deny is documented not to work. A
+# vocabulary, not a gate: the rows stay free text.
+TOOL_NAMES = RULE_NAMES
 
 SETTINGS_RAW = [
     {"key": "model", "type": "combo", "values": MODEL_ALIASES, "cat": "model",
@@ -193,8 +181,10 @@ SETTINGS_RAW = [
     # The three rule pickers suggest a few argument-filter examples (they
     # teach the syntax) and then every bare tool name — the whole-tool form
     # the Insight tab's off switch writes. "mcp__github" covers all of one
-    # server's tools; MCP rule names take no wildcards, so no mcp__x__* here.
-    # Your own servers' mcp__ names join live from LIVE_SUGGEST in app.js.
+    # server's tools without any wildcard; allow-rule tool names take none
+    # (deny and ask additionally accept glob names like mcp__*, per the
+    # permissions doc), so no mcp__x__* is suggested anywhere. Your own
+    # servers' mcp__ names join live from LIVE_SUGGEST in app.js.
     {"key": "permissions.allow", "type": "list", "cat": "permissions",
      "item_values": ["Bash(git diff *)", "Bash(npm run *)", "Read(~/notes/**)",
                      "Edit(docs/**)", "WebFetch(domain:docs.example.com)",

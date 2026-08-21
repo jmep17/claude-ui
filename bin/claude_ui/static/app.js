@@ -3882,9 +3882,12 @@ async function renderInsight(rescan) {
     view.append(el("div.view-head", {
       text: "Every tool Claude Code loads sends its schema with every request, "
         + "used or not. Turn off writes the bare tool name into permissions.deny, "
-        + "which removes the whole tool from new sessions; Turn on removes exactly "
-        + "that entry. Bash(git:*)-style rules with argument filters are never "
-        + "touched. Uses are counted from the transcripts above." }));
+        + "which the docs say removes the tool from context entirely; Turn on "
+        + "removes exactly that entry. Bash(git:*)-style rules with argument "
+        + "filters are never touched. The roster is the official tools "
+        + "reference's full list; tools current sessions expose before the docs "
+        + "list them are badged unverified. Uses are counted from the "
+        + "transcripts above." }));
     if (tl.settings_error)
       view.append(errorAlert(tl.settings_error + " — the on/off states below may be "
         + "stale, and the switch is disabled until settings.json parses.",
@@ -3895,7 +3898,9 @@ async function renderInsight(rescan) {
       el("th", { text: "Uses" }), el("th", { text: "Last used" }), el("th"))));
     const body = el("tbody");
     for (const r of tl.builtin) {
-      const btn = tl.settings_error ? null : mkbtn(
+      // no switch for a legacy name (it no longer loads — nothing to turn
+      // off) or for EndConversation (deny is documented not to remove it)
+      const btn = (tl.settings_error || r.switch === false) ? null : mkbtn(
         "btn-sm",
         r.denied ? "Turn on" : "Turn off",
         async () => {
@@ -3910,12 +3915,21 @@ async function renderInsight(rescan) {
       const tr = el("tr", {},
         el("td.mono", {}, el("span", { text: r.name }),
           r.core ? badge("core", "outline") : null,
+          r.unverified ? el("span", {
+            title: "Not listed in the official tools reference. Current "
+              + "sessions expose it, and absence is not disproof — the deny "
+              + "switch still works.",
+          }, badge("unverified", "outline")) : null,
+          r.legacy ? el("span", {
+            title: "An older tool name seen in your transcripts. Current "
+              + "sessions no longer load it, so there is nothing to turn off.",
+          }, badge("legacy", "outline")) : null,
           r.denied ? badge("off", "destructive") : null),
         el("td.dim", { text: r.blurb || "seen in your transcripts" }),
         el("td.num", { text: String(r.count) }),
         el("td.dim", { text: r.last ? relTime(r.last) : "never" }),
         el("td", { style: { textAlign: "right" } }, btn));
-      if (r.denied) tr.classList.add("dim");
+      if (r.denied || r.legacy) tr.classList.add("dim");
       body.append(tr);
     }
     t.append(body);

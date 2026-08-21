@@ -16,32 +16,7 @@ import re
 
 from .mcp import mcp_state
 from .settings import settings_set, settings_state
-
-
-# The built-in roster, hand-curated: the official docs list the tools but not
-# machine-readably, so this is a floor, not a census — anything else the
-# transcripts mention gets a row of its own with no blurb. `core` marks the
-# tools the whole app-shaped workflow stands on; the UI still offers the
-# switch, behind a confirm.
-BUILTIN_TOOLS = [
-    ("Bash", True, "runs shell commands"),
-    ("Read", True, "reads files"),
-    ("Edit", True, "edits files in place"),
-    ("Write", True, "creates and overwrites files"),
-    ("Glob", True, "finds files by name pattern"),
-    ("Grep", True, "searches file contents"),
-    ("Task", False, "spawns subagents — your agents stop working without it"),
-    ("Skill", False, "invokes skills — skills stop loading without it"),
-    ("SlashCommand", False, "lets the model run your /commands mid-task"),
-    ("TodoWrite", False, "keeps the visible task checklist"),
-    ("WebSearch", False, "searches the web (billed per search)"),
-    ("WebFetch", False, "fetches and reads a URL"),
-    ("NotebookEdit", False, "edits Jupyter notebook cells"),
-    ("AskUserQuestion", False, "asks multiple-choice questions mid-task"),
-    ("ExitPlanMode", False, "ends plan mode — plan mode needs it"),
-    ("BashOutput", False, "reads background shell output"),
-    ("KillShell", False, "kills a background shell"),
-]
+from .toolinfo import LEGACY, NO_DENY, TOOLS
 
 # Tool names as they appear in tool_use blocks: built-ins are CamelCase words,
 # MCP tools mcp__server__tool. No parens, so an argument-filter rule can never
@@ -69,19 +44,27 @@ def tools_report(by_tool):
     st = settings_state()
     denied = _bare_denies(st["data"])
     builtin = []
-    for name, core, blurb in BUILTIN_TOOLS:
-        rec = by_tool.get(name) or {}
-        builtin.append({"name": name, "core": core, "blurb": blurb,
-                        "count": rec.get("count", 0),
+    for t in TOOLS:
+        rec = by_tool.get(t["name"]) or {}
+        builtin.append({**t, "count": rec.get("count", 0),
                         "last": rec.get("last", ""),
-                        "denied": name in denied})
+                        "denied": t["name"] in denied,
+                        # EndConversation: the documented exception to
+                        # bare-name removal, so no switch is offered
+                        "switch": t["name"] not in NO_DENY})
     listed = {r["name"] for r in builtin}
     for name, rec in by_tool.items():
         if name in listed or name.startswith(MCP_PREFIX):
             continue
-        builtin.append({"name": name, "core": False, "blurb": "",
+        # a legacy name gets its label and no switch — it no longer loads,
+        # so there is nothing to turn off; anything else unknown stays
+        # switchable, since the transcripts prove this machine had it
+        legacy = name in LEGACY
+        builtin.append({"name": name, "core": False,
+                        "blurb": LEGACY.get(name, ""),
+                        "unverified": not legacy, "legacy": legacy,
                         "count": rec["count"], "last": rec["last"],
-                        "denied": name in denied})
+                        "denied": name in denied, "switch": not legacy})
     builtin.sort(key=lambda r: (-r["count"], r["name"]))
 
     # mcp__server__tool -> per-server usage, joined against the inventory.
@@ -122,6 +105,9 @@ def tool_set_enabled(name, enabled):
     name = (name or "").strip()
     if not TOOL_NAME_RE.match(name):
         raise ValueError("bad tool name")
+    if not enabled and name in NO_DENY:
+        raise ValueError(f"{name}: Claude Code documents that a deny rule "
+                         "cannot remove this tool, so the switch would lie")
     st = settings_state()
     if st["error"]:
         raise ValueError(f"settings.json: {st['error']} — fix it by hand first")
